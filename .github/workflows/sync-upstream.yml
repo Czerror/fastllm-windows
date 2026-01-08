@@ -1,0 +1,71 @@
+name: Sync Upstream
+
+on:
+  schedule:
+    # 每天 UTC 0:00 (北京时间 8:00) 自动同步
+    - cron: '0 0 * * *'
+  workflow_dispatch:  # 支持手动触发
+
+jobs:
+  sync:
+    name: Sync with upstream
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+        token: ${{ secrets.GITHUB_TOKEN }}
+    
+    - name: Configure Git
+      run: |
+        git config user.name "github-actions[bot]"
+        git config user.email "github-actions[bot]@users.noreply.github.com"
+    
+    - name: Add upstream remote
+      run: |
+        git remote add upstream https://github.com/ztxz16/fastllm.git || true
+        git fetch upstream
+    
+    - name: Sync upstream changes
+      run: |
+        # 获取上游 master 分支的最新提交
+        UPSTREAM_COMMIT=$(git rev-parse upstream/master)
+        LOCAL_UPSTREAM=$(git merge-base HEAD upstream/master 2>/dev/null || echo "none")
+        
+        echo "Upstream latest: $UPSTREAM_COMMIT"
+        echo "Local base: $LOCAL_UPSTREAM"
+        
+        if [ "$UPSTREAM_COMMIT" != "$LOCAL_UPSTREAM" ]; then
+          echo "New changes detected from upstream"
+          
+          # 合并上游更改，保留本地的 .github 目录和 build.ps1
+          git merge upstream/master --no-edit -X theirs || {
+            # 如果有冲突，保留我们的 Windows 特定文件
+            git checkout --ours .github/ build.ps1 README.md 2>/dev/null || true
+            git add .
+            git commit -m "Merge upstream with local Windows customizations" || true
+          }
+          
+          # 确保我们的 Windows 文件没有被覆盖
+          git checkout HEAD -- .github/ build.ps1 README.md 2>/dev/null || true
+          
+          echo "SYNCED=true" >> $GITHUB_ENV
+        else
+          echo "Already up to date with upstream"
+          echo "SYNCED=false" >> $GITHUB_ENV
+        fi
+    
+    - name: Push changes
+      if: env.SYNCED == 'true'
+      run: |
+        git push origin master
+    
+    - name: Create sync summary
+      run: |
+        if [ "$SYNCED" == "true" ]; then
+          echo "✅ Successfully synced with upstream ztxz16/fastllm"
+        else
+          echo "ℹ️ No new changes from upstream"
+        fi

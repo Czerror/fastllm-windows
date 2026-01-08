@@ -1,0 +1,16 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="17.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <ClCompile Include="E:\Documents\GitHub\fastllm-win\third_party\sentencepiece\src\spm_decode_main.cc">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <CustomBuild Include="E:\Documents\GitHub\fastllm-win\third_party\sentencepiece\src\CMakeLists.txt" />
+  </ItemGroup>
+  <ItemGroup>
+    <Filter Include="Source Files">
+      <UniqueIdentifier>{E4FFC2EE-CF81-3DB2-87B0-68E80509F488}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+</Project>

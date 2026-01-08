@@ -1,0 +1,1328 @@
+{
+	"configurations" : 
+	[
+		{
+			"directories" : 
+			[
+				{
+					"build" : ".",
+					"childIndexes" : 
+					[
+						1,
+						4
+					],
+					"hasInstallRule" : true,
+					"jsonFile" : "directory-.-Debug-d0094a50bb2071803777.json",
+					"minimumCMakeVersion" : 
+					{
+						"string" : "3.18"
+					},
+					"projectIndex" : 0,
+					"source" : ".",
+					"targetIndexes" : 
+					[
+						2,
+						3,
+						4,
+						5,
+						6,
+						7,
+						8,
+						9,
+						10,
+						11,
+						19,
+						20,
+						21
+					]
+				},
+				{
+					"build" : "sentencepiece",
+					"childIndexes" : 
+					[
+						2,
+						3
+					],
+					"hasInstallRule" : true,
+					"jsonFile" : "directory-sentencepiece-Debug-eef41623f55ecbce6e00.json",
+					"minimumCMakeVersion" : 
+					{
+						"string" : "3.10"
+					},
+					"parentIndex" : 0,
+					"projectIndex" : 1,
+					"source" : "third_party/sentencepiece",
+					"targetIndexes" : 
+					[
+						1
+					]
+				},
+				{
+					"build" : "sentencepiece/src",
+					"hasInstallRule" : true,
+					"jsonFile" : "directory-sentencepiece.src-Debug-33ab48844d135649b759.json",
+					"minimumCMakeVersion" : 
+					{
+						"string" : "3.10"
+					},
+					"parentIndex" : 1,
+					"projectIndex" : 1,
+					"source" : "third_party/sentencepiece/src",
+					"targetIndexes" : 
+					[
+						12,
+						13,
+						14,
+						15,
+						16,
+						17,
+						18
+					]
+				},
+				{
+					"build" : "sentencepiece/third_party",
+					"jsonFile" : "directory-sentencepiece.third_party-Debug-b30fbdbc9e412b8d4ad1.json",
+					"minimumCMakeVersion" : 
+					{
+						"string" : "3.10"
+					},
+					"parentIndex" : 1,
+					"projectIndex" : 1,
+					"source" : "third_party/sentencepiece/third_party"
+				},
+				{
+					"build" : "third_party/pybind11",
+					"jsonFile" : "directory-third_party.pybind11-Debug-03be8a62d5a38ef2321c.json",
+					"minimumCMakeVersion" : 
+					{
+						"string" : "3.15"
+					},
+					"parentIndex" : 0,
+					"projectIndex" : 2,
+					"source" : "third_party/pybind11",
+					"targetIndexes" : 
+					[
+						0
+					]
+				}
+			],
+			"name" : "Debug",
+			"projects" : 
+			[
+				{
+					"childIndexes" : 
+					[
+						1,
+						2
+					],
+					"directoryIndexes" : 
+					[
+						0
+					],
+					"name" : "fastllm",
+					"targetIndexes" : 
+					[
+						2,
+						3,
+						4,
+						5,
+						6,
+						7,
+						8,
+						9,
+						10,
+						11,
+						19,
+						20,
+						21
+					]
+				},
+				{
+					"directoryIndexes" : 
+					[
+						1,
+						2,
+						3
+					],
+					"name" : "sentencepiece",
+					"parentIndex" : 0,
+					"targetIndexes" : 
+					[
+						1,
+						12,
+						13,
+						14,
+						15,
+						16,
+						17,
+						18
+					]
+				},
+				{
+					"directoryIndexes" : 
+					[
+						4
+					],
+					"name" : "pybind11",
+					"parentIndex" : 0,
+					"targetIndexes" : 
+					[
+						0
+					]
+				}
+			],
+			"targets" : 
+			[
+				{
+					"directoryIndex" : 4,
+					"id" : "ALL_BUILD::@387883c5e57b37b41728",
+					"jsonFile" : "target-ALL_BUILD-Debug-12764a6ecf610a46efc1.json",
+					"name" : "ALL_BUILD",
+					"projectIndex" : 2
+				},
+				{
+					"directoryIndex" : 1,
+					"id" : "ALL_BUILD::@055b0e6e19580003d5b2",
+					"jsonFile" : "target-ALL_BUILD-Debug-e3cbe3db08015c024b82.json",
+					"name" : "ALL_BUILD",
+					"projectIndex" : 1
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "ALL_BUILD::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-ALL_BUILD-Debug-bf116ea24bf582687b4d.json",
+					"name" : "ALL_BUILD",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "FastllmStudio_cli::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-FastllmStudio_cli-Debug-a47bead288aacea1f80d.json",
+					"name" : "FastllmStudio_cli",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "ZERO_CHECK::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-ZERO_CHECK-Debug-9889b727b5d2c77c1d81.json",
+					"name" : "ZERO_CHECK",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "apiserver::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-apiserver-Debug-eea7b4132991f4a1e51e.json",
+					"name" : "apiserver",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "benchmark::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-benchmark-Debug-6ba9b209c47c4d645bc2.json",
+					"name" : "benchmark",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "fastllm::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-fastllm-Debug-04959f7e0ce518c06f73.json",
+					"name" : "fastllm",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "fastllm_tools::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-fastllm_tools-Debug-c349d5527c9c2a5b967d.json",
+					"name" : "fastllm_tools",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "main::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-main-Debug-db31015c55aa076b0742.json",
+					"name" : "main",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "pyfastllm::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-pyfastllm-Debug-4f7a5b52596bbf67ebeb.json",
+					"name" : "pyfastllm",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "quant::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-quant-Debug-d971befcd3d44ac7e7f4.json",
+					"name" : "quant",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 2,
+					"id" : "sentencepiece-static::@b159c8fc43fd0a1d7804",
+					"jsonFile" : "target-sentencepiece-static-Debug-6c603c0a867b79fd5057.json",
+					"name" : "sentencepiece-static",
+					"projectIndex" : 1
+				},
+				{
+					"directoryIndex" : 2,
+					"id" : "sentencepiece_train-static::@b159c8fc43fd0a1d7804",
+					"jsonFile" : "target-sentencepiece_train-static-Debug-4f6cfe914021645a89a1.json",
+					"name" : "sentencepiece_train-static",
+					"projectIndex" : 1
+				},
+				{
+					"directoryIndex" : 2,
+					"id" : "spm_decode::@b159c8fc43fd0a1d7804",
+					"jsonFile" : "target-spm_decode-Debug-6ad2a728cbd93e414ea6.json",
+					"name" : "spm_decode",
+					"projectIndex" : 1
+				},
+				{
+					"directoryIndex" : 2,
+					"id" : "spm_encode::@b159c8fc43fd0a1d7804",
+					"jsonFile" : "target-spm_encode-Debug-a166ed9e863ad8278712.json",
+					"name" : "spm_encode",
+					"projectIndex" : 1
+				},
+				{
+					"directoryIndex" : 2,
+					"id" : "spm_export_vocab::@b159c8fc43fd0a1d7804",
+					"jsonFile" : "target-spm_export_vocab-Debug-ebcf165fc97a5ead4859.json",
+					"name" : "spm_export_vocab",
+					"projectIndex" : 1
+				},
+				{
+					"directoryIndex" : 2,
+					"id" : "spm_normalize::@b159c8fc43fd0a1d7804",
+					"jsonFile" : "target-spm_normalize-Debug-9942d3baaa32056b0c1c.json",
+					"name" : "spm_normalize",
+					"projectIndex" : 1
+				},
+				{
+					"directoryIndex" : 2,
+					"id" : "spm_train::@b159c8fc43fd0a1d7804",
+					"jsonFile" : "target-spm_train-Debug-dc90b2197149ea0a7fc6.json",
+					"name" : "spm_train",
+					"projectIndex" : 1
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "testOps::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-testOps-Debug-ad9d7963aeb388eb6fb5.json",
+					"name" : "testOps",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "testTokenizer::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-testTokenizer-Debug-e76db03aa99782eadd2b.json",
+					"name" : "testTokenizer",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "webui::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-webui-Debug-e308d4e0cfc90da7f06a.json",
+					"name" : "webui",
+					"projectIndex" : 0
+				}
+			]
+		},
+		{
+			"directories" : 
+			[
+				{
+					"build" : ".",
+					"childIndexes" : 
+					[
+						1,
+						4
+					],
+					"hasInstallRule" : true,
+					"jsonFile" : "directory-.-Release-d0094a50bb2071803777.json",
+					"minimumCMakeVersion" : 
+					{
+						"string" : "3.18"
+					},
+					"projectIndex" : 0,
+					"source" : ".",
+					"targetIndexes" : 
+					[
+						2,
+						3,
+						4,
+						5,
+						6,
+						7,
+						8,
+						9,
+						10,
+						11,
+						19,
+						20,
+						21
+					]
+				},
+				{
+					"build" : "sentencepiece",
+					"childIndexes" : 
+					[
+						2,
+						3
+					],
+					"hasInstallRule" : true,
+					"jsonFile" : "directory-sentencepiece-Release-eef41623f55ecbce6e00.json",
+					"minimumCMakeVersion" : 
+					{
+						"string" : "3.10"
+					},
+					"parentIndex" : 0,
+					"projectIndex" : 1,
+					"source" : "third_party/sentencepiece",
+					"targetIndexes" : 
+					[
+						1
+					]
+				},
+				{
+					"build" : "sentencepiece/src",
+					"hasInstallRule" : true,
+					"jsonFile" : "directory-sentencepiece.src-Release-0acd6bc406f05f769905.json",
+					"minimumCMakeVersion" : 
+					{
+						"string" : "3.10"
+					},
+					"parentIndex" : 1,
+					"projectIndex" : 1,
+					"source" : "third_party/sentencepiece/src",
+					"targetIndexes" : 
+					[
+						12,
+						13,
+						14,
+						15,
+						16,
+						17,
+						18
+					]
+				},
+				{
+					"build" : "sentencepiece/third_party",
+					"jsonFile" : "directory-sentencepiece.third_party-Release-b30fbdbc9e412b8d4ad1.json",
+					"minimumCMakeVersion" : 
+					{
+						"string" : "3.10"
+					},
+					"parentIndex" : 1,
+					"projectIndex" : 1,
+					"source" : "third_party/sentencepiece/third_party"
+				},
+				{
+					"build" : "third_party/pybind11",
+					"jsonFile" : "directory-third_party.pybind11-Release-03be8a62d5a38ef2321c.json",
+					"minimumCMakeVersion" : 
+					{
+						"string" : "3.15"
+					},
+					"parentIndex" : 0,
+					"projectIndex" : 2,
+					"source" : "third_party/pybind11",
+					"targetIndexes" : 
+					[
+						0
+					]
+				}
+			],
+			"name" : "Release",
+			"projects" : 
+			[
+				{
+					"childIndexes" : 
+					[
+						1,
+						2
+					],
+					"directoryIndexes" : 
+					[
+						0
+					],
+					"name" : "fastllm",
+					"targetIndexes" : 
+					[
+						2,
+						3,
+						4,
+						5,
+						6,
+						7,
+						8,
+						9,
+						10,
+						11,
+						19,
+						20,
+						21
+					]
+				},
+				{
+					"directoryIndexes" : 
+					[
+						1,
+						2,
+						3
+					],
+					"name" : "sentencepiece",
+					"parentIndex" : 0,
+					"targetIndexes" : 
+					[
+						1,
+						12,
+						13,
+						14,
+						15,
+						16,
+						17,
+						18
+					]
+				},
+				{
+					"directoryIndexes" : 
+					[
+						4
+					],
+					"name" : "pybind11",
+					"parentIndex" : 0,
+					"targetIndexes" : 
+					[
+						0
+					]
+				}
+			],
+			"targets" : 
+			[
+				{
+					"directoryIndex" : 4,
+					"id" : "ALL_BUILD::@387883c5e57b37b41728",
+					"jsonFile" : "target-ALL_BUILD-Release-12764a6ecf610a46efc1.json",
+					"name" : "ALL_BUILD",
+					"projectIndex" : 2
+				},
+				{
+					"directoryIndex" : 1,
+					"id" : "ALL_BUILD::@055b0e6e19580003d5b2",
+					"jsonFile" : "target-ALL_BUILD-Release-e3cbe3db08015c024b82.json",
+					"name" : "ALL_BUILD",
+					"projectIndex" : 1
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "ALL_BUILD::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-ALL_BUILD-Release-bf116ea24bf582687b4d.json",
+					"name" : "ALL_BUILD",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "FastllmStudio_cli::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-FastllmStudio_cli-Release-b1181e8829b7a64b2442.json",
+					"name" : "FastllmStudio_cli",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "ZERO_CHECK::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-ZERO_CHECK-Release-9889b727b5d2c77c1d81.json",
+					"name" : "ZERO_CHECK",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "apiserver::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-apiserver-Release-35a62383d641c01d62e4.json",
+					"name" : "apiserver",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "benchmark::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-benchmark-Release-beeba3af2f7029faa2d6.json",
+					"name" : "benchmark",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "fastllm::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-fastllm-Release-42616c681981020c4607.json",
+					"name" : "fastllm",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "fastllm_tools::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-fastllm_tools-Release-af88650e99c2dbaf853a.json",
+					"name" : "fastllm_tools",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "main::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-main-Release-522031792b1894f4cc67.json",
+					"name" : "main",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "pyfastllm::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-pyfastllm-Release-3b19372f303205756258.json",
+					"name" : "pyfastllm",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "quant::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-quant-Release-d36619b7ed7238340d13.json",
+					"name" : "quant",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 2,
+					"id" : "sentencepiece-static::@b159c8fc43fd0a1d7804",
+					"jsonFile" : "target-sentencepiece-static-Release-054bb0f34ad657e24be2.json",
+					"name" : "sentencepiece-static",
+					"projectIndex" : 1
+				},
+				{
+					"directoryIndex" : 2,
+					"id" : "sentencepiece_train-static::@b159c8fc43fd0a1d7804",
+					"jsonFile" : "target-sentencepiece_train-static-Release-5aa9fcdfbeed0449c5da.json",
+					"name" : "sentencepiece_train-static",
+					"projectIndex" : 1
+				},
+				{
+					"directoryIndex" : 2,
+					"id" : "spm_decode::@b159c8fc43fd0a1d7804",
+					"jsonFile" : "target-spm_decode-Release-fbd22769673adffd1351.json",
+					"name" : "spm_decode",
+					"projectIndex" : 1
+				},
+				{
+					"directoryIndex" : 2,
+					"id" : "spm_encode::@b159c8fc43fd0a1d7804",
+					"jsonFile" : "target-spm_encode-Release-57d0ba0316739cd63ae5.json",
+					"name" : "spm_encode",
+					"projectIndex" : 1
+				},
+				{
+					"directoryIndex" : 2,
+					"id" : "spm_export_vocab::@b159c8fc43fd0a1d7804",
+					"jsonFile" : "target-spm_export_vocab-Release-f78e988e078009edf131.json",
+					"name" : "spm_export_vocab",
+					"projectIndex" : 1
+				},
+				{
+					"directoryIndex" : 2,
+					"id" : "spm_normalize::@b159c8fc43fd0a1d7804",
+					"jsonFile" : "target-spm_normalize-Release-09854139e12da5738c77.json",
+					"name" : "spm_normalize",
+					"projectIndex" : 1
+				},
+				{
+					"directoryIndex" : 2,
+					"id" : "spm_train::@b159c8fc43fd0a1d7804",
+					"jsonFile" : "target-spm_train-Release-84757a551054493dffd5.json",
+					"name" : "spm_train",
+					"projectIndex" : 1
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "testOps::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-testOps-Release-4df49a666f3214f3799d.json",
+					"name" : "testOps",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "testTokenizer::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-testTokenizer-Release-23ae22dfbe4677032f54.json",
+					"name" : "testTokenizer",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "webui::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-webui-Release-39b31390360fd6d9697e.json",
+					"name" : "webui",
+					"projectIndex" : 0
+				}
+			]
+		},
+		{
+			"directories" : 
+			[
+				{
+					"build" : ".",
+					"childIndexes" : 
+					[
+						1,
+						4
+					],
+					"hasInstallRule" : true,
+					"jsonFile" : "directory-.-MinSizeRel-d0094a50bb2071803777.json",
+					"minimumCMakeVersion" : 
+					{
+						"string" : "3.18"
+					},
+					"projectIndex" : 0,
+					"source" : ".",
+					"targetIndexes" : 
+					[
+						2,
+						3,
+						4,
+						5,
+						6,
+						7,
+						8,
+						9,
+						10,
+						11,
+						19,
+						20,
+						21
+					]
+				},
+				{
+					"build" : "sentencepiece",
+					"childIndexes" : 
+					[
+						2,
+						3
+					],
+					"hasInstallRule" : true,
+					"jsonFile" : "directory-sentencepiece-MinSizeRel-eef41623f55ecbce6e00.json",
+					"minimumCMakeVersion" : 
+					{
+						"string" : "3.10"
+					},
+					"parentIndex" : 0,
+					"projectIndex" : 1,
+					"source" : "third_party/sentencepiece",
+					"targetIndexes" : 
+					[
+						1
+					]
+				},
+				{
+					"build" : "sentencepiece/src",
+					"hasInstallRule" : true,
+					"jsonFile" : "directory-sentencepiece.src-MinSizeRel-997ea008709bbb58db55.json",
+					"minimumCMakeVersion" : 
+					{
+						"string" : "3.10"
+					},
+					"parentIndex" : 1,
+					"projectIndex" : 1,
+					"source" : "third_party/sentencepiece/src",
+					"targetIndexes" : 
+					[
+						12,
+						13,
+						14,
+						15,
+						16,
+						17,
+						18
+					]
+				},
+				{
+					"build" : "sentencepiece/third_party",
+					"jsonFile" : "directory-sentencepiece.third_party-MinSizeRel-b30fbdbc9e412b8d4ad1.json",
+					"minimumCMakeVersion" : 
+					{
+						"string" : "3.10"
+					},
+					"parentIndex" : 1,
+					"projectIndex" : 1,
+					"source" : "third_party/sentencepiece/third_party"
+				},
+				{
+					"build" : "third_party/pybind11",
+					"jsonFile" : "directory-third_party.pybind11-MinSizeRel-03be8a62d5a38ef2321c.json",
+					"minimumCMakeVersion" : 
+					{
+						"string" : "3.15"
+					},
+					"parentIndex" : 0,
+					"projectIndex" : 2,
+					"source" : "third_party/pybind11",
+					"targetIndexes" : 
+					[
+						0
+					]
+				}
+			],
+			"name" : "MinSizeRel",
+			"projects" : 
+			[
+				{
+					"childIndexes" : 
+					[
+						1,
+						2
+					],
+					"directoryIndexes" : 
+					[
+						0
+					],
+					"name" : "fastllm",
+					"targetIndexes" : 
+					[
+						2,
+						3,
+						4,
+						5,
+						6,
+						7,
+						8,
+						9,
+						10,
+						11,
+						19,
+						20,
+						21
+					]
+				},
+				{
+					"directoryIndexes" : 
+					[
+						1,
+						2,
+						3
+					],
+					"name" : "sentencepiece",
+					"parentIndex" : 0,
+					"targetIndexes" : 
+					[
+						1,
+						12,
+						13,
+						14,
+						15,
+						16,
+						17,
+						18
+					]
+				},
+				{
+					"directoryIndexes" : 
+					[
+						4
+					],
+					"name" : "pybind11",
+					"parentIndex" : 0,
+					"targetIndexes" : 
+					[
+						0
+					]
+				}
+			],
+			"targets" : 
+			[
+				{
+					"directoryIndex" : 4,
+					"id" : "ALL_BUILD::@387883c5e57b37b41728",
+					"jsonFile" : "target-ALL_BUILD-MinSizeRel-12764a6ecf610a46efc1.json",
+					"name" : "ALL_BUILD",
+					"projectIndex" : 2
+				},
+				{
+					"directoryIndex" : 1,
+					"id" : "ALL_BUILD::@055b0e6e19580003d5b2",
+					"jsonFile" : "target-ALL_BUILD-MinSizeRel-e3cbe3db08015c024b82.json",
+					"name" : "ALL_BUILD",
+					"projectIndex" : 1
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "ALL_BUILD::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-ALL_BUILD-MinSizeRel-bf116ea24bf582687b4d.json",
+					"name" : "ALL_BUILD",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "FastllmStudio_cli::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-FastllmStudio_cli-MinSizeRel-ad0b1afeb0d6fc11eda3.json",
+					"name" : "FastllmStudio_cli",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "ZERO_CHECK::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-ZERO_CHECK-MinSizeRel-9889b727b5d2c77c1d81.json",
+					"name" : "ZERO_CHECK",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "apiserver::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-apiserver-MinSizeRel-f246e64454a94159b4d9.json",
+					"name" : "apiserver",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "benchmark::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-benchmark-MinSizeRel-b390834c24323cd1c627.json",
+					"name" : "benchmark",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "fastllm::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-fastllm-MinSizeRel-d658aa000df807de1df8.json",
+					"name" : "fastllm",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "fastllm_tools::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-fastllm_tools-MinSizeRel-1d09cf04ee939d2dda67.json",
+					"name" : "fastllm_tools",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "main::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-main-MinSizeRel-7ea8c8144551d879b266.json",
+					"name" : "main",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "pyfastllm::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-pyfastllm-MinSizeRel-dfe1e5fb17c94c0adcb5.json",
+					"name" : "pyfastllm",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "quant::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-quant-MinSizeRel-6740299b0aeabb937f39.json",
+					"name" : "quant",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 2,
+					"id" : "sentencepiece-static::@b159c8fc43fd0a1d7804",
+					"jsonFile" : "target-sentencepiece-static-MinSizeRel-4a6b72f2049e22f10d8d.json",
+					"name" : "sentencepiece-static",
+					"projectIndex" : 1
+				},
+				{
+					"directoryIndex" : 2,
+					"id" : "sentencepiece_train-static::@b159c8fc43fd0a1d7804",
+					"jsonFile" : "target-sentencepiece_train-static-MinSizeRel-989f05dfa15dd0c1b70d.json",
+					"name" : "sentencepiece_train-static",
+					"projectIndex" : 1
+				},
+				{
+					"directoryIndex" : 2,
+					"id" : "spm_decode::@b159c8fc43fd0a1d7804",
+					"jsonFile" : "target-spm_decode-MinSizeRel-6c7bccf05ea2185066f6.json",
+					"name" : "spm_decode",
+					"projectIndex" : 1
+				},
+				{
+					"directoryIndex" : 2,
+					"id" : "spm_encode::@b159c8fc43fd0a1d7804",
+					"jsonFile" : "target-spm_encode-MinSizeRel-a32d88f8547f8612fd96.json",
+					"name" : "spm_encode",
+					"projectIndex" : 1
+				},
+				{
+					"directoryIndex" : 2,
+					"id" : "spm_export_vocab::@b159c8fc43fd0a1d7804",
+					"jsonFile" : "target-spm_export_vocab-MinSizeRel-48ee6d35f5c0bef7d3fd.json",
+					"name" : "spm_export_vocab",
+					"projectIndex" : 1
+				},
+				{
+					"directoryIndex" : 2,
+					"id" : "spm_normalize::@b159c8fc43fd0a1d7804",
+					"jsonFile" : "target-spm_normalize-MinSizeRel-5d245c2d522037db4cf7.json",
+					"name" : "spm_normalize",
+					"projectIndex" : 1
+				},
+				{
+					"directoryIndex" : 2,
+					"id" : "spm_train::@b159c8fc43fd0a1d7804",
+					"jsonFile" : "target-spm_train-MinSizeRel-5958234954c5b09aa35d.json",
+					"name" : "spm_train",
+					"projectIndex" : 1
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "testOps::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-testOps-MinSizeRel-e92c1c946228a6e70d2f.json",
+					"name" : "testOps",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "testTokenizer::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-testTokenizer-MinSizeRel-41752b4165fa955e78d0.json",
+					"name" : "testTokenizer",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "webui::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-webui-MinSizeRel-6713d1bf97cbf270348b.json",
+					"name" : "webui",
+					"projectIndex" : 0
+				}
+			]
+		},
+		{
+			"directories" : 
+			[
+				{
+					"build" : ".",
+					"childIndexes" : 
+					[
+						1,
+						4
+					],
+					"hasInstallRule" : true,
+					"jsonFile" : "directory-.-RelWithDebInfo-d0094a50bb2071803777.json",
+					"minimumCMakeVersion" : 
+					{
+						"string" : "3.18"
+					},
+					"projectIndex" : 0,
+					"source" : ".",
+					"targetIndexes" : 
+					[
+						2,
+						3,
+						4,
+						5,
+						6,
+						7,
+						8,
+						9,
+						10,
+						11,
+						19,
+						20,
+						21
+					]
+				},
+				{
+					"build" : "sentencepiece",
+					"childIndexes" : 
+					[
+						2,
+						3
+					],
+					"hasInstallRule" : true,
+					"jsonFile" : "directory-sentencepiece-RelWithDebInfo-eef41623f55ecbce6e00.json",
+					"minimumCMakeVersion" : 
+					{
+						"string" : "3.10"
+					},
+					"parentIndex" : 0,
+					"projectIndex" : 1,
+					"source" : "third_party/sentencepiece",
+					"targetIndexes" : 
+					[
+						1
+					]
+				},
+				{
+					"build" : "sentencepiece/src",
+					"hasInstallRule" : true,
+					"jsonFile" : "directory-sentencepiece.src-RelWithDebInfo-3274e72ca387ca5670c4.json",
+					"minimumCMakeVersion" : 
+					{
+						"string" : "3.10"
+					},
+					"parentIndex" : 1,
+					"projectIndex" : 1,
+					"source" : "third_party/sentencepiece/src",
+					"targetIndexes" : 
+					[
+						12,
+						13,
+						14,
+						15,
+						16,
+						17,
+						18
+					]
+				},
+				{
+					"build" : "sentencepiece/third_party",
+					"jsonFile" : "directory-sentencepiece.third_party-RelWithDebInfo-b30fbdbc9e412b8d4ad1.json",
+					"minimumCMakeVersion" : 
+					{
+						"string" : "3.10"
+					},
+					"parentIndex" : 1,
+					"projectIndex" : 1,
+					"source" : "third_party/sentencepiece/third_party"
+				},
+				{
+					"build" : "third_party/pybind11",
+					"jsonFile" : "directory-third_party.pybind11-RelWithDebInfo-03be8a62d5a38ef2321c.json",
+					"minimumCMakeVersion" : 
+					{
+						"string" : "3.15"
+					},
+					"parentIndex" : 0,
+					"projectIndex" : 2,
+					"source" : "third_party/pybind11",
+					"targetIndexes" : 
+					[
+						0
+					]
+				}
+			],
+			"name" : "RelWithDebInfo",
+			"projects" : 
+			[
+				{
+					"childIndexes" : 
+					[
+						1,
+						2
+					],
+					"directoryIndexes" : 
+					[
+						0
+					],
+					"name" : "fastllm",
+					"targetIndexes" : 
+					[
+						2,
+						3,
+						4,
+						5,
+						6,
+						7,
+						8,
+						9,
+						10,
+						11,
+						19,
+						20,
+						21
+					]
+				},
+				{
+					"directoryIndexes" : 
+					[
+						1,
+						2,
+						3
+					],
+					"name" : "sentencepiece",
+					"parentIndex" : 0,
+					"targetIndexes" : 
+					[
+						1,
+						12,
+						13,
+						14,
+						15,
+						16,
+						17,
+						18
+					]
+				},
+				{
+					"directoryIndexes" : 
+					[
+						4
+					],
+					"name" : "pybind11",
+					"parentIndex" : 0,
+					"targetIndexes" : 
+					[
+						0
+					]
+				}
+			],
+			"targets" : 
+			[
+				{
+					"directoryIndex" : 4,
+					"id" : "ALL_BUILD::@387883c5e57b37b41728",
+					"jsonFile" : "target-ALL_BUILD-RelWithDebInfo-12764a6ecf610a46efc1.json",
+					"name" : "ALL_BUILD",
+					"projectIndex" : 2
+				},
+				{
+					"directoryIndex" : 1,
+					"id" : "ALL_BUILD::@055b0e6e19580003d5b2",
+					"jsonFile" : "target-ALL_BUILD-RelWithDebInfo-e3cbe3db08015c024b82.json",
+					"name" : "ALL_BUILD",
+					"projectIndex" : 1
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "ALL_BUILD::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-ALL_BUILD-RelWithDebInfo-bf116ea24bf582687b4d.json",
+					"name" : "ALL_BUILD",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "FastllmStudio_cli::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-FastllmStudio_cli-RelWithDebInfo-54401a2c55ba5c9f8918.json",
+					"name" : "FastllmStudio_cli",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "ZERO_CHECK::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-ZERO_CHECK-RelWithDebInfo-9889b727b5d2c77c1d81.json",
+					"name" : "ZERO_CHECK",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "apiserver::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-apiserver-RelWithDebInfo-2c849cfa483a88b3c6d3.json",
+					"name" : "apiserver",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "benchmark::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-benchmark-RelWithDebInfo-8cb518f95c2c1e4fbe0b.json",
+					"name" : "benchmark",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "fastllm::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-fastllm-RelWithDebInfo-9ece84b7db9479bcbb7b.json",
+					"name" : "fastllm",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "fastllm_tools::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-fastllm_tools-RelWithDebInfo-05569278a8029f96b289.json",
+					"name" : "fastllm_tools",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "main::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-main-RelWithDebInfo-764e41751b3189188f5e.json",
+					"name" : "main",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "pyfastllm::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-pyfastllm-RelWithDebInfo-c2e7a1a657e2a5ec6677.json",
+					"name" : "pyfastllm",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "quant::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-quant-RelWithDebInfo-481b95de836ee51697ad.json",
+					"name" : "quant",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 2,
+					"id" : "sentencepiece-static::@b159c8fc43fd0a1d7804",
+					"jsonFile" : "target-sentencepiece-static-RelWithDebInfo-84e0e40d6dd83ce5da75.json",
+					"name" : "sentencepiece-static",
+					"projectIndex" : 1
+				},
+				{
+					"directoryIndex" : 2,
+					"id" : "sentencepiece_train-static::@b159c8fc43fd0a1d7804",
+					"jsonFile" : "target-sentencepiece_train-static-RelWithDebInfo-bdbcaf49a5035523de63.json",
+					"name" : "sentencepiece_train-static",
+					"projectIndex" : 1
+				},
+				{
+					"directoryIndex" : 2,
+					"id" : "spm_decode::@b159c8fc43fd0a1d7804",
+					"jsonFile" : "target-spm_decode-RelWithDebInfo-de458b1a9c76346d74ed.json",
+					"name" : "spm_decode",
+					"projectIndex" : 1
+				},
+				{
+					"directoryIndex" : 2,
+					"id" : "spm_encode::@b159c8fc43fd0a1d7804",
+					"jsonFile" : "target-spm_encode-RelWithDebInfo-6a427a3efa944cf5fc36.json",
+					"name" : "spm_encode",
+					"projectIndex" : 1
+				},
+				{
+					"directoryIndex" : 2,
+					"id" : "spm_export_vocab::@b159c8fc43fd0a1d7804",
+					"jsonFile" : "target-spm_export_vocab-RelWithDebInfo-54ebd86127cfcee83d18.json",
+					"name" : "spm_export_vocab",
+					"projectIndex" : 1
+				},
+				{
+					"directoryIndex" : 2,
+					"id" : "spm_normalize::@b159c8fc43fd0a1d7804",
+					"jsonFile" : "target-spm_normalize-RelWithDebInfo-65d754ae3a83a3c493d5.json",
+					"name" : "spm_normalize",
+					"projectIndex" : 1
+				},
+				{
+					"directoryIndex" : 2,
+					"id" : "spm_train::@b159c8fc43fd0a1d7804",
+					"jsonFile" : "target-spm_train-RelWithDebInfo-3a32d161d941399764a1.json",
+					"name" : "spm_train",
+					"projectIndex" : 1
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "testOps::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-testOps-RelWithDebInfo-144d2cc7f713b24e43df.json",
+					"name" : "testOps",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "testTokenizer::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-testTokenizer-RelWithDebInfo-c251d0b44d39ab7ad498.json",
+					"name" : "testTokenizer",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "webui::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-webui-RelWithDebInfo-d2abd6dea0cf42e6d77a.json",
+					"name" : "webui",
+					"projectIndex" : 0
+				}
+			]
+		}
+	],
+	"kind" : "codemodel",
+	"paths" : 
+	{
+		"build" : "E:/Documents/GitHub/fastllm-win/build",
+		"source" : "E:/Documents/GitHub/fastllm-win"
+	},
+	"version" : 
+	{
+		"major" : 2,
+		"minor" : 8
+	}
+}

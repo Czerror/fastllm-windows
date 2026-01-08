@@ -1,0 +1,134 @@
+{
+	"backtraceGraph" : 
+	{
+		"commands" : 
+		[
+			"install"
+		],
+		"files" : 
+		[
+			"third_party/sentencepiece/src/CMakeLists.txt"
+		],
+		"nodes" : 
+		[
+			{
+				"file" : 0
+			},
+			{
+				"command" : 0,
+				"file" : 0,
+				"line" : 295,
+				"parent" : 0
+			},
+			{
+				"command" : 0,
+				"file" : 0,
+				"line" : 301,
+				"parent" : 0
+			}
+		]
+	},
+	"installers" : 
+	[
+		{
+			"backtrace" : 1,
+			"component" : "Unspecified",
+			"destination" : "lib",
+			"paths" : 
+			[
+				"sentencepiece/src/Debug/sentencepiece.lib"
+			],
+			"targetId" : "sentencepiece-static::@b159c8fc43fd0a1d7804",
+			"targetIndex" : 12,
+			"type" : "target"
+		},
+		{
+			"backtrace" : 1,
+			"component" : "Unspecified",
+			"destination" : "lib",
+			"paths" : 
+			[
+				"sentencepiece/src/Debug/sentencepiece_train.lib"
+			],
+			"targetId" : "sentencepiece_train-static::@b159c8fc43fd0a1d7804",
+			"targetIndex" : 13,
+			"type" : "target"
+		},
+		{
+			"backtrace" : 1,
+			"component" : "Unspecified",
+			"destination" : "bin",
+			"paths" : 
+			[
+				"sentencepiece/src/Debug/spm_encode.exe"
+			],
+			"targetId" : "spm_encode::@b159c8fc43fd0a1d7804",
+			"targetIndex" : 15,
+			"type" : "target"
+		},
+		{
+			"backtrace" : 1,
+			"component" : "Unspecified",
+			"destination" : "bin",
+			"paths" : 
+			[
+				"sentencepiece/src/Debug/spm_decode.exe"
+			],
+			"targetId" : "spm_decode::@b159c8fc43fd0a1d7804",
+			"targetIndex" : 14,
+			"type" : "target"
+		},
+		{
+			"backtrace" : 1,
+			"component" : "Unspecified",
+			"destination" : "bin",
+			"paths" : 
+			[
+				"sentencepiece/src/Debug/spm_normalize.exe"
+			],
+			"targetId" : "spm_normalize::@b159c8fc43fd0a1d7804",
+			"targetIndex" : 17,
+			"type" : "target"
+		},
+		{
+			"backtrace" : 1,
+			"component" : "Unspecified",
+			"destination" : "bin",
+			"paths" : 
+			[
+				"sentencepiece/src/Debug/spm_train.exe"
+			],
+			"targetId" : "spm_train::@b159c8fc43fd0a1d7804",
+			"targetIndex" : 18,
+			"type" : "target"
+		},
+		{
+			"backtrace" : 1,
+			"component" : "Unspecified",
+			"destination" : "bin",
+			"paths" : 
+			[
+				"sentencepiece/src/Debug/spm_export_vocab.exe"
+			],
+			"targetId" : "spm_export_vocab::@b159c8fc43fd0a1d7804",
+			"targetIndex" : 16,
+			"type" : "target"
+		},
+		{
+			"backtrace" : 2,
+			"component" : "Unspecified",
+			"destination" : "include",
+			"paths" : 
+			[
+				"third_party/sentencepiece/src/sentencepiece_trainer.h",
+				"third_party/sentencepiece/src/sentencepiece_processor.h"
+			],
+			"type" : "file"
+		}
+	],
+	"paths" : 
+	{
+		"build" : "sentencepiece/src",
+		"source" : "third_party/sentencepiece/src"
+	}
+}

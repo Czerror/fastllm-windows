@@ -1,0 +1,845 @@
+{
+	"artifacts" : 
+	[
+		{
+			"path" : "fastllm.dir/MinSizeRel/fastllm.obj"
+		},
+		{
+			"path" : "fastllm.dir/MinSizeRel/device.obj"
+		},
+		{
+			"path" : "fastllm.dir/MinSizeRel/model.obj"
+		},
+		{
+			"path" : "fastllm.dir/MinSizeRel/executor.obj"
+		},
+		{
+			"path" : "fastllm.dir/MinSizeRel/template.obj"
+		},
+		{
+			"path" : "fastllm.dir/MinSizeRel/graph.obj"
+		},
+		{
+			"path" : "fastllm.dir/MinSizeRel/tokenizer.obj"
+		},
+		{
+			"path" : "fastllm.dir/MinSizeRel/cpudevice.obj"
+		},
+		{
+			"path" : "fastllm.dir/MinSizeRel/cpudevicebatch.obj"
+		},
+		{
+			"path" : "fastllm.dir/MinSizeRel/graphllm.obj"
+		},
+		{
+			"path" : "fastllm.dir/MinSizeRel/chatglm.obj"
+		},
+		{
+			"path" : "fastllm.dir/MinSizeRel/moss.obj"
+		},
+		{
+			"path" : "fastllm.dir/MinSizeRel/llama.obj"
+		},
+		{
+			"path" : "fastllm.dir/MinSizeRel/qwen.obj"
+		},
+		{
+			"path" : "fastllm.dir/MinSizeRel/basellm.obj"
+		},
+		{
+			"path" : "fastllm.dir/MinSizeRel/glm.obj"
+		},
+		{
+			"path" : "fastllm.dir/MinSizeRel/minicpm.obj"
+		},
+		{
+			"path" : "fastllm.dir/MinSizeRel/src/models/minicpm3.cpp.obj"
+		},
+		{
+			"path" : "fastllm.dir/MinSizeRel/internlm2.obj"
+		},
+		{
+			"path" : "fastllm.dir/MinSizeRel/bert.obj"
+		},
+		{
+			"path" : "fastllm.dir/MinSizeRel/moe.obj"
+		},
+		{
+			"path" : "fastllm.dir/MinSizeRel/deepseekv2.obj"
+		},
+		{
+			"path" : "fastllm.dir/MinSizeRel/src/models/phi3.cpp.obj"
+		},
+		{
+			"path" : "fastllm.dir/MinSizeRel/xlmroberta.obj"
+		},
+		{
+			"path" : "fastllm.dir/MinSizeRel/cogvlm.obj"
+		},
+		{
+			"path" : "fastllm.dir/MinSizeRel/qwen3.obj"
+		},
+		{
+			"path" : "fastllm.dir/MinSizeRel/qwen3_moe.obj"
+		},
+		{
+			"path" : "fastllm.dir/MinSizeRel/qwen3_next.obj"
+		},
+		{
+			"path" : "fastllm.dir/MinSizeRel/minimax.obj"
+		},
+		{
+			"path" : "fastllm.dir/MinSizeRel/hunyuan.obj"
+		},
+		{
+			"path" : "fastllm.dir/MinSizeRel/ernie4_5.obj"
+		},
+		{
+			"path" : "fastllm.dir/MinSizeRel/pangu_moe.obj"
+		},
+		{
+			"path" : "fastllm.dir/MinSizeRel/glm4_moe.obj"
+		},
+		{
+			"path" : "fastllm.dir/MinSizeRel/gpt_oss.obj"
+		},
+		{
+			"path" : "fastllm.dir/MinSizeRel/json11.obj"
+		},
+		{
+			"path" : "fastllm.dir/MinSizeRel/gguf.obj"
+		},
+		{
+			"path" : "fastllm.dir/MinSizeRel/ggml-quant.obj"
+		},
+		{
+			"path" : "fastllm.dir/MinSizeRel/ggml-iqk.obj"
+		},
+		{
+			"path" : "fastllm.dir/MinSizeRel/ggml-dequantize.obj"
+		},
+		{
+			"path" : "fastllm.dir/MinSizeRel/gguf-adapter.obj"
+		},
+		{
+			"path" : "fastllm.dir/MinSizeRel/amx.obj"
+		},
+		{
+			"path" : "fastllm.dir/MinSizeRel/avx2.obj"
+		},
+		{
+			"path" : "fastllm.dir/MinSizeRel/avx512bf16.obj"
+		},
+		{
+			"path" : "fastllm.dir/MinSizeRel/avx512f.obj"
+		},
+		{
+			"path" : "fastllm.dir/MinSizeRel/avx512vnni.obj"
+		},
+		{
+			"path" : "fastllm.dir/MinSizeRel/linear.obj"
+		},
+		{
+			"path" : "fastllm.dir/MinSizeRel/fastllmjson.obj"
+		},
+		{
+			"path" : "fastllm.dir/MinSizeRel/gemma2.obj"
+		},
+		{
+			"path" : "fastllm.dir/MinSizeRel/src/models/graph/minicpm3.cpp.obj"
+		},
+		{
+			"path" : "fastllm.dir/MinSizeRel/src/models/graph/phi3.cpp.obj"
+		},
+		{
+			"path" : "fastllm.dir/MinSizeRel/qwen2.obj"
+		},
+		{
+			"path" : "fastllm.dir/MinSizeRel/telechat.obj"
+		}
+	],
+	"backtrace" : 1,
+	"backtraceGraph" : 
+	{
+		"commands" : 
+		[
+			"add_library",
+			"target_link_libraries",
+			"add_compile_definitions",
+			"include_directories",
+			"set_target_properties"
+		],
+		"files" : 
+		[
+			"CMakeLists.txt"
+		],
+		"nodes" : 
+		[
+			{
+				"file" : 0
+			},
+			{
+				"command" : 0,
+				"file" : 0,
+				"line" : 491,
+				"parent" : 0
+			},
+			{
+				"command" : 1,
+				"file" : 0,
+				"line" : 499,
+				"parent" : 0
+			},
+			{
+				"command" : 2,
+				"file" : 0,
+				"line" : 283,
+				"parent" : 0
+			},
+			{
+				"command" : 3,
+				"file" : 0,
+				"line" : 260,
+				"parent" : 0
+			},
+			{
+				"command" : 3,
+				"file" : 0,
+				"line" : 261,
+				"parent" : 0
+			},
+			{
+				"command" : 3,
+				"file" : 0,
+				"line" : 262,
+				"parent" : 0
+			},
+			{
+				"command" : 3,
+				"file" : 0,
+				"line" : 263,
+				"parent" : 0
+			},
+			{
+				"command" : 3,
+				"file" : 0,
+				"line" : 264,
+				"parent" : 0
+			},
+			{
+				"command" : 3,
+				"file" : 0,
+				"line" : 265,
+				"parent" : 0
+			},
+			{
+				"command" : 3,
+				"file" : 0,
+				"line" : 313,
+				"parent" : 0
+			},
+			{
+				"command" : 3,
+				"file" : 0,
+				"line" : 314,
+				"parent" : 0
+			},
+			{
+				"command" : 3,
+				"file" : 0,
+				"line" : 476,
+				"parent" : 0
+			},
+			{
+				"command" : 4,
+				"file" : 0,
+				"line" : 498,
+				"parent" : 0
+			}
+		]
+	},
+	"compileGroups" : 
+	[
+		{
+			"compileCommandFragments" : 
+			[
+				{
+					"fragment" : "/DWIN32 /D_WINDOWS /EHsc -DNOMINMAX /std:c++20 /arch:AVX2 /source-charset:utf-8 /bigobj /MP2 /D_CRT_SECURE_NO_WARNINGS /wd4244 /wd4267 /wd4190 /wd4996 /O1 /Ob1 /DNDEBUG -std:c++20 -MD"
+				}
+			],
+			"defines" : 
+			[
+				{
+					"backtrace" : 3,
+					"define" : "USE_SENTENCEPIECE"
+				}
+			],
+			"includes" : 
+			[
+				{
+					"backtrace" : 4,
+					"path" : "E:/Documents/GitHub/fastllm-win/include"
+				},
+				{
+					"backtrace" : 5,
+					"path" : "E:/Documents/GitHub/fastllm-win/include/utils"
+				},
+				{
+					"backtrace" : 6,
+					"path" : "E:/Documents/GitHub/fastllm-win/include/models"
+				},
+				{
+					"backtrace" : 7,
+					"path" : "E:/Documents/GitHub/fastllm-win/include/devices/cpu"
+				},
+				{
+					"backtrace" : 8,
+					"path" : "E:/Documents/GitHub/fastllm-win/third_party/json11"
+				},
+				{
+					"backtrace" : 9,
+					"path" : "E:/Documents/GitHub/fastllm-win/third_party/gguf"
+				},
+				{
+					"backtrace" : 10,
+					"path" : "E:/Documents/GitHub/fastllm-win/third_party/sentencepiece/src"
+				},
+				{
+					"backtrace" : 11,
+					"path" : "E:/Documents/GitHub/fastllm-win/build/sentencepiece"
+				},
+				{
+					"backtrace" : 12,
+					"path" : "E:/Documents/GitHub/fastllm-win/third_party/pybind11/include"
+				}
+			],
+			"language" : "CXX",
+			"languageStandard" : 
+			{
+				"backtraces" : 
+				[
+					13
+				],
+				"standard" : "20"
+			},
+			"sourceIndexes" : 
+			[
+				0,
+				1,
+				2,
+				3,
+				4,
+				5,
+				6,
+				7,
+				8,
+				9,
+				10,
+				11,
+				12,
+				13,
+				14,
+				15,
+				16,
+				17,
+				18,
+				19,
+				20,
+				21,
+				22,
+				23,
+				24,
+				25,
+				26,
+				27,
+				28,
+				29,
+				30,
+				31,
+				32,
+				33,
+				34,
+				35,
+				36,
+				37,
+				38,
+				39,
+				41,
+				45,
+				46,
+				47,
+				48,
+				49,
+				50,
+				51
+			]
+		},
+		{
+			"compileCommandFragments" : 
+			[
+				{
+					"fragment" : "/DWIN32 /D_WINDOWS /EHsc -DNOMINMAX /std:c++20 /arch:AVX2 /source-charset:utf-8 /bigobj /MP2 /D_CRT_SECURE_NO_WARNINGS /wd4244 /wd4267 /wd4190 /wd4996 /O1 /Ob1 /DNDEBUG -std:c++20 -MD"
+				},
+				{
+					"fragment" : "/arch:AVX512"
+				}
+			],
+			"defines" : 
+			[
+				{
+					"backtrace" : 3,
+					"define" : "USE_SENTENCEPIECE"
+				}
+			],
+			"includes" : 
+			[
+				{
+					"backtrace" : 4,
+					"path" : "E:/Documents/GitHub/fastllm-win/include"
+				},
+				{
+					"backtrace" : 5,
+					"path" : "E:/Documents/GitHub/fastllm-win/include/utils"
+				},
+				{
+					"backtrace" : 6,
+					"path" : "E:/Documents/GitHub/fastllm-win/include/models"
+				},
+				{
+					"backtrace" : 7,
+					"path" : "E:/Documents/GitHub/fastllm-win/include/devices/cpu"
+				},
+				{
+					"backtrace" : 8,
+					"path" : "E:/Documents/GitHub/fastllm-win/third_party/json11"
+				},
+				{
+					"backtrace" : 9,
+					"path" : "E:/Documents/GitHub/fastllm-win/third_party/gguf"
+				},
+				{
+					"backtrace" : 10,
+					"path" : "E:/Documents/GitHub/fastllm-win/third_party/sentencepiece/src"
+				},
+				{
+					"backtrace" : 11,
+					"path" : "E:/Documents/GitHub/fastllm-win/build/sentencepiece"
+				},
+				{
+					"backtrace" : 12,
+					"path" : "E:/Documents/GitHub/fastllm-win/third_party/pybind11/include"
+				}
+			],
+			"language" : "CXX",
+			"languageStandard" : 
+			{
+				"backtraces" : 
+				[
+					13
+				],
+				"standard" : "20"
+			},
+			"sourceIndexes" : 
+			[
+				40,
+				42,
+				43,
+				44
+			]
+		}
+	],
+	"dependencies" : 
+	[
+		{
+			"backtrace" : 2,
+			"id" : "sentencepiece-static::@b159c8fc43fd0a1d7804"
+		},
+		{
+			"id" : "ZERO_CHECK::@6890427a1f51a3e7e1df"
+		}
+	],
+	"id" : "fastllm::@6890427a1f51a3e7e1df",
+	"name" : "fastllm",
+	"paths" : 
+	{
+		"build" : ".",
+		"source" : "."
+	},
+	"sourceGroups" : 
+	[
+		{
+			"name" : "Source Files",
+			"sourceIndexes" : 
+			[
+				0,
+				1,
+				2,
+				3,
+				4,
+				5,
+				6,
+				7,
+				8,
+				9,
+				10,
+				11,
+				12,
+				13,
+				14,
+				15,
+				16,
+				17,
+				18,
+				19,
+				20,
+				21,
+				22,
+				23,
+				24,
+				25,
+				26,
+				27,
+				28,
+				29,
+				30,
+				31,
+				32,
+				33,
+				34,
+				35,
+				36,
+				37,
+				38,
+				39,
+				40,
+				41,
+				42,
+				43,
+				44,
+				45,
+				46,
+				47,
+				48,
+				49,
+				50,
+				51
+			]
+		}
+	],
+	"sources" : 
+	[
+		{
+			"backtrace" : 1,
+			"compileGroupIndex" : 0,
+			"path" : "src/fastllm.cpp",
+			"sourceGroupIndex" : 0
+		},
+		{
+			"backtrace" : 1,
+			"compileGroupIndex" : 0,
+			"path" : "src/device.cpp",
+			"sourceGroupIndex" : 0
+		},
+		{
+			"backtrace" : 1,
+			"compileGroupIndex" : 0,
+			"path" : "src/model.cpp",
+			"sourceGroupIndex" : 0
+		},
+		{
+			"backtrace" : 1,
+			"compileGroupIndex" : 0,
+			"path" : "src/executor.cpp",
+			"sourceGroupIndex" : 0
+		},
+		{
+			"backtrace" : 1,
+			"compileGroupIndex" : 0,
+			"path" : "src/template.cpp",
+			"sourceGroupIndex" : 0
+		},
+		{
+			"backtrace" : 1,
+			"compileGroupIndex" : 0,
+			"path" : "src/graph.cpp",
+			"sourceGroupIndex" : 0
+		},
+		{
+			"backtrace" : 1,
+			"compileGroupIndex" : 0,
+			"path" : "src/tokenizer.cpp",
+			"sourceGroupIndex" : 0
+		},
+		{
+			"backtrace" : 1,
+			"compileGroupIndex" : 0,
+			"path" : "src/devices/cpu/cpudevice.cpp",
+			"sourceGroupIndex" : 0
+		},
+		{
+			"backtrace" : 1,
+			"compileGroupIndex" : 0,
+			"path" : "src/devices/cpu/cpudevicebatch.cpp",
+			"sourceGroupIndex" : 0
+		},
+		{
+			"backtrace" : 1,
+			"compileGroupIndex" : 0,
+			"path" : "src/models/graphllm.cpp",
+			"sourceGroupIndex" : 0
+		},
+		{
+			"backtrace" : 1,
+			"compileGroupIndex" : 0,
+			"path" : "src/models/chatglm.cpp",
+			"sourceGroupIndex" : 0
+		},
+		{
+			"backtrace" : 1,
+			"compileGroupIndex" : 0,
+			"path" : "src/models/moss.cpp",
+			"sourceGroupIndex" : 0
+		},
+		{
+			"backtrace" : 1,
+			"compileGroupIndex" : 0,
+			"path" : "src/models/llama.cpp",
+			"sourceGroupIndex" : 0
+		},
+		{
+			"backtrace" : 1,
+			"compileGroupIndex" : 0,
+			"path" : "src/models/qwen.cpp",
+			"sourceGroupIndex" : 0
+		},
+		{
+			"backtrace" : 1,
+			"compileGroupIndex" : 0,
+			"path" : "src/models/basellm.cpp",
+			"sourceGroupIndex" : 0
+		},
+		{
+			"backtrace" : 1,
+			"compileGroupIndex" : 0,
+			"path" : "src/models/glm.cpp",
+			"sourceGroupIndex" : 0
+		},
+		{
+			"backtrace" : 1,
+			"compileGroupIndex" : 0,
+			"path" : "src/models/minicpm.cpp",
+			"sourceGroupIndex" : 0
+		},
+		{
+			"backtrace" : 1,
+			"compileGroupIndex" : 0,
+			"path" : "src/models/minicpm3.cpp",
+			"sourceGroupIndex" : 0
+		},
+		{
+			"backtrace" : 1,
+			"compileGroupIndex" : 0,
+			"path" : "src/models/internlm2.cpp",
+			"sourceGroupIndex" : 0
+		},
+		{
+			"backtrace" : 1,
+			"compileGroupIndex" : 0,
+			"path" : "src/models/bert.cpp",
+			"sourceGroupIndex" : 0
+		},
+		{
+			"backtrace" : 1,
+			"compileGroupIndex" : 0,
+			"path" : "src/models/moe.cpp",
+			"sourceGroupIndex" : 0
+		},
+		{
+			"backtrace" : 1,
+			"compileGroupIndex" : 0,
+			"path" : "src/models/deepseekv2.cpp",
+			"sourceGroupIndex" : 0
+		},
+		{
+			"backtrace" : 1,
+			"compileGroupIndex" : 0,
+			"path" : "src/models/phi3.cpp",
+			"sourceGroupIndex" : 0
+		},
+		{
+			"backtrace" : 1,
+			"compileGroupIndex" : 0,
+			"path" : "src/models/xlmroberta.cpp",
+			"sourceGroupIndex" : 0
+		},
+		{
+			"backtrace" : 1,
+			"compileGroupIndex" : 0,
+			"path" : "src/models/cogvlm.cpp",
+			"sourceGroupIndex" : 0
+		},
+		{
+			"backtrace" : 1,
+			"compileGroupIndex" : 0,
+			"path" : "src/models/qwen3.cpp",
+			"sourceGroupIndex" : 0
+		},
+		{
+			"backtrace" : 1,
+			"compileGroupIndex" : 0,
+			"path" : "src/models/qwen3_moe.cpp",
+			"sourceGroupIndex" : 0
+		},
+		{
+			"backtrace" : 1,
+			"compileGroupIndex" : 0,
+			"path" : "src/models/qwen3_next.cpp",
+			"sourceGroupIndex" : 0
+		},
+		{
+			"backtrace" : 1,
+			"compileGroupIndex" : 0,
+			"path" : "src/models/minimax.cpp",
+			"sourceGroupIndex" : 0
+		},
+		{
+			"backtrace" : 1,
+			"compileGroupIndex" : 0,
+			"path" : "src/models/hunyuan.cpp",
+			"sourceGroupIndex" : 0
+		},
+		{
+			"backtrace" : 1,
+			"compileGroupIndex" : 0,
+			"path" : "src/models/ernie4_5.cpp",
+			"sourceGroupIndex" : 0
+		},
+		{
+			"backtrace" : 1,
+			"compileGroupIndex" : 0,
+			"path" : "src/models/pangu_moe.cpp",
+			"sourceGroupIndex" : 0
+		},
+		{
+			"backtrace" : 1,
+			"compileGroupIndex" : 0,
+			"path" : "src/models/glm4_moe.cpp",
+			"sourceGroupIndex" : 0
+		},
+		{
+			"backtrace" : 1,
+			"compileGroupIndex" : 0,
+			"path" : "src/models/gpt_oss.cpp",
+			"sourceGroupIndex" : 0
+		},
+		{
+			"backtrace" : 1,
+			"compileGroupIndex" : 0,
+			"path" : "third_party/json11/json11.cpp",
+			"sourceGroupIndex" : 0
+		},
+		{
+			"backtrace" : 1,
+			"compileGroupIndex" : 0,
+			"path" : "third_party/gguf/gguf.cpp",
+			"sourceGroupIndex" : 0
+		},
+		{
+			"backtrace" : 1,
+			"compileGroupIndex" : 0,
+			"path" : "third_party/gguf/ggml-quant.cpp",
+			"sourceGroupIndex" : 0
+		},
+		{
+			"backtrace" : 1,
+			"compileGroupIndex" : 0,
+			"path" : "third_party/gguf/ggml-iqk.cpp",
+			"sourceGroupIndex" : 0
+		},
+		{
+			"backtrace" : 1,
+			"compileGroupIndex" : 0,
+			"path" : "third_party/gguf/ggml-dequantize.cpp",
+			"sourceGroupIndex" : 0
+		},
+		{
+			"backtrace" : 1,
+			"compileGroupIndex" : 0,
+			"path" : "third_party/gguf/gguf-adapter.cpp",
+			"sourceGroupIndex" : 0
+		},
+		{
+			"backtrace" : 1,
+			"compileGroupIndex" : 1,
+			"path" : "src/devices/cpu/amx.cpp",
+			"sourceGroupIndex" : 0
+		},
+		{
+			"backtrace" : 1,
+			"compileGroupIndex" : 0,
+			"path" : "src/devices/cpu/avx2.cpp",
+			"sourceGroupIndex" : 0
+		},
+		{
+			"backtrace" : 1,
+			"compileGroupIndex" : 1,
+			"path" : "src/devices/cpu/avx512bf16.cpp",
+			"sourceGroupIndex" : 0
+		},
+		{
+			"backtrace" : 1,
+			"compileGroupIndex" : 1,
+			"path" : "src/devices/cpu/avx512f.cpp",
+			"sourceGroupIndex" : 0
+		},
+		{
+			"backtrace" : 1,
+			"compileGroupIndex" : 1,
+			"path" : "src/devices/cpu/avx512vnni.cpp",
+			"sourceGroupIndex" : 0
+		},
+		{
+			"backtrace" : 1,
+			"compileGroupIndex" : 0,
+			"path" : "src/devices/cpu/linear.cpp",
+			"sourceGroupIndex" : 0
+		},
+		{
+			"backtrace" : 1,
+			"compileGroupIndex" : 0,
+			"path" : "src/models/graph/fastllmjson.cpp",
+			"sourceGroupIndex" : 0
+		},
+		{
+			"backtrace" : 1,
+			"compileGroupIndex" : 0,
+			"path" : "src/models/graph/gemma2.cpp",
+			"sourceGroupIndex" : 0
+		},
+		{
+			"backtrace" : 1,
+			"compileGroupIndex" : 0,
+			"path" : "src/models/graph/minicpm3.cpp",
+			"sourceGroupIndex" : 0
+		},
+		{
+			"backtrace" : 1,
+			"compileGroupIndex" : 0,
+			"path" : "src/models/graph/phi3.cpp",
+			"sourceGroupIndex" : 0
+		},
+		{
+			"backtrace" : 1,
+			"compileGroupIndex" : 0,
+			"path" : "src/models/graph/qwen2.cpp",
+			"sourceGroupIndex" : 0
+		},
+		{
+			"backtrace" : 1,
+			"compileGroupIndex" : 0,
+			"path" : "src/models/graph/telechat.cpp",
+			"sourceGroupIndex" : 0
+		}
+	],
+	"type" : "OBJECT_LIBRARY"
+}

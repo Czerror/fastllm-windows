@@ -1,0 +1,70 @@
+{
+	"backtrace" : 0,
+	"backtraceGraph" : 
+	{
+		"commands" : [],
+		"files" : 
+		[
+			"CMakeLists.txt"
+		],
+		"nodes" : 
+		[
+			{
+				"file" : 0
+			}
+		]
+	},
+	"dependencies" : 
+	[
+		{
+			"id" : "fastllm_tools::@6890427a1f51a3e7e1df"
+		},
+		{
+			"id" : "apiserver::@6890427a1f51a3e7e1df"
+		},
+		{
+			"id" : "FastllmStudio_cli::@6890427a1f51a3e7e1df"
+		},
+		{
+			"id" : "webui::@6890427a1f51a3e7e1df"
+		},
+		{
+			"id" : "benchmark::@6890427a1f51a3e7e1df"
+		},
+		{
+			"id" : "main::@6890427a1f51a3e7e1df"
+		},
+		{
+			"id" : "pyfastllm::@6890427a1f51a3e7e1df"
+		},
+		{
+			"id" : "fastllm::@6890427a1f51a3e7e1df"
+		},
+		{
+			"id" : "quant::@6890427a1f51a3e7e1df"
+		},
+		{
+			"id" : "testOps::@6890427a1f51a3e7e1df"
+		},
+		{
+			"id" : "testTokenizer::@6890427a1f51a3e7e1df"
+		},
+		{
+			"id" : "ZERO_CHECK::@6890427a1f51a3e7e1df"
+		}
+	],
+	"folder" : 
+	{
+		"name" : "CMakePredefinedTargets"
+	},
+	"id" : "ALL_BUILD::@6890427a1f51a3e7e1df",
+	"isGeneratorProvided" : true,
+	"name" : "ALL_BUILD",
+	"paths" : 
+	{
+		"build" : ".",
+		"source" : "."
+	},
+	"sources" : [],
+	"type" : "UTILITY"
+}

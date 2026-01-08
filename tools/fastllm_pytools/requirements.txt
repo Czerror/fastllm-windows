@@ -1,0 +1,15 @@
+# FastLLM Python 依赖
+# 基础运行 (ftllm run/chat) 无需安装任何依赖
+
+# API Server (ftllm serve)
+fastapi>=0.100.0
+pydantic>=2.0.0
+uvicorn>=0.23.0
+shortuuid>=1.0.0
+openai>=1.0.0
+
+# Web UI (ftllm webui)
+streamlit>=1.25.0
+
+# HuggingFace 模型下载 (可选)
+huggingface_hub>=0.20.0
