@@ -58,8 +58,8 @@ jobs:
           echo "SYNCED=false" >> $GITHUB_ENV
         fi
     
-    - name: Push changes
-      if: env.SYNCED == 'true' || env.SUBMODULES_UPDATED == 'true'
+    - name: Push upstream sync
+      if: env.SYNCED == 'true'
       run: |
         git push origin master
     
@@ -79,12 +79,8 @@ jobs:
           git add .
           git commit -m "chore: Auto-update submodules (pybind11, sentencepiece)"
           echo "SUBMODULES_UPDATED=true" >> $GITHUB_ENV
+          git push origin master
         fi
-    
-    - name: Push submodule updates
-      if: env.SUBMODULES_UPDATED == 'true'
-      run: |
-        git push origin master
     
     - name: Create sync summary
       run: |
