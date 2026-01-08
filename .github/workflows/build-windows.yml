@@ -281,13 +281,95 @@ jobs:
     - name: Checkout for version
       uses: actions/checkout@v4  # 自动使用 v4.x 最新版本
       with:
-        sparse-checkout: tools/scripts/setup.py
+        submodules: recursive
+        fetch-depth: 0
     
-    - name: Get version
+    - name: Get version and submodule info
       id: version
       run: |
         VERSION=$(sed -n 's/.*version\s*=\s*"\([^"]*\)".*/\1/p' tools/scripts/setup.py)
         echo "version=${VERSION}" >> $GITHUB_OUTPUT
+        
+        # 获取上游最新 commit
+        git remote add upstream https://github.com/ztxz16/fastllm.git 2>/dev/null || true
+        git fetch upstream --quiet
+        UPSTREAM_COMMIT=$(git rev-parse upstream/master 2>/dev/null | cut -c1-7)
+        UPSTREAM_DATE=$(git log -1 --format=%cd --date=short upstream/master 2>/dev/null)
+        echo "upstream_commit=${UPSTREAM_COMMIT}" >> $GITHUB_OUTPUT
+        echo "upstream_date=${UPSTREAM_DATE}" >> $GITHUB_OUTPUT
+        
+        # 获取子模块版本
+        cd third_party/pybind11
+        PYBIND11_VERSION=$(git describe --tags 2>/dev/null || git rev-parse --short HEAD)
+        echo "pybind11_version=${PYBIND11_VERSION}" >> $GITHUB_OUTPUT
+        cd ../..
+        
+        cd third_party/sentencepiece
+        SENTENCEPIECE_VERSION=$(git describe --tags 2>/dev/null || git rev-parse --short HEAD)
+        echo "sentencepiece_version=${SENTENCEPIECE_VERSION}" >> $GITHUB_OUTPUT
+        cd ../..
+        
+        # 获取当前 tag 与上一个 tag 之间的提交
+        PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+        if [ -n "$PREV_TAG" ]; then
+          COMMITS=$(git log --oneline ${PREV_TAG}..HEAD --no-merges -- . ':!.github' 2>/dev/null | head -20)
+        else
+          COMMITS=$(git log --oneline -20 --no-merges -- . ':!.github' 2>/dev/null)
+        fi
+        echo "commits<<EOF" >> $GITHUB_OUTPUT
+        echo "$COMMITS" >> $GITHUB_OUTPUT
+        echo "EOF" >> $GITHUB_OUTPUT
+    
+    - name: Generate release notes
+      id: release_notes
+      run: |
+        VERSION="${{ steps.version.outputs.version }}"
+        UPSTREAM_COMMIT="${{ steps.version.outputs.upstream_commit }}"
+        UPSTREAM_DATE="${{ steps.version.outputs.upstream_date }}"
+        PYBIND11="${{ steps.version.outputs.pybind11_version }}"
+        SENTENCEPIECE="${{ steps.version.outputs.sentencepiece_version }}"
+        TAG_NAME="${GITHUB_REF#refs/tags/}"
+        
+        cat > release_notes.md << EOF
+        ## FastLLM Windows ${TAG_NAME}
+        
+        Windows 预编译版本，开箱即用，无需编译环境。
+        
+        ### 📦 下载说明
+        
+        | 文件 | 说明 |
+        |------|------|
+        | \`fastllm-win-x64-cpu-*.zip\` | CPU 版本 (无需 GPU) |
+        | \`fastllm-win-x64-cuda-*.zip\` | CUDA 版本 (需要 NVIDIA GPU) |
+        
+        ### 🔧 版本信息
+        
+        | 组件 | 版本 |
+        |------|------|
+        | FastLLM | ${VERSION} |
+        | 上游同步 | [${UPSTREAM_COMMIT}](https://github.com/ztxz16/fastllm/commit/${UPSTREAM_COMMIT}) (${UPSTREAM_DATE}) |
+        | pybind11 | ${PYBIND11} |
+        | sentencepiece | ${SENTENCEPIECE} |
+        | CUDA Toolkit | 13.1.0 |
+        | 编译器 | MSVC 2022 |
+        
+        ### 📝 更新内容
+        
+        \`\`\`
+        ${{ steps.version.outputs.commits }}
+        \`\`\`
+        
+        ### 🚀 快速开始
+        
+        1. 下载对应版本的 ZIP 文件
+        2. 解压到任意目录
+        3. 运行 \`bin/install-deps.cmd\` 安装 Python 依赖
+        4. 运行 \`bin/ftllm.cmd\` 启动 WebUI
+        
+        详细使用说明请参考 [README](https://github.com/Czerror/fastllm-windows#readme)
+        EOF
+        
+        echo "notes_file=release_notes.md" >> $GITHUB_OUTPUT
     
     - name: Download CPU artifact
       uses: actions/download-artifact@v4  # 自动使用 v4.x 最新版本
@@ -317,7 +399,7 @@ jobs:
           fastllm-win-x64-cuda-*.zip
         draft: false
         prerelease: false
-        generate_release_notes: true
+        body_path: release_notes.md
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     
