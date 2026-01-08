@@ -16,6 +16,7 @@ jobs:
       uses: actions/checkout@v4
       with:
         fetch-depth: 0
+        submodules: recursive
         token: ${{ secrets.GITHUB_TOKEN }}
     
     - name: Configure Git
@@ -58,7 +59,30 @@ jobs:
         fi
     
     - name: Push changes
-      if: env.SYNCED == 'true'
+      if: env.SYNCED == 'true' || env.SUBMODULES_UPDATED == 'true'
+      run: |
+        git push origin master
+    
+    - name: Update submodules
+      run: |
+        echo "=== Checking submodule updates ==="
+        
+        # 更新子模块到远程最新版本
+        git submodule update --remote --merge
+        
+        # 检查是否有变更
+        if git diff --quiet; then
+          echo "Submodules are up to date"
+          echo "SUBMODULES_UPDATED=false" >> $GITHUB_ENV
+        else
+          echo "Submodules updated"
+          git add .
+          git commit -m "chore: Auto-update submodules (pybind11, sentencepiece)"
+          echo "SUBMODULES_UPDATED=true" >> $GITHUB_ENV
+        fi
+    
+    - name: Push submodule updates
+      if: env.SUBMODULES_UPDATED == 'true'
       run: |
         git push origin master
     
@@ -68,4 +92,10 @@ jobs:
           echo "✅ Successfully synced with upstream ztxz16/fastllm"
         else
           echo "ℹ️ No new changes from upstream"
+        fi
+        
+        if [ "$SUBMODULES_UPDATED" == "true" ]; then
+          echo "✅ Submodules updated to latest versions"
+        else
+          echo "ℹ️ Submodules are already up to date"
         fi
