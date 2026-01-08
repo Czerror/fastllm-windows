@@ -17,6 +17,9 @@
 .PARAMETER Clean
     清理后重新构建
 
+.PARAMETER CleanCache
+    清理 MSVC/CMake 编译缓存 (C:\Users\xxx\AppData\Local 下的缓存)
+
 .PARAMETER NoPackage
     构建完成后不打包
 
@@ -56,6 +59,7 @@ param(
     [string]$CudaArch = "",
     
     [switch]$Clean,
+    [switch]$CleanCache,
     [switch]$NoPackage,
     
     # CMake 选项
@@ -93,6 +97,56 @@ $CMakePath = if (Test-Path $CMakeLocalPath) { $CMakeLocalPath }
              else { $CMakeVSPath }
 
 $VCRuntimePath = "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Redist\MSVC\14.44.35112\x64\Microsoft.VC143.CRT"
+
+# 子模块版本缓存文件 (用于检测子模块更新)
+$SubmoduleVersionFile = Join-Path $ProjectRoot "build\.submodule_versions"
+
+# ============== 子模块版本检测 ==============
+function Get-SubmoduleVersions {
+    $versions = @{}
+    $submodules = @("third_party/pybind11", "third_party/sentencepiece")
+    foreach ($submodule in $submodules) {
+        $submodulePath = Join-Path $ProjectRoot $submodule
+        if (Test-Path (Join-Path $submodulePath ".git")) {
+            Push-Location $submodulePath
+            try {
+                $hash = git rev-parse HEAD 2>$null
+                if ($hash) { $versions[$submodule] = $hash.Trim() }
+            } finally { Pop-Location }
+        }
+    }
+    return $versions
+}
+
+function Test-SubmoduleUpdated {
+    $currentVersions = Get-SubmoduleVersions
+    if (-not (Test-Path $SubmoduleVersionFile)) {
+        return $true  # 首次构建，视为需要清理
+    }
+    
+    $savedVersions = @{}
+    Get-Content $SubmoduleVersionFile | ForEach-Object {
+        $parts = $_ -split "="
+        if ($parts.Count -eq 2) { $savedVersions[$parts[0]] = $parts[1] }
+    }
+    
+    foreach ($key in $currentVersions.Keys) {
+        if ($savedVersions[$key] -ne $currentVersions[$key]) {
+            Write-Host "  [!] 检测到子模块更新: $key" -ForegroundColor Yellow
+            Write-Host "      旧: $($savedVersions[$key])" -ForegroundColor DarkGray
+            Write-Host "      新: $($currentVersions[$key])" -ForegroundColor DarkGray
+            return $true
+        }
+    }
+    return $false
+}
+
+function Save-SubmoduleVersions {
+    $versions = Get-SubmoduleVersions
+    $dir = Split-Path $SubmoduleVersionFile
+    if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+    $versions.GetEnumerator() | ForEach-Object { "$($_.Key)=$($_.Value)" } | Set-Content $SubmoduleVersionFile
+}
 
 # CUDA 架构选项
 $script:CudaArchPresets = @(
@@ -342,10 +396,42 @@ function Build-Project {
     Write-Host "  ════════════════════════════════════════════════════════════" -ForegroundColor Cyan
     Write-Host ""
     
-    # 清理
+    # 检测子模块更新，自动清理构建目录
+    if ($script:SubmoduleCheckDone -ne $true) {
+        if (Test-SubmoduleUpdated) {
+            Write-Host "  [!] 子模块已更新，需要清理构建以确保使用新版本" -ForegroundColor Yellow
+            $CleanBuild = $true
+        }
+        $script:SubmoduleCheckDone = $true
+    }
+    
+    # 清理构建目录
     if ($CleanBuild -and (Test-Path $fullBuildDir)) {
         Write-Host "  [1/3] 清理构建目录..." -ForegroundColor Yellow
         Remove-Item $fullBuildDir -Recurse -Force
+    }
+    
+    # 清理编译缓存 (仅首次构建时执行)
+    if ($script:CleanCacheExecuted -ne $true -and $CleanCache.IsPresent) {
+        Write-Host "  [*] 清理编译缓存..." -ForegroundColor Yellow
+        $cachePaths = @(
+            # CMake 缓存
+            "$env:LOCALAPPDATA\CMake\cache",
+            # MSVC IntelliSense 缓存
+            "$env:LOCALAPPDATA\Microsoft\VisualStudio\17.0_*\ComponentModelCache",
+            # 项目 .vs 目录
+            (Join-Path $ProjectRoot ".vs")
+        )
+        foreach ($cachePath in $cachePaths) {
+            $resolved = Get-Item $cachePath -ErrorAction SilentlyContinue
+            foreach ($item in $resolved) {
+                if (Test-Path $item) {
+                    Write-Host "    删除: $item" -ForegroundColor DarkGray
+                    Remove-Item $item -Recurse -Force -ErrorAction SilentlyContinue
+                }
+            }
+        }
+        $script:CleanCacheExecuted = $true
     }
     
     # 创建目录
@@ -769,6 +855,11 @@ if ($package) {
 
 # ========== 显示结果 ==========
 $totalTime = (Get-Date) - $startTime
+
+# 保存子模块版本 (仅当有成功的构建时)
+if ($results.Values -contains $true) {
+    Save-SubmoduleVersions
+}
 
 Write-Host ""
 Write-Host "  ════════════════════════════════════════════════════════════" -ForegroundColor Cyan
