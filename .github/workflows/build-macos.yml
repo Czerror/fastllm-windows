@@ -132,13 +132,13 @@ jobs:
           > release-intel/ftllm/__init__.py
         
         # Generate __main__.py for python -m ftllm
-        cat > release-intel/ftllm/__main__.py << 'EOF'
-"""ftllm - FastLLM 命令行入口"""
-from .cli import main
-
-if __name__ == "__main__":
-    main()
-EOF
+        printf '%s\n' \
+          '"""ftllm - FastLLM 命令行入口"""' \
+          'from .cli import main' \
+          '' \
+          'if __name__ == "__main__":' \
+          '    main()' \
+          > release-intel/ftllm/__main__.py
         
         # Copy web resources
         cp -r example/webui/web/* release-intel/web/
@@ -267,13 +267,13 @@ EOF
           > release-arm/ftllm/__init__.py
         
         # Generate __main__.py for python -m ftllm
-        cat > release-arm/ftllm/__main__.py << 'EOF'
-"""ftllm - FastLLM 命令行入口"""
-from .cli import main
-
-if __name__ == "__main__":
-    main()
-EOF
+        printf '%s\n' \
+          '"""ftllm - FastLLM 命令行入口"""' \
+          'from .cli import main' \
+          '' \
+          'if __name__ == "__main__":' \
+          '    main()' \
+          > release-arm/ftllm/__main__.py
         
         # Copy web resources
         cp -r example/webui/web/* release-arm/web/
