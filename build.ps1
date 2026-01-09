@@ -589,13 +589,7 @@ function New-ReleasePackage {
             }
         }
         
-        # 4. bin/ - 依赖安装脚本 (ftllm.exe 已是统一入口，不需要 ftllm.cmd)
-        $installDeps = Join-Path $ProjectRoot "tools\fastllm_pytools\install-deps.cmd"
-        if (Test-Path $installDeps) {
-            & $addFile $installDeps "bin/install-deps.cmd"
-        }
-        
-        # 5. pytools/ - Python 模块 (.pyd)
+        # 4. pytools/ - Python 模块 (.pyd)
         Get-ChildItem "$fullBuildDir\Release\*.pyd" -ErrorAction SilentlyContinue | ForEach-Object {
             & $addFile $_.FullName "pytools/$($_.Name)"
         }

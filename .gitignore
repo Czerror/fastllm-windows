@@ -38,3 +38,5 @@ token
 /src/devices/multihip
 /test/mmlu
 *.o
+# 构建产物
+fastllm-win-*.zip

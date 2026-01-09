@@ -500,7 +500,11 @@ target_link_libraries(fastllm PUBLIC ${FASTLLM_LINKED_LIBS})
 
 # ftllm 统一命令行入口 (不依赖 fastllm 库，仅转发到其他 exe)
 add_executable(ftllm ftllm.cpp)
-set_target_properties(ftllm PROPERTIES OUTPUT_NAME "ftllm")
+set_target_properties(ftllm PROPERTIES 
+    OUTPUT_NAME "ftllm"
+    CXX_STANDARD 20
+    CXX_STANDARD_REQUIRED ON
+)
 
 add_executable(quant tools/src/quant.cpp)
 target_link_libraries(quant fastllm)
