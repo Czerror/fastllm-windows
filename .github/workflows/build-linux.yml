@@ -141,27 +141,27 @@ jobs:
         cp tools/fastllm_pytools/requirements.txt release-cpu/ftllm/
         
         # Generate __init__.py with correct version
-        cat > release-cpu/ftllm/__init__.py << EOF
-        __all__ = ["llm"]
-
-        try:
-            from importlib.metadata import version
-            __version__ = version("ftllm")
-        except:
-            try:
-                __version__ = version("ftllm-rocm")
-            except:
-                __version__ = "${VERSION}"
-        EOF
+        printf '%s\n' \
+          '__all__ = ["llm"]' \
+          '' \
+          'try:' \
+          '    from importlib.metadata import version' \
+          '    __version__ = version("ftllm")' \
+          'except:' \
+          '    try:' \
+          '        __version__ = version("ftllm-rocm")' \
+          '    except:' \
+          '        __version__ = "'"${VERSION}"'"' \
+          > release-cpu/ftllm/__init__.py
         
         # Generate __main__.py for python -m ftllm
         cat > release-cpu/ftllm/__main__.py << 'EOF'
-        """ftllm - FastLLM 命令行入口"""
-        from .cli import main
+"""ftllm - FastLLM 命令行入口"""
+from .cli import main
 
-        if __name__ == "__main__":
-            main()
-        EOF
+if __name__ == "__main__":
+    main()
+EOF
         
         # Copy web resources
         cp -r example/webui/web/* release-cpu/web/
@@ -294,27 +294,27 @@ jobs:
         cp tools/fastllm_pytools/requirements.txt release-cuda/ftllm/
         
         # Generate __init__.py with correct version
-        cat > release-cuda/ftllm/__init__.py << EOF
-        __all__ = ["llm"]
-
-        try:
-            from importlib.metadata import version
-            __version__ = version("ftllm")
-        except:
-            try:
-                __version__ = version("ftllm-rocm")
-            except:
-                __version__ = "${VERSION}"
-        EOF
+        printf '%s\n' \
+          '__all__ = ["llm"]' \
+          '' \
+          'try:' \
+          '    from importlib.metadata import version' \
+          '    __version__ = version("ftllm")' \
+          'except:' \
+          '    try:' \
+          '        __version__ = version("ftllm-rocm")' \
+          '    except:' \
+          '        __version__ = "'"${VERSION}"'"' \
+          > release-cuda/ftllm/__init__.py
         
         # Generate __main__.py for python -m ftllm
         cat > release-cuda/ftllm/__main__.py << 'EOF'
-        """ftllm - FastLLM 命令行入口"""
-        from .cli import main
+"""ftllm - FastLLM 命令行入口"""
+from .cli import main
 
-        if __name__ == "__main__":
-            main()
-        EOF
+if __name__ == "__main__":
+    main()
+EOF
         
         # Copy web resources
         cp -r example/webui/web/* release-cuda/web/
@@ -454,18 +454,18 @@ jobs:
         cp tools/fastllm_pytools/requirements.txt release-rocm/ftllm/
         
         # Generate __init__.py with correct version
-        cat > release-rocm/ftllm/__init__.py << EOF
-__all__ = ["llm"]
-
-try:
-    from importlib.metadata import version
-    __version__ = version("ftllm")
-except:
-    try:
-        __version__ = version("ftllm-rocm")
-    except:
-        __version__ = "${VERSION}"
-EOF
+        printf '%s\n' \
+          '__all__ = ["llm"]' \
+          '' \
+          'try:' \
+          '    from importlib.metadata import version' \
+          '    __version__ = version("ftllm")' \
+          'except:' \
+          '    try:' \
+          '        __version__ = version("ftllm-rocm")' \
+          '    except:' \
+          '        __version__ = "'"${VERSION}"'"' \
+          > release-rocm/ftllm/__init__.py
         
         # Generate __main__.py for python -m ftllm
         cat > release-rocm/ftllm/__main__.py << 'EOF'

@@ -118,18 +118,18 @@ jobs:
         cp tools/fastllm_pytools/requirements.txt release-intel/ftllm/
         
         # Generate __init__.py with correct version
-        cat > release-intel/ftllm/__init__.py << EOF
-__all__ = ["llm"]
-
-try:
-    from importlib.metadata import version
-    __version__ = version("ftllm")
-except:
-    try:
-        __version__ = version("ftllm-rocm")
-    except:
-        __version__ = "${VERSION}"
-EOF
+        printf '%s\n' \
+          '__all__ = ["llm"]' \
+          '' \
+          'try:' \
+          '    from importlib.metadata import version' \
+          '    __version__ = version("ftllm")' \
+          'except:' \
+          '    try:' \
+          '        __version__ = version("ftllm-rocm")' \
+          '    except:' \
+          '        __version__ = "'"${VERSION}"'"' \
+          > release-intel/ftllm/__init__.py
         
         # Generate __main__.py for python -m ftllm
         cat > release-intel/ftllm/__main__.py << 'EOF'
@@ -138,6 +138,7 @@ from .cli import main
 
 if __name__ == "__main__":
     main()
+EOF
 EOF
         
         # Copy web resources
@@ -253,18 +254,18 @@ EOF
         cp tools/fastllm_pytools/requirements.txt release-arm/ftllm/
         
         # Generate __init__.py with correct version
-        cat > release-arm/ftllm/__init__.py << EOF
-__all__ = ["llm"]
-
-try:
-    from importlib.metadata import version
-    __version__ = version("ftllm")
-except:
-    try:
-        __version__ = version("ftllm-rocm")
-    except:
-        __version__ = "${VERSION}"
-EOF
+        printf '%s\n' \
+          '__all__ = ["llm"]' \
+          '' \
+          'try:' \
+          '    from importlib.metadata import version' \
+          '    __version__ = version("ftllm")' \
+          'except:' \
+          '    try:' \
+          '        __version__ = version("ftllm-rocm")' \
+          '    except:' \
+          '        __version__ = "'"${VERSION}"'"' \
+          > release-arm/ftllm/__init__.py
         
         # Generate __main__.py for python -m ftllm
         cat > release-arm/ftllm/__main__.py << 'EOF'
