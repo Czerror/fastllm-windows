@@ -23,23 +23,24 @@
 
 ### 1. 解压下载的 zip 文件
 
-### 2. 运行命令
+### 2. 环境准备
 
-```powershell
-# 查看帮助
-.\ftllm.exe -h
+1. 将 `bin` 目录添加到系统 PATH 环境变量
+2. 确保已安装 Python 3.8+ (推荐 3.10+)
 
-# 查看版本
-.\ftllm.exe -v
+### 3. 运行模型
 
-# 启动 API 服务器 (以 Qwen 为例)
-.\ftllm.exe serve --model "path/to/model" --port 8000
-
-# 交互式对话
-.\ftllm.exe chat --model "path/to/model"
+**方式一：Python CLI（推荐）**
+```cmd
+ftllm run D:\Models\Qwen3 --device cuda
 ```
 
-### 3. 支持的模型
+**方式二：原生程序**
+```cmd
+main.exe -p D:\Models\Qwen3 --device cuda
+```
+
+### 4. 支持的模型
 
 参考上游文档：[支持的模型列表](https://github.com/ztxz16/fastllm/blob/master/docs/models.md)
 

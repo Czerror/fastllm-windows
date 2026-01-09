@@ -30,6 +30,7 @@ jobs:
         git fetch upstream
     
     - name: Sync upstream changes
+      id: sync
       run: |
         # 获取上游 master 分支的最新提交
         UPSTREAM_COMMIT=$(git rev-parse upstream/master)
@@ -53,9 +54,11 @@ jobs:
           git checkout HEAD -- .github/ build.ps1 README.md 2>/dev/null || true
           
           echo "SYNCED=true" >> $GITHUB_ENV
+          echo "synced=true" >> $GITHUB_OUTPUT
         else
           echo "Already up to date with upstream"
           echo "SYNCED=false" >> $GITHUB_ENV
+          echo "synced=false" >> $GITHUB_OUTPUT
         fi
     
     - name: Push upstream sync
@@ -64,6 +67,7 @@ jobs:
         git push origin master
     
     - name: Update submodules
+      id: submodules
       run: |
         echo "=== Checking submodule updates ==="
         
@@ -74,11 +78,13 @@ jobs:
         if git diff --quiet; then
           echo "Submodules are up to date"
           echo "SUBMODULES_UPDATED=false" >> $GITHUB_ENV
+          echo "updated=false" >> $GITHUB_OUTPUT
         else
           echo "Submodules updated"
           git add .
           git commit -m "chore: Auto-update submodules (pybind11, sentencepiece)"
           echo "SUBMODULES_UPDATED=true" >> $GITHUB_ENV
+          echo "updated=true" >> $GITHUB_OUTPUT
           git push origin master
         fi
     
@@ -95,3 +101,18 @@ jobs:
         else
           echo "ℹ️ Submodules are already up to date"
         fi
+    
+    outputs:
+      synced: ${{ steps.sync.outputs.synced }}
+      submodules_updated: ${{ steps.submodules.outputs.updated }}
+
+  # 当有上游更新时触发构建
+  trigger-build:
+    name: Trigger Build
+    needs: sync
+    if: needs.sync.outputs.synced == 'true' || needs.sync.outputs.submodules_updated == 'true'
+    uses: ./.github/workflows/build-windows.yml
+    with:
+      build_cpu: true
+      build_cuda: true
+    secrets: inherit

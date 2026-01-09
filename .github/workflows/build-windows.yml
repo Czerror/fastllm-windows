@@ -1,13 +1,29 @@
 name: Build Windows Release
 
 on:
+  # 推送版本标签时触发
   push:
-    branches: [ main, master ]
     tags:
       - 'v*'
-  pull_request:
-    branches: [ main, master ]
+  
+  # 手动触发
   workflow_dispatch:
+    inputs:
+      build_cpu:
+        description: 'Build CPU version'
+        type: boolean
+        default: true
+      build_cuda:
+        description: 'Build CUDA version'
+        type: boolean
+        default: true
+      cuda_arch:
+        description: 'CUDA architectures (semicolon separated)'
+        type: string
+        default: '75;80;86;89;90;120'
+  
+  # 被 sync-upstream 工作流调用
+  workflow_call:
     inputs:
       build_cpu:
         description: 'Build CPU version'
