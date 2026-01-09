@@ -42,16 +42,16 @@ jobs:
         if [ "$UPSTREAM_COMMIT" != "$LOCAL_UPSTREAM" ]; then
           echo "New changes detected from upstream"
           
-          # 合并上游更改，保留本地的 .github 目录和 build.ps1
+          # 合并上游更改，保留本地的 Windows 特定文件
           git merge upstream/master --no-edit -X theirs || {
             # 如果有冲突，保留我们的 Windows 特定文件
-            git checkout --ours .github/ build.ps1 README.md 2>/dev/null || true
+            git checkout --ours .github/ build.ps1 ftllm.cpp CMakeLists.txt README.md docs/使用说明.md 2>/dev/null || true
             git add .
             git commit -m "Merge upstream with local Windows customizations" || true
           }
           
           # 确保我们的 Windows 文件没有被覆盖
-          git checkout HEAD -- .github/ build.ps1 README.md 2>/dev/null || true
+          git checkout HEAD -- .github/ build.ps1 ftllm.cpp CMakeLists.txt README.md docs/使用说明.md 2>/dev/null || true
           
           echo "SYNCED=true" >> $GITHUB_ENV
           echo "synced=true" >> $GITHUB_OUTPUT

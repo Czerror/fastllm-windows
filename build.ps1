@@ -589,26 +589,22 @@ function New-ReleasePackage {
             }
         }
         
-        # 4. bin/ - ftllm 命令行入口脚本和依赖安装脚本
-        $ftllmCmd = Join-Path $ProjectRoot "tools\fastllm_pytools\ftllm.cmd"
-        if (Test-Path $ftllmCmd) {
-            & $addFile $ftllmCmd "bin/ftllm.cmd"
-        }
+        # 4. bin/ - 依赖安装脚本 (ftllm.exe 已是统一入口，不需要 ftllm.cmd)
         $installDeps = Join-Path $ProjectRoot "tools\fastllm_pytools\install-deps.cmd"
         if (Test-Path $installDeps) {
             & $addFile $installDeps "bin/install-deps.cmd"
         }
         
-        # 5. ftllm/ - Python 模块
+        # 5. pytools/ - Python 模块 (.pyd)
         Get-ChildItem "$fullBuildDir\Release\*.pyd" -ErrorAction SilentlyContinue | ForEach-Object {
-            & $addFile $_.FullName "ftllm/$($_.Name)"
+            & $addFile $_.FullName "pytools/$($_.Name)"
         }
         
-        # 6. ftllm/ - ftllm 工具
-        $ftllmSource = Join-Path $fullBuildDir "tools\ftllm"
-        & $addDir $ftllmSource "ftllm"
+        # 6. pytools/ - ftllm Python 工具
+        $ftllmSource = Join-Path $ProjectRoot "tools\fastllm_pytools"
+        & $addDir $ftllmSource "pytools"
         
-        # 6.1 ftllm/__init__.py - 更新版本号
+        # 6.1 pytools/__init__.py - 更新版本号
         $initPyContent = @"
 __all__ = ["llm"]
 
@@ -623,13 +619,26 @@ except:
 "@
         $tempInitPy = Join-Path $env:TEMP "ftllm_init_temp.py"
         Set-Content -Path $tempInitPy -Value $initPyContent -Encoding UTF8 -NoNewline
-        & $addFile $tempInitPy "ftllm/__init__.py"
+        & $addFile $tempInitPy "pytools/__init__.py"
         Remove-Item $tempInitPy -Force -ErrorAction SilentlyContinue
         
-        # 7. ftllm/ - requirements.txt
+        # 6.2 pytools/__main__.py - 支持 python -m pytools
+        $mainPyContent = @"
+"""ftllm - FastLLM 命令行入口"""
+from .cli import main
+
+if __name__ == "__main__":
+    main()
+"@
+        $tempMainPy = Join-Path $env:TEMP "ftllm_main_temp.py"
+        Set-Content -Path $tempMainPy -Value $mainPyContent -Encoding UTF8 -NoNewline
+        & $addFile $tempMainPy "pytools/__main__.py"
+        Remove-Item $tempMainPy -Force -ErrorAction SilentlyContinue
+        
+        # 7. pytools/ - requirements.txt
         $reqFile = Join-Path $ProjectRoot "tools\fastllm_pytools\requirements.txt"
         if (Test-Path $reqFile) {
-            & $addFile $reqFile "ftllm/requirements.txt"
+            & $addFile $reqFile "pytools/requirements.txt"
         }
         
         # 6. web/ - Web UI

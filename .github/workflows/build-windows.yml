@@ -90,7 +90,7 @@ jobs:
         VERSION="${{ steps.version.outputs.version }}"
         
         mkdir -p release-cpu/bin
-        mkdir -p release-cpu/ftllm
+        mkdir -p release-cpu/pytools
         mkdir -p release-cpu/web
         mkdir -p release-cpu/docs
         
@@ -98,7 +98,7 @@ jobs:
         cp build/Release/*.exe release-cpu/bin/
         
         # Copy Python module (.pyd)
-        cp build/Release/*.pyd release-cpu/ftllm/ || true
+        cp build/Release/*.pyd release-cpu/pytools/ || true
         
         # Copy VC++ runtime
         if [ -d "runtime_libs/vcrt" ]; then
@@ -106,15 +106,14 @@ jobs:
         fi
         
         # Copy Python tools
-        cp -r build/tools/ftllm/* release-cpu/ftllm/
+        cp -r build/tools/ftllm/* release-cpu/pytools/
         
-        # Copy ftllm.cmd and install-deps.cmd
-        cp tools/fastllm_pytools/ftllm.cmd release-cpu/bin/
+        # Copy install-deps.cmd (ftllm.exe is already in bin/)
         cp tools/fastllm_pytools/install-deps.cmd release-cpu/bin/
-        cp tools/fastllm_pytools/requirements.txt release-cpu/ftllm/
+        cp tools/fastllm_pytools/requirements.txt release-cpu/pytools/
         
         # Generate __init__.py with correct version
-        cat > release-cpu/ftllm/__init__.py << EOF
+        cat > release-cpu/pytools/__init__.py << EOF
         __all__ = ["llm"]
 
         try:
@@ -125,6 +124,15 @@ jobs:
                 __version__ = version("ftllm-rocm")
             except:
                 __version__ = "${VERSION}"
+        EOF
+        
+        # Generate __main__.py for python -m pytools
+        cat > release-cpu/pytools/__main__.py << EOF
+        """ftllm - FastLLM 命令行入口"""
+        from .cli import main
+
+        if __name__ == "__main__":
+            main()
         EOF
         
         # Copy web resources
@@ -213,7 +221,7 @@ jobs:
         VERSION="${{ steps.version.outputs.version }}"
         
         mkdir -p release-cuda/bin
-        mkdir -p release-cuda/ftllm
+        mkdir -p release-cuda/pytools
         mkdir -p release-cuda/web
         mkdir -p release-cuda/docs
         
@@ -221,7 +229,7 @@ jobs:
         cp build-cuda/Release/*.exe release-cuda/bin/
         
         # Copy Python module (.pyd)
-        cp build-cuda/Release/*.pyd release-cuda/ftllm/ || true
+        cp build-cuda/Release/*.pyd release-cuda/pytools/ || true
         
         # Copy VC++ runtime
         if [ -d "runtime_libs/vcrt" ]; then
@@ -245,15 +253,14 @@ jobs:
         fi
         
         # Copy Python tools
-        cp -r build-cuda/tools/ftllm/* release-cuda/ftllm/
+        cp -r build-cuda/tools/ftllm/* release-cuda/pytools/
         
-        # Copy ftllm.cmd and install-deps.cmd
-        cp tools/fastllm_pytools/ftllm.cmd release-cuda/bin/
+        # Copy install-deps.cmd (ftllm.exe is already in bin/)
         cp tools/fastllm_pytools/install-deps.cmd release-cuda/bin/
-        cp tools/fastllm_pytools/requirements.txt release-cuda/ftllm/
+        cp tools/fastllm_pytools/requirements.txt release-cuda/pytools/
         
         # Generate __init__.py with correct version
-        cat > release-cuda/ftllm/__init__.py << EOF
+        cat > release-cuda/pytools/__init__.py << EOF
         __all__ = ["llm"]
 
         try:
@@ -264,6 +271,15 @@ jobs:
                 __version__ = version("ftllm-rocm")
             except:
                 __version__ = "${VERSION}"
+        EOF
+        
+        # Generate __main__.py for python -m pytools
+        cat > release-cuda/pytools/__main__.py << EOF
+        """ftllm - FastLLM 命令行入口"""
+        from .cli import main
+
+        if __name__ == "__main__":
+            main()
         EOF
         
         # Copy web resources
@@ -380,7 +396,7 @@ jobs:
         1. 下载对应版本的 ZIP 文件
         2. 解压到任意目录
         3. 运行 \`bin/install-deps.cmd\` 安装 Python 依赖
-        4. 运行 \`bin/ftllm.cmd\` 启动 WebUI
+        4. 运行 \`bin/ftllm.exe webui <模型路径>\` 启动 WebUI
         
         详细使用说明请参考 [README](https://github.com/Czerror/fastllm-windows#readme)
         EOF

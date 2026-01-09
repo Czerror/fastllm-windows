@@ -1,214 +1,187 @@
-# fastllm
+# FastLLM Windows
+
+[![Build Windows](https://github.com/Czerror/fastllm-windows/actions/workflows/build-windows.yml/badge.svg)](https://github.com/Czerror/fastllm-windows/actions/workflows/build-windows.yml)
+[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 
 [中文文档](README.md)
 
-| [Quick Start](#quick-start) | [DeepSeek Deployment Guide](docs/deepseek.md) | [Qwen3 Deployment Guide](docs/qwen3.md) | [Changelog](docs/version.md) |
+> 🔱 **Fork of [ztxz16/fastllm](https://github.com/ztxz16/fastllm)** — Pre-built binaries for Windows platform
 
-## Introduction
+This project is a Windows fork of [fastllm](https://github.com/ztxz16/fastllm), providing:
+- ✅ **Pre-compiled binaries** — Ready to use without build environment setup
+- ✅ **GitHub Actions auto-build** — CPU and CUDA versions
+- ✅ **One-click local build script** — Interactive PowerShell build tool
 
-fastllm is a high-performance LLMs inference library implemented in C++ with no backend dependencies (e.g. PyTorch).
+## 📦 Download
 
-It enables hybrid inference of MOE models, achieving 20+ tps on consumer-grade single GPUs (e.g., 4090) for DeepSeek R1 671B INT4 model inference.
+Go to [Releases](https://github.com/Czerror/fastllm-windows/releases) to download pre-built binaries:
 
+| Version | Description |
+|---------|-------------|
+| `fastllm-windows-cpu-x.x.x.zip` | CPU only, no GPU required |
+| `fastllm-windows-cuda-x.x.x.zip` | CUDA acceleration, requires NVIDIA GPU |
 
-Deployment discussion QQ group: 831641348  
+## 🚀 Quick Start
 
-WeChat group: ![QR Code](docs/wechat_group0.jpg)
+### 1. Extract the downloaded zip file
 
-## Key Features
+### 2. Environment Setup
 
-- 🚀 DeepSeek hybrid inference - deploy with multi-concurrency on consumer-grade single GPUs
-- 🚀 Multi-NUMA node acceleration support
-- 🚀 Dynamic batch and streaming output
-- 🚀 Multi-GPU deployment and GPU+CPU hybrid deployment
-- 🚀 Frontend-backend separation design for easy support of new computing devices
-- 🚀 Support ROCm, so it's possible to inference with AMD GPU.
-- 🚀 Pure C++ backend for easy cross-platform porting (can be directly compiled on Android)
-- 🚀 Support [customize model structures](docs/english_custom.md) in Python
+1. Add the `bin` directory to system PATH
+2. Ensure Python 3.8+ is installed (3.10+ recommended)
 
-## Quick Start
+### 3. Run Models
 
-### Installation
+**Method 1: Unified Entry Point (Recommended)**
+```cmd
+# Default uses C++ native programs
+ftllm chat D:\Models\Qwen3 --device cuda
 
-- PIP install (currently Nvidia GPU only)
-
-Linux systems can try direct pip installation:
-
-```
-pip install ftllm -U
-```
-
-(Note: Due to PyPI size limitations, the package doesn't include CUDA dependencies - manual installation of CUDA 12+ is recommended)
-```
-wget https://developer.download.nvidia.com/compute/cuda/12.8.1/local_installers/cuda_12.8.1_570.124.06_linux.run
-sudo sh cuda_12.8.1_570.124.06_linux.run
+# Use Python backend
+ftllm -py chat D:\Models\Qwen3 --device cuda
 ```
 
-#### Compile From Source
-
-If pip installation fails or you have special requirements, you can build from source:
-
-Thie project is built with cmake. Requires pre-installed gcc, g++ (7.5+ tested, 9.4+ recommended), make, cmake (3.23+ recommended)
-
-GPU compilation requires CUDA environment (9.2+ istested). Use the newest CUDA version possible.
-
-Compilation commands:
-
-``` sh
-bash install.sh -DUSE_CUDA=ON -D CMAKE_CUDA_COMPILER=$(which nvcc) # GPU version
-# bash install.sh -DUSE_CUDA=ON -DCUDA_ARCH=89 -D CMAKE_CUDA_COMPILER=$(which nvcc) # Specify CUDA arch (e.g. 89 for RTX 4090)
-# bash install.sh # CPU-only version
+**Method 2: Direct native program call**
+```cmd
+FastllmStudio_cli.exe -p D:\Models\Qwen3 --device cuda
 ```
 
-##### Compilation on Different Platforms
+### 4. Supported Models
 
-For compilation instructions on other platforms, please refer to the documentation:  
+Refer to upstream documentation: [Supported Models List](https://github.com/ztxz16/fastllm/blob/master/docs/models.md)
 
-[TFACC Platform](docs/tfacc.md)
-[ROCm Platform](docs/rocm.md)
+---
 
-If you meet problem during compilation, see [FAQ](docs/faq.md) doc.
+## 🔧 Build Options
 
-### Running Demos
+### Option 1: GitHub Actions Online Build
 
-Taking the Qwen/Qwen3-0.6B model as an example:
+This project has complete CI/CD workflow configured, automatically triggered on push to `master` branch.
 
-#### Command-line Chat:
+#### Trigger Conditions
+- Push to `master` branch
+- Create Pull Request to `master` branch
+- Manual trigger (workflow_dispatch)
 
-```
-ftllm run Qwen/Qwen3-0.6B
-```
+#### Build Artifacts
+The workflow generates two versions:
+- **CPU Version**: Pure CPU inference, compatible with all Windows x64 systems
+- **CUDA Version**: GPU acceleration, supports RTX 20/30/40/50 series
 
-#### WebUI:
+#### How to Use
 
-```
-ftllm webui Qwen/Qwen3-0.6B
-```
+1. **Fork this repository**
+2. **Push after modifying code**
+3. **Check build status on Actions page**
+4. **Download artifacts after build completes**
 
-#### API Server (OpenAI-style):
+If a Release tag is created (e.g., `v0.1.5.1`), it will be automatically published to Releases page.
 
-```
-ftllm server Qwen/Qwen3-0.6B
-```
+### Option 2: Local Build
 
-#### Local Models
+#### One-click Environment Setup
 
-You can launch a locally downloaded Hugging Face model. Assuming the local model path is `/mnt/Qwen/Qwen2-0.5B-Instruct/`, use the following command (similar for `webui` and `server`):
+```powershell
+# Clone repository
+git clone https://github.com/Czerror/fastllm-windows.git
+cd fastllm-windows
 
-```
-ftllm run /mnt/Qwen/Qwen3-0.6B/
-```
-
-#### Fuzzy Launch
-
-If you can't remember the exact model name, you can input an approximate name (matching is not guaranteed).  
-For example:
-```
-ftllm run qwen2-7b-awq
+# Run environment setup script (auto-detects and installs missing tools)
+.\setup-env.ps1
 ```
 
-```
-ftllm run deepseek-v3-0324-int4
-```
+The script will automatically detect and install:
+- **Visual Studio 2022 Build Tools** — MSVC compiler (required)
+- **CMake** — Portable version, auto-integrated into project
+- **CUDA Toolkit** — Only when NVIDIA GPU is detected
 
-#### Setting Cache Directory
+#### Manual Environment Requirements
 
-If you don't want to use the default cache directory, you can set it via parameter `--cache_dir`, for example:
+| Component | Version Requirement |
+|-----------|---------------------|
+| Windows | 10/11 x64 |
+| Visual Studio | 2022 (with C++ Desktop Development) |
+| CMake | 3.18+ |
+| CUDA Toolkit | 12.0+ (only for CUDA version) |
+| Python | 3.8+ (optional, for Python API) |
 
-```
-ftllm run deepseek-v3-0324-int4 --cache_dir /mnt/
-```
+#### Quick Build
 
-Or you can set it via the environment variable `FASTLLM_CACHEDIR`. For example, on Linux:  
+```powershell
+# Clone repository
+git clone https://github.com/Czerror/fastllm-windows.git
+cd fastllm-windows
 
-```
-export FASTLLM_CACHEDIR=/mnt/
-```
+# Initialize submodules
+git submodule update --init --recursive
 
-## Parameters
-
-The following are common parameters when running the `ftllm` module:
-
-### General Parameters
-
-- `-t` or `--threads`:  
-  - **Description**: Sets the number of CPU threads to use.  
-  - **Example**: `-t 27`  
-
-- `--dtype`:  
-  - **Description**: Specifies the data type of the model.  
-  - **Options**: `int4` or other supported data types.  
-  - **Example**: `--dtype int4`  
-
-- `--device`:  
-  - **Description**: Specifies the computing device for the model.  
-  - **Common Values**: `cpu`, `cuda`, or `numa`.  
-  - **Example**: `--device cpu` or `--device cuda`  
-
-- `--moe_device`:  
-  - **Description**: Specifies the computing device for the MOE (Mixture of Experts) layer.  
-  - **Common Values**: `cpu`, `cuda`, or `numa`.  
-  - **Example**: `--moe_device cpu`  
-
-- `--moe_experts`:  
-  - **Description**: Specifies the number of experts to use in the MOE layer. If not set, it follows the model's configuration. Reducing the number of experts may speed up inference but could lower accuracy.  
-  - **Example**: `--moe_experts 6`  
-
-- `--port`:  
-  - **Description**: Specifies the port number for the service.  
-  - **Example**: `--port 8080`  
-
-
-### Parameters for differnet Modules
-  
-Please read [Arguments for Demos](docs/english_demo_arguments.md) for further information.
-## Obtain Model
-
-### Model Download
-
-Use the following command to download a model locally:  
-
-```
-ftllm download deepseek-ai/DeepSeek-R1
+# Run build script (interactive)
+# Open "点我启动编译.bat" or run:
+.\build.ps1
 ```
 
+#### Build Script Options
 
-### Model Export
+Interactive menu guides you through:
+1. **Build Target**: CPU / CUDA / Both
+2. **CUDA Architecture**: All / Native GPU only / Specific architectures
+3. **CMake Options**: Memory mapping, SentencePiece, Python API, etc.
 
-If using quantized model loading (e.g., `--dtype int4`), the model will be quantized online each time it is loaded, which can be slow.  
+#### Command Line Mode
 
-`ftllm.export` is a tool for exporting and converting model weights. It supports converting model weights to different data types. Below are detailed instructions on how to use `ftllm.export`.  
+```powershell
+# Auto build CUDA version, compile only for native GPU
+.\build.ps1 -Auto -Target cuda -CudaArch native
 
-#### Command Format  
+# Auto build CPU version, skip packaging
+.\build.ps1 -Auto -Target cpu -NoPackage
 
-``` sh
-ftllm export <model_path> -o <output_path> --dtype <data_type> -t <threads>  
+# Clean rebuild
+.\build.ps1 -Auto -Target both -Clean
+
+# Build all CUDA architectures (compatible with RTX 20/30/40/50)
+.\build.ps1 -Auto -Target cuda -CudaArch "75;80;86;89;90;120"
 ```
 
-#### Example Command
+#### Build Output Location
 
-``` sh
-ftllm export /mnt/DeepSeek-V3 -o /mnt/DeepSeek-V3-INT4 --dtype int4 -t 16
+After build completes, outputs are located at:
+- Binary files: `build\x64\Release\`
+- Packaged ZIP: `build\fastllm-windows-[cpu|cuda]-x.x.x.zip`
+
+---
+
+## 📁 Project Structure
+
+```
+fastllm-windows/
+├── .github/workflows/     # GitHub Actions workflows
+│   └── build-windows.yml  # Windows build configuration
+├── build.ps1              # Windows local build script
+├── include/               # C++ header files
+├── src/                   # C++ source code
+├── tools/                 # Python tools and scripts
+├── example/               # Example code
+└── docs/                  # Documentation
 ```
 
-#### Mixed Precisions
+---
 
-You can specify `--moe_dtype` for mixed precision of a MoE model, for example:
+## 🔗 Related Links
 
-``` sh
-ftllm export /mnt/DeepSeek-V3 -o /mnt/DeepSeek-V3-FP16INT4 --dtype float16 --moe_dtype int4 -t 16
-```
+- **Upstream Repository**: [ztxz16/fastllm](https://github.com/ztxz16/fastllm)
+- **Documentation**: [docs/](https://github.com/ztxz16/fastllm/tree/master/docs)
+- **Deploy DeepSeek**: [docs/deepseek.md](https://github.com/ztxz16/fastllm/blob/master/docs/deepseek.md)
+- **Deploy Qwen3**: [docs/qwen3.md](https://github.com/ztxz16/fastllm/blob/master/docs/qwen3.md)
 
-#### Loading the Exported Model
+---
 
-The exported model can be used similarly to the original model. The `--dtype` parameter will be ignored when using the exported model.
+## 📄 License
 
-For example:
+This project follows [Apache License 2.0](LICENSE), consistent with upstream fastllm.
 
-``` sh
-ftllm run /mnt/DeepSeek-V3-INT4/
-```
+---
 
-### Supported Models
+## 🙏 Acknowledgments
 
-Fastllm supports original, AWQ and FASTLLM models. Please refer [Supported Models](docs/models.md) for older models.
+Thanks to [ztxz16/fastllm](https://github.com/ztxz16/fastllm) for the excellent LLM inference engine.

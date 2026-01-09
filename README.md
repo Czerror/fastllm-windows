@@ -30,14 +30,18 @@
 
 ### 3. 运行模型
 
-**方式一：Python CLI（推荐）**
+**方式一：统一入口（推荐）**
 ```cmd
-ftllm run D:\Models\Qwen3 --device cuda
+# 默认使用 C++ 原生程序
+ftllm chat D:\Models\Qwen3 --device cuda
+
+# 使用 Python 后端
+ftllm -py chat D:\Models\Qwen3 --device cuda
 ```
 
-**方式二：原生程序**
+**方式二：直接调用原生程序**
 ```cmd
-main.exe -p D:\Models\Qwen3 --device cuda
+FastllmStudio_cli.exe -p D:\Models\Qwen3 --device cuda
 ```
 
 ### 4. 支持的模型
