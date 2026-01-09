@@ -1,0 +1,112 @@
+name: Build All Platforms
+
+on:
+  # 推送版本标签时触发
+  push:
+    tags:
+      - 'v*'
+  
+  # 手动触发
+  workflow_dispatch:
+    inputs:
+      build_windows:
+        description: 'Build Windows versions'
+        type: boolean
+        default: true
+      build_linux:
+        description: 'Build Linux versions'
+        type: boolean
+        default: true
+      build_macos:
+        description: 'Build macOS versions'
+        type: boolean
+        default: true
+      cuda_arch:
+        description: 'CUDA architectures (semicolon separated)'
+        type: string
+        default: '75;80;86;89;90;120'
+      rocm_arch:
+        description: 'ROCm architectures (semicolon separated)'
+        type: string
+        default: 'gfx906;gfx908;gfx90a;gfx940;gfx941;gfx942;gfx1030;gfx1031;gfx1032;gfx1100;gfx1101;gfx1102;gfx1200;gfx1201'
+
+jobs:
+  # Windows 构建
+  build-windows:
+    name: Windows Build
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_windows }}
+    uses: ./.github/workflows/build-windows.yml
+    with:
+      build_cpu: true
+      build_cuda: true
+      cuda_arch: ${{ github.event.inputs.cuda_arch || '75;80;86;89;90;120' }}
+    secrets: inherit
+
+  # Linux 构建
+  build-linux:
+    name: Linux Build
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_linux }}
+    uses: ./.github/workflows/build-linux.yml
+    with:
+      build_cpu: true
+      build_cuda: true
+      build_rocm: true
+      cuda_arch: ${{ github.event.inputs.cuda_arch || '75;80;86;89;90;120' }}
+      rocm_arch: ${{ github.event.inputs.rocm_arch || 'gfx906;gfx908;gfx90a;gfx940;gfx941;gfx942;gfx1030;gfx1031;gfx1032;gfx1100;gfx1101;gfx1102;gfx1200;gfx1201' }}
+    secrets: inherit
+
+  # macOS 构建
+  build-macos:
+    name: macOS Build
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_macos }}
+    uses: ./.github/workflows/build-macos.yml
+    with:
+      build_intel: true
+      build_arm: true
+    secrets: inherit
+
+  # 汇总所有构建结果
+  summary:
+    name: Build Summary
+    runs-on: ubuntu-latest
+    needs: [build-windows, build-linux, build-macos]
+    if: always()
+    
+    steps:
+    - name: Check build results
+      run: |
+        echo "## Build Summary" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "| Platform | Status |" >> $GITHUB_STEP_SUMMARY
+        echo "|----------|--------|" >> $GITHUB_STEP_SUMMARY
+        
+        if [ "${{ needs.build-windows.result }}" == "success" ]; then
+          echo "| Windows | ✅ Success |" >> $GITHUB_STEP_SUMMARY
+        elif [ "${{ needs.build-windows.result }}" == "skipped" ]; then
+          echo "| Windows | ⏭️ Skipped |" >> $GITHUB_STEP_SUMMARY
+        else
+          echo "| Windows | ❌ ${{ needs.build-windows.result }} |" >> $GITHUB_STEP_SUMMARY
+        fi
+        
+        if [ "${{ needs.build-linux.result }}" == "success" ]; then
+          echo "| Linux | ✅ Success |" >> $GITHUB_STEP_SUMMARY
+        elif [ "${{ needs.build-linux.result }}" == "skipped" ]; then
+          echo "| Linux | ⏭️ Skipped |" >> $GITHUB_STEP_SUMMARY
+        else
+          echo "| Linux | ❌ ${{ needs.build-linux.result }} |" >> $GITHUB_STEP_SUMMARY
+        fi
+        
+        if [ "${{ needs.build-macos.result }}" == "success" ]; then
+          echo "| macOS | ✅ Success |" >> $GITHUB_STEP_SUMMARY
+        elif [ "${{ needs.build-macos.result }}" == "skipped" ]; then
+          echo "| macOS | ⏭️ Skipped |" >> $GITHUB_STEP_SUMMARY
+        else
+          echo "| macOS | ❌ ${{ needs.build-macos.result }} |" >> $GITHUB_STEP_SUMMARY
+        fi
+        
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### Available Artifacts" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "- **Windows**: fastllm-win-x64-cpu, fastllm-win-x64-cuda" >> $GITHUB_STEP_SUMMARY
+        echo "- **Linux**: fastllm-linux-x64-cpu, fastllm-linux-x64-cuda, fastllm-linux-x64-rocm" >> $GITHUB_STEP_SUMMARY
+        echo "- **macOS**: fastllm-macos-x64, fastllm-macos-arm64, fastllm-macos-universal" >> $GITHUB_STEP_SUMMARY

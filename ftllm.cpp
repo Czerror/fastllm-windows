@@ -13,13 +13,36 @@
 #include <cstdlib>
 #ifdef _WIN32
 #include <windows.h>
-#include <process.h>
 #else
 #include <unistd.h>
 #include <sys/stat.h>
 #endif
 
 const char* FTLLM_VERSION = "1.0.1";
+
+// ============================================================================
+// 初始化
+// ============================================================================
+
+#ifdef _WIN32
+/**
+ * 初始化 Windows 控制台以支持 UTF-8 输出
+ */
+void initWindowsConsole() {
+    // 设置控制台输出代码页为 UTF-8
+    SetConsoleOutputCP(CP_UTF8);
+    SetConsoleCP(CP_UTF8);
+    
+    // 启用 ANSI 转义序列（用于彩色输出）
+    HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE);
+    if (hOut != INVALID_HANDLE_VALUE) {
+        DWORD mode = 0;
+        if (GetConsoleMode(hOut, &mode)) {
+            SetConsoleMode(hOut, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
+        }
+    }
+}
+#endif
 
 // ============================================================================
 // 工具函数
@@ -117,7 +140,14 @@ std::string extractModelPath(int argc, char** argv) {
             // 带值的选项，跳过下一个参数
             if (arg == "-t" || arg == "--threads" || arg == "--device" || 
                 arg == "--dtype" || arg == "--host" || arg == "--port" ||
-                arg == "--lora" || arg == "--system" || arg == "--api_key") {
+                arg == "--lora" || arg == "--system" || arg == "--api_key" ||
+                arg == "--batch" || arg == "--model_name" || arg == "--atype" ||
+                arg == "--moe_device" || arg == "--moe_dtype" || arg == "--moe_experts" ||
+                arg == "--kv_cache_limit" || arg == "--max_batch" || arg == "--max_token" ||
+                arg == "--cache_dir" || arg == "--ori" || arg == "--custom" ||
+                arg == "--dtype_config" || arg == "--chat_template" || arg == "--tool_call_parser" ||
+                arg == "--top_p" || arg == "--top_k" || arg == "--temperature" || arg == "--repeat_penalty" ||
+                arg == "-o" || arg == "--output") {
                 i++;
             }
             continue;
@@ -178,10 +208,10 @@ const CommandMapping* findCommand(const std::string& cmd) {
 int executeNativeProgram(const std::string& exeName, int argc, char** argv, int startArg) {
     std::string exeDir = getExeDirectory();
     
-    // 搜索路径: bin 子目录或同级目录
+    // 搜索路径: 同级目录 + 常见子文件夹
     std::vector<std::string> searchPaths = {
-        exeDir + "\\bin\\" + exeName,
         exeDir + "\\" + exeName,
+        exeDir + "\\bin\\" + exeName,
     };
     
     std::string exePath;
@@ -194,22 +224,52 @@ int executeNativeProgram(const std::string& exeName, int argc, char** argv, int 
     
     if (exePath.empty()) {
         std::cerr << "[错误] 找不到原生程序: " << exeName << std::endl;
-        std::cerr << "搜索路径:" << std::endl;
-        for (const auto& path : searchPaths) {
-            std::cerr << "  - " << path << std::endl;
-        }
         return 1;
     }
     
     // 构建命令行
+#ifdef _WIN32
+    // chcp 65001 确保子进程使用 UTF-8 代码页，避免中文乱码
+    std::string cmd = "chcp 65001 >nul && \"" + exePath + "\"";
+#else
     std::string cmd = "\"" + exePath + "\"";
+#endif
+    
+    // 检查是否已有 -p/--path 参数
+    bool hasPathArg = false;
+    std::string positionalModelPath;
+    
+    for (int i = startArg; i < argc; i++) {
+        std::string arg = argv[i];
+        if (arg == "-p" || arg == "--path") {
+            hasPathArg = true;
+            break;
+        }
+    }
+    
+    // 处理参数
     for (int i = startArg; i < argc; i++) {
         std::string arg = argv[i];
         if (arg == "-py") continue;  // 跳过 -py 参数
         
+        // 检测第一个位置参数（模型路径）
+        if (!hasPathArg && positionalModelPath.empty() && arg[0] != '-') {
+            // 检查是否像模型路径
+            if (isDirectory(arg) || fileExists(arg) || 
+                arg.find(':') != std::string::npos ||
+                arg.find('/') != std::string::npos ||
+                arg.find('\\') != std::string::npos) {
+                positionalModelPath = arg;
+                // 为原生程序添加 -p 参数
+                cmd += " -p";
+            }
+        }
+        
         bool needQuote = (arg.find(' ') != std::string::npos || 
                           arg.find('"') != std::string::npos ||
-                          arg.find('&') != std::string::npos);
+                          arg.find('&') != std::string::npos ||
+                          arg.find('{') != std::string::npos ||
+                          arg.find('}') != std::string::npos);
         if (needQuote) {
             std::string escaped;
             for (char c : arg) {
@@ -230,42 +290,24 @@ int executeNativeProgram(const std::string& exeName, int argc, char** argv, int 
 // ============================================================================
 
 std::string buildPythonCommand(int argc, char** argv, int startArg = 1) {
-    // 检测便携版: pytools 目录在 exe 同级或上级
     std::string exeDir = getExeDirectory();
-    std::string pytoolsPath;
-    
-    // 检查 exe同级/pytools 或 exe上级/pytools
-    std::vector<std::string> searchPaths = {
-        exeDir + "\\pytools",
-        exeDir + "\\..\\pytools",
-        exeDir + "/pytools",
-        exeDir + "/../pytools"
-    };
-    
-    for (const auto& path : searchPaths) {
-        std::string cliPath = path + "\\cli.py";
-        std::string cliPathUnix = path + "/cli.py";
-#ifdef _WIN32
-        if (GetFileAttributesA(cliPath.c_str()) != INVALID_FILE_ATTRIBUTES) {
-            pytoolsPath = path;
-            break;
-        }
-#else
-        struct stat st;
-        if (stat(cliPathUnix.c_str(), &st) == 0) {
-            pytoolsPath = path;
-            break;
-        }
-#endif
-    }
+    std::string ftllmPath = exeDir + "/ftllm";
     
     std::string cmd;
-    if (!pytoolsPath.empty()) {
-        // 便携版模式：直接运行 cli.py
-        cmd = "python \"" + pytoolsPath + "\\cli.py\"";
+    if (fileExists(ftllmPath + "/__init__.py")) {
+#ifdef _WIN32
+        // chcp 65001 确保子进程使用 UTF-8 代码页，避免中文乱码
+        cmd = "chcp 65001 >nul && cd /d \"" + exeDir + "\" && python -m ftllm";
+#else
+        cmd = "cd \"" + exeDir + "\" && python -m ftllm";
+#endif
     } else {
         // 安装版模式：使用 python -m ftllm
+#ifdef _WIN32
+        cmd = "chcp 65001 >nul && python -m ftllm";
+#else
         cmd = "python -m ftllm";
+#endif
     }
     
     for (int i = startArg; i < argc; i++) {
@@ -275,7 +317,9 @@ std::string buildPythonCommand(int argc, char** argv, int startArg = 1) {
         // 处理包含空格或特殊字符的参数
         bool needQuote = (arg.find(' ') != std::string::npos || 
                           arg.find('"') != std::string::npos ||
-                          arg.find('&') != std::string::npos);
+                          arg.find('&') != std::string::npos ||
+                          arg.find('{') != std::string::npos ||
+                          arg.find('}') != std::string::npos);
         if (needQuote) {
             std::string escaped;
             for (char c : arg) {
@@ -292,11 +336,7 @@ std::string buildPythonCommand(int argc, char** argv, int startArg = 1) {
 
 int executePythonBackend(int argc, char** argv, int startArg = 1) {
     std::string cmd = buildPythonCommand(argc, argv, startArg);
-#ifdef _WIN32
     return system(cmd.c_str());
-#else
-    return system(cmd.c_str());
-#endif
 }
 
 // ============================================================================
@@ -364,9 +404,7 @@ void Usage() {
 
 int main(int argc, char **argv) {
 #ifdef _WIN32
-    // 设置 UTF-8 代码页
-    SetConsoleOutputCP(65001);
-    SetConsoleCP(65001);
+    initWindowsConsole();
 #endif
 
     // 无参数时显示帮助
@@ -431,17 +469,93 @@ int main(int argc, char **argv) {
         // 检查是否有显式 --lora 参数
         for (int i = 1; i < argc; i++) {
             if (std::string(argv[i]) == "--lora") {
-                std::cerr << "[自动检测] 指定 --lora 参数，切换到 Python 后端" << std::endl;
+                std::cout << "[自动检测] 指定 --lora 参数，切换到 Python 后端" << std::endl;
                 usePython = true;
                 break;
             }
         }
     }
     
+    // 检测 Python 后端专用参数 (原生程序不支持)
+    // 完整对比见: C++ apiserver/webui/benchmark vs Python util.py/cli.py
+    std::vector<std::string> unsupportedArgs;
+    if (!usePython) {
+        static const char* pythonOnlyArgs[] = {
+            // ===== MOE / 设备配置 =====
+            "--host",               // apiserver 不支持 host 绑定
+            "--moe_device",         // MOE 设备配置 (如 "{'cuda':1,'cpu':4}")
+            "--moe_dtype",          // MOE 权重类型
+            "--moe_experts",        // MOE 专家数
+            
+            // ===== CUDA 配置 =====
+            "--cuda_embedding",     // CUDA embedding
+            "--kv_cache_limit",     // KV 缓存最大使用量
+            
+            // ===== 缓存 / 内存配置 =====
+            "--max_batch",          // 最大批次 (Python 用 max_batch, 原生用 batch)
+            "--cache_history",      // 缓存历史对话
+            "--cache_fast",         // 快速缓存（消耗显存）
+            "--cache_dir",          // 模型缓存目录
+            
+            // ===== 模型特性 =====
+            "--enable_thinking",    // 硬思考开关（需要模型支持）
+            "--cuda_shared_expert", // CUDA 共享专家 (--cuda_se)
+            "--cuda_se",            // 同上的别名
+            "--enable_amx",         // AMX 加速
+            "--amx",                // 同上的别名
+            "--flash_attn",         // Flash Attention
+            
+            // ===== LoRA / 自定义 =====
+            "--lora",               // LoRA 路径
+            "--adapter",            // LoRA adapter (别名)
+            "--custom",             // 自定义模型 python 文件
+            "--dtype_config",       // 权重类型配置文件
+            "--ori",                // 原始模型权重（GGUF）
+            
+            // ===== 模板 / 解析 =====
+            "--tool_call_parser",   // tool_call 解析器
+            "--chat_template",      // 聊天模板文件
+            
+            // ===== Server 专用 =====
+            "--model_name",         // 模型名称
+            "--api_key",            // API 密钥
+            "--think",              // 处理 <think> 标签
+            "--hide_input",         // 不显示请求信息
+            "--dev_mode",           // 开发模式
+            
+            // ===== 采样参数 (部分原生支持) =====
+            "--top_p",              // 采样参数
+            "--top_k",              // 采样参数
+            "--temperature",        // 温度参数
+            "--repeat_penalty",     // 重复惩罚
+            
+            nullptr
+        };
+        
+        for (int i = 1; i < argc; i++) {
+            std::string arg = argv[i];
+            for (int j = 0; pythonOnlyArgs[j]; j++) {
+                if (arg == pythonOnlyArgs[j]) {
+                    unsupportedArgs.push_back(arg);
+                    break;
+                }
+            }
+        }
+        
+        if (!unsupportedArgs.empty()) {
+            std::cout << "[提示] 以下参数在 C++ 原生程序中不支持:" << std::endl;
+            for (const auto& arg : unsupportedArgs) {
+                std::cout << "  - " << arg << std::endl;
+            }
+            std::cout << "[自动切换] 使用 Python 后端以支持这些参数" << std::endl;
+            usePython = true;
+        }
+    }
+    
     if (!usePython) {
         std::string modelPath = extractModelPath(argc, argv);
         if (detectLoraInModelPath(modelPath)) {
-            std::cerr << "[自动检测] 发现 LoRA 配置，切换到 Python 后端" << std::endl;
+            std::cout << "[自动检测] 发现 LoRA 配置，切换到 Python 后端" << std::endl;
             usePython = true;
         }
     }
@@ -488,27 +602,53 @@ int main(int argc, char **argv) {
     
     if (looksLikeModelPath) {
         // 用户可能直接输入了模型路径，提示正确用法
-        std::cerr << "[提示] 检测到模型路径，尝试启动聊天..." << std::endl;
+        std::cout << "[提示] 检测到模型路径，尝试启动聊天..." << std::endl;
         // 构造新的参数: ftllm chat <modelPath> [其他参数]
         std::string exeDir = getExeDirectory();
-        std::string cliExe = exeDir + "\\bin\\FastllmStudio_cli.exe";
-        if (!fileExists(cliExe)) {
-            cliExe = exeDir + "\\FastllmStudio_cli.exe";
+        std::string cliExe;
+        
+        // 搜索路径: 同级目录 + 常见子文件夹
+        std::vector<std::string> cliPaths = {
+            exeDir + "\\FastllmStudio_cli.exe",
+            exeDir + "\\bin\\FastllmStudio_cli.exe",
+        };
+        for (const auto& p : cliPaths) {
+            if (fileExists(p)) { cliExe = p; break; }
         }
         
-        if (fileExists(cliExe)) {
+        if (!cliExe.empty()) {
+#ifdef _WIN32
+            // chcp 65001 确保子进程使用 UTF-8 代码页，避免中文乱码
+            std::string cmd = "chcp 65001 >nul && \"" + cliExe + "\" -p \"" + command + "\"";
+#else
             std::string cmd = "\"" + cliExe + "\" -p \"" + command + "\"";
+#endif
             // 添加剩余参数
             for (int i = commandIndex + 1; i < argc; i++) {
                 std::string arg = argv[i];
                 if (arg == "-py") continue;
-                cmd += " " + arg;
+                
+                bool needQuote = (arg.find(' ') != std::string::npos || 
+                                  arg.find('"') != std::string::npos ||
+                                  arg.find('&') != std::string::npos ||
+                                  arg.find('{') != std::string::npos ||
+                                  arg.find('}') != std::string::npos);
+                if (needQuote) {
+                    std::string escaped;
+                    for (char c : arg) {
+                        if (c == '"') escaped += "\\\"";
+                        else escaped += c;
+                    }
+                    cmd += " \"" + escaped + "\"";
+                } else {
+                    cmd += " " + arg;
+                }
             }
             return system(cmd.c_str());
         }
     }
     
     // 未知命令，尝试 Python 后端
-    std::cerr << "[提示] 未知命令 '" << command << "'，尝试 Python 后端..." << std::endl;
+    std::cout << "[提示] 未知命令 '" << command << "'，尝试 Python 后端..." << std::endl;
     return executePythonBackend(argc, argv);
 }

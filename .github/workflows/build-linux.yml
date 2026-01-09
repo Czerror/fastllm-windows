@@ -1,0 +1,570 @@
+name: Build Linux Release
+
+on:
+  # 推送版本标签时触发
+  push:
+    tags:
+      - 'v*'
+  
+  # 手动触发
+  workflow_dispatch:
+    inputs:
+      build_cpu:
+        description: 'Build CPU version'
+        type: boolean
+        default: true
+      build_cuda:
+        description: 'Build CUDA version'
+        type: boolean
+        default: true
+      build_rocm:
+        description: 'Build ROCm version (AMD GPU)'
+        type: boolean
+        default: true
+      cuda_arch:
+        description: 'CUDA architectures (semicolon separated)'
+        type: string
+        default: '75;80;86;89;90;120'
+      rocm_arch:
+        description: 'ROCm architectures (semicolon separated)'
+        type: string
+        default: 'gfx906;gfx908;gfx90a;gfx940;gfx941;gfx942;gfx1030;gfx1031;gfx1032;gfx1100;gfx1101;gfx1102;gfx1200;gfx1201'
+  
+  # 被其他工作流调用
+  workflow_call:
+    inputs:
+      build_cpu:
+        description: 'Build CPU version'
+        type: boolean
+        default: true
+      build_cuda:
+        description: 'Build CUDA version'
+        type: boolean
+        default: true
+      build_rocm:
+        description: 'Build ROCm version (AMD GPU)'
+        type: boolean
+        default: true
+      cuda_arch:
+        description: 'CUDA architectures (semicolon separated)'
+        type: string
+        default: '75;80;86;89;90;120'
+      rocm_arch:
+        description: 'ROCm architectures (semicolon separated)'
+        type: string
+        default: 'gfx906;gfx908;gfx90a;gfx940;gfx941;gfx942;gfx1030;gfx1031;gfx1032;gfx1100;gfx1101;gfx1102;gfx1200;gfx1201'
+
+env:
+  BUILD_TYPE: Release
+
+jobs:
+  build-cpu:
+    name: Build CPU Version (Linux)
+    runs-on: ubuntu-22.04
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_cpu }}
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        submodules: recursive
+    
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y build-essential cmake ninja-build
+    
+    - name: Setup Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+    
+    - name: Get version from setup.py
+      id: version
+      run: |
+        VERSION=$(sed -n 's/.*version\s*=\s*"\([^"]*\)".*/\1/p' tools/scripts/setup.py)
+        echo "version=${VERSION}" >> $GITHUB_OUTPUT
+        echo "Detected version: ${VERSION}"
+    
+    - name: Configure CMake (CPU)
+      run: |
+        mkdir build
+        cd build
+        cmake .. -G Ninja \
+          -DCMAKE_BUILD_TYPE=Release \
+          -DUSE_MMAP=ON \
+          -DUSE_SENTENCEPIECE=ON \
+          -DBUILD_CLI=ON \
+          -DPY_API=ON
+    
+    - name: Build (CPU Release)
+      run: |
+        cd build
+        ninja -j$(nproc)
+    
+    - name: Prepare Release Package (CPU)
+      run: |
+        VERSION="${{ steps.version.outputs.version }}"
+        
+        mkdir -p release-cpu/bin
+        mkdir -p release-cpu/ftllm
+        mkdir -p release-cpu/web
+        mkdir -p release-cpu/docs
+        mkdir -p release-cpu/lib
+        
+        # Copy main executable to root
+        cp build/ftllm release-cpu/
+        
+        # Copy other executables to bin/
+        for exe in build/*; do
+          if [ -x "$exe" ] && [ -f "$exe" ] && [ "$(basename "$exe")" != "ftllm" ]; then
+            # Skip non-executable files
+            if file "$exe" | grep -q "executable"; then
+              cp "$exe" release-cpu/bin/
+            fi
+          fi
+        done
+        
+        # Copy shared libraries
+        cp build/*.so release-cpu/lib/ 2>/dev/null || true
+        cp build/tools/ftllm/*.so release-cpu/ftllm/ 2>/dev/null || true
+        
+        # Copy Python tools
+        for f in build/tools/ftllm/*; do
+          fname=$(basename "$f")
+          if [ "$fname" != "__init__.py" ] && [ "$fname" != "__main__.py" ]; then
+            cp -r "$f" release-cpu/ftllm/ 2>/dev/null || true
+          fi
+        done
+        
+        # Copy requirements.txt
+        cp tools/fastllm_pytools/requirements.txt release-cpu/ftllm/
+        
+        # Generate __init__.py with correct version
+        cat > release-cpu/ftllm/__init__.py << EOF
+        __all__ = ["llm"]
+
+        try:
+            from importlib.metadata import version
+            __version__ = version("ftllm")
+        except:
+            try:
+                __version__ = version("ftllm-rocm")
+            except:
+                __version__ = "${VERSION}"
+        EOF
+        
+        # Generate __main__.py for python -m ftllm
+        cat > release-cpu/ftllm/__main__.py << 'EOF'
+        """ftllm - FastLLM 命令行入口"""
+        from .cli import main
+
+        if __name__ == "__main__":
+            main()
+        EOF
+        
+        # Copy web resources
+        cp -r example/webui/web/* release-cpu/web/
+        
+        # Copy docs
+        find docs -name "*.md" ! -name "使用说明.md" -exec cp {} release-cpu/docs/ \;
+        cp README*.md release-cpu/docs/
+        
+        # Copy 使用说明.md to root
+        if [ -f "docs/使用说明.md" ]; then
+          cp docs/使用说明.md release-cpu/
+        fi
+        
+        # Create run script
+        cat > release-cpu/run.sh << 'EOF'
+        #!/bin/bash
+        SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+        export LD_LIBRARY_PATH="${SCRIPT_DIR}/lib:${LD_LIBRARY_PATH}"
+        "${SCRIPT_DIR}/ftllm" "$@"
+        EOF
+        chmod +x release-cpu/run.sh
+        chmod +x release-cpu/ftllm
+    
+    - name: Upload CPU Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: fastllm-linux-x64-cpu-${{ steps.version.outputs.version }}
+        path: release-cpu/
+        retention-days: 30
+
+  build-cuda:
+    name: Build CUDA Version (Linux)
+    runs-on: ubuntu-22.04
+    needs: build-cpu
+    if: ${{ always() && (github.event_name != 'workflow_dispatch' || inputs.build_cuda) }}
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        submodules: recursive
+    
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y build-essential cmake ninja-build
+    
+    - name: Setup Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+    
+    - name: Get version from setup.py
+      id: version
+      run: |
+        VERSION=$(sed -n 's/.*version\s*=\s*"\([^"]*\)".*/\1/p' tools/scripts/setup.py)
+        echo "version=${VERSION}" >> $GITHUB_OUTPUT
+        echo "Detected version: ${VERSION}"
+    
+    - name: Install CUDA Toolkit
+      uses: Jimver/cuda-toolkit@v0.2.30
+      id: cuda-toolkit
+      with:
+        cuda: '12.4.1'  # Linux 使用 CUDA 12.4 稳定版
+        method: 'network'
+        linux-local-args: '["--toolkit"]'
+    
+    - name: Display CUDA version
+      run: |
+        echo "CUDA Version: ${{ steps.cuda-toolkit.outputs.cuda }}"
+        echo "CUDA Path: ${{ steps.cuda-toolkit.outputs.CUDA_PATH }}"
+        nvcc --version
+    
+    - name: Configure CMake (CUDA)
+      run: |
+        CUDA_ARCH="${{ github.event.inputs.cuda_arch || '75;80;86;89;90;120' }}"
+        mkdir build-cuda
+        cd build-cuda
+        cmake .. -G Ninja \
+          -DCMAKE_BUILD_TYPE=Release \
+          -DUSE_CUDA=ON \
+          -DCUDA_ARCH="${CUDA_ARCH}" \
+          -DUSE_MMAP=ON \
+          -DUSE_SENTENCEPIECE=ON \
+          -DBUILD_CLI=ON \
+          -DPY_API=ON
+      env:
+        CUDA_PATH: ${{ steps.cuda-toolkit.outputs.CUDA_PATH }}
+    
+    - name: Build (CUDA Release)
+      run: |
+        cd build-cuda
+        ninja -j$(nproc)
+    
+    - name: Prepare Release Package (CUDA)
+      run: |
+        VERSION="${{ steps.version.outputs.version }}"
+        
+        mkdir -p release-cuda/bin
+        mkdir -p release-cuda/ftllm
+        mkdir -p release-cuda/web
+        mkdir -p release-cuda/docs
+        mkdir -p release-cuda/lib
+        
+        # Copy main executable to root
+        cp build-cuda/ftllm release-cuda/
+        
+        # Copy other executables to bin/
+        for exe in build-cuda/*; do
+          if [ -x "$exe" ] && [ -f "$exe" ] && [ "$(basename "$exe")" != "ftllm" ]; then
+            if file "$exe" | grep -q "executable"; then
+              cp "$exe" release-cuda/bin/
+            fi
+          fi
+        done
+        
+        # Copy shared libraries
+        cp build-cuda/*.so release-cuda/lib/ 2>/dev/null || true
+        cp build-cuda/tools/ftllm/*.so release-cuda/ftllm/ 2>/dev/null || true
+        
+        # Copy Python tools
+        for f in build-cuda/tools/ftllm/*; do
+          fname=$(basename "$f")
+          if [ "$fname" != "__init__.py" ] && [ "$fname" != "__main__.py" ]; then
+            cp -r "$f" release-cuda/ftllm/ 2>/dev/null || true
+          fi
+        done
+        
+        # Copy requirements.txt
+        cp tools/fastllm_pytools/requirements.txt release-cuda/ftllm/
+        
+        # Generate __init__.py with correct version
+        cat > release-cuda/ftllm/__init__.py << EOF
+        __all__ = ["llm"]
+
+        try:
+            from importlib.metadata import version
+            __version__ = version("ftllm")
+        except:
+            try:
+                __version__ = version("ftllm-rocm")
+            except:
+                __version__ = "${VERSION}"
+        EOF
+        
+        # Generate __main__.py for python -m ftllm
+        cat > release-cuda/ftllm/__main__.py << 'EOF'
+        """ftllm - FastLLM 命令行入口"""
+        from .cli import main
+
+        if __name__ == "__main__":
+            main()
+        EOF
+        
+        # Copy web resources
+        cp -r example/webui/web/* release-cuda/web/
+        
+        # Copy docs
+        find docs -name "*.md" ! -name "使用说明.md" -exec cp {} release-cuda/docs/ \;
+        cp README*.md release-cuda/docs/
+        
+        # Copy 使用说明.md to root
+        if [ -f "docs/使用说明.md" ]; then
+          cp docs/使用说明.md release-cuda/
+        fi
+        
+        # Create run script
+        cat > release-cuda/run.sh << 'EOF'
+        #!/bin/bash
+        SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+        export LD_LIBRARY_PATH="${SCRIPT_DIR}/lib:${LD_LIBRARY_PATH}"
+        "${SCRIPT_DIR}/ftllm" "$@"
+        EOF
+        chmod +x release-cuda/run.sh
+        chmod +x release-cuda/ftllm
+    
+    - name: Upload CUDA Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: fastllm-linux-x64-cuda-${{ steps.version.outputs.version }}
+        path: release-cuda/
+        retention-days: 30
+
+  build-rocm:
+    name: Build ROCm Version (Linux)
+    runs-on: ubuntu-22.04
+    needs: build-cuda
+    if: ${{ always() && (github.event_name != 'workflow_dispatch' || inputs.build_rocm) }}
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        submodules: recursive
+    
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y build-essential cmake ninja-build wget gnupg2
+    
+    - name: Setup Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+    
+    - name: Get version from setup.py
+      id: version
+      run: |
+        VERSION=$(sed -n 's/.*version\s*=\s*"\([^"]*\)".*/\1/p' tools/scripts/setup.py)
+        echo "version=${VERSION}" >> $GITHUB_OUTPUT
+        echo "Detected version: ${VERSION}"
+    
+    - name: Install ROCm
+      run: |
+        # Add ROCm repository (ROCm 7.2)
+        wget -q -O - https://repo.radeon.com/rocm/rocm.gpg.key | sudo apt-key add -
+        echo "deb [arch=amd64] https://repo.radeon.com/rocm/apt/7.2 jammy main" | sudo tee /etc/apt/sources.list.d/rocm.list
+        
+        # Install ROCm development packages
+        sudo apt-get update
+        sudo apt-get install -y rocm-dev hip-dev hipblas-dev rocprim-dev
+        
+        # Set up environment
+        echo "/opt/rocm/bin" >> $GITHUB_PATH
+        echo "ROCM_PATH=/opt/rocm" >> $GITHUB_ENV
+        echo "HIP_PATH=/opt/rocm/hip" >> $GITHUB_ENV
+    
+    - name: Display ROCm version
+      run: |
+        /opt/rocm/bin/hipcc --version || true
+        /opt/rocm/bin/rocminfo || true
+    
+    - name: Configure CMake (ROCm)
+      run: |
+        ROCM_ARCH="${{ github.event.inputs.rocm_arch || 'gfx906;gfx908;gfx90a;gfx940;gfx941;gfx942;gfx1030;gfx1031;gfx1032;gfx1100;gfx1101;gfx1102;gfx1200;gfx1201' }}"
+        mkdir build-rocm
+        cd build-rocm
+        cmake .. -G Ninja \
+          -DCMAKE_BUILD_TYPE=Release \
+          -DUSE_ROCM=ON \
+          -DROCM_ARCH="${ROCM_ARCH}" \
+          -DUSE_MMAP=ON \
+          -DUSE_SENTENCEPIECE=ON \
+          -DBUILD_CLI=ON \
+          -DPY_API=ON
+      env:
+        ROCM_PATH: /opt/rocm
+        HIP_PATH: /opt/rocm/hip
+    
+    - name: Build (ROCm Release)
+      run: |
+        cd build-rocm
+        ninja -j$(nproc)
+    
+    - name: Prepare Release Package (ROCm)
+      run: |
+        VERSION="${{ steps.version.outputs.version }}"
+        
+        mkdir -p release-rocm/bin
+        mkdir -p release-rocm/ftllm
+        mkdir -p release-rocm/web
+        mkdir -p release-rocm/docs
+        mkdir -p release-rocm/lib
+        
+        # Copy main executable to root
+        cp build-rocm/ftllm release-rocm/
+        
+        # Copy other executables to bin/
+        for exe in build-rocm/*; do
+          if [ -x "$exe" ] && [ -f "$exe" ] && [ "$(basename "$exe")" != "ftllm" ]; then
+            if file "$exe" | grep -q "executable"; then
+              cp "$exe" release-rocm/bin/
+            fi
+          fi
+        done
+        
+        # Copy shared libraries
+        cp build-rocm/*.so release-rocm/lib/ 2>/dev/null || true
+        cp build-rocm/tools/ftllm/*.so release-rocm/ftllm/ 2>/dev/null || true
+        
+        # Copy Python tools
+        for f in build-rocm/tools/ftllm/*; do
+          fname=$(basename "$f")
+          if [ "$fname" != "__init__.py" ] && [ "$fname" != "__main__.py" ]; then
+            cp -r "$f" release-rocm/ftllm/ 2>/dev/null || true
+          fi
+        done
+        
+        # Copy requirements.txt
+        cp tools/fastllm_pytools/requirements.txt release-rocm/ftllm/
+        
+        # Generate __init__.py with correct version
+        cat > release-rocm/ftllm/__init__.py << EOF
+__all__ = ["llm"]
+
+try:
+    from importlib.metadata import version
+    __version__ = version("ftllm")
+except:
+    try:
+        __version__ = version("ftllm-rocm")
+    except:
+        __version__ = "${VERSION}"
+EOF
+        
+        # Generate __main__.py for python -m ftllm
+        cat > release-rocm/ftllm/__main__.py << 'EOF'
+"""ftllm - FastLLM 命令行入口"""
+from .cli import main
+
+if __name__ == "__main__":
+    main()
+EOF
+        
+        # Copy web resources
+        cp -r example/webui/web/* release-rocm/web/
+        
+        # Copy docs
+        find docs -name "*.md" ! -name "使用说明.md" -exec cp {} release-rocm/docs/ \;
+        cp README*.md release-rocm/docs/
+        
+        # Copy 使用说明.md to root
+        if [ -f "docs/使用说明.md" ]; then
+          cp docs/使用说明.md release-rocm/
+        fi
+        
+        # Create run script with ROCm library path
+        cat > release-rocm/run.sh << 'EOF'
+#!/bin/bash
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export LD_LIBRARY_PATH="${SCRIPT_DIR}/lib:/opt/rocm/lib:${LD_LIBRARY_PATH}"
+export HSA_OVERRIDE_GFX_VERSION=${HSA_OVERRIDE_GFX_VERSION:-}
+"${SCRIPT_DIR}/ftllm" "$@"
+EOF
+        chmod +x release-rocm/run.sh
+        chmod +x release-rocm/ftllm
+    
+    - name: Upload ROCm Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: fastllm-linux-x64-rocm-${{ steps.version.outputs.version }}
+        path: release-rocm/
+        retention-days: 30
+
+  # 当标签推送时创建 Release
+  create-release:
+    name: Create Release (Linux)
+    runs-on: ubuntu-latest
+    needs: [build-cpu, build-cuda, build-rocm]
+    if: startsWith(github.ref, 'refs/tags/v')
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+    
+    - name: Get version from setup.py
+      id: version
+      run: |
+        VERSION=$(sed -n 's/.*version\s*=\s*"\([^"]*\)".*/\1/p' tools/scripts/setup.py)
+        echo "version=${VERSION}" >> $GITHUB_OUTPUT
+    
+    - name: Download CPU Artifact
+      uses: actions/download-artifact@v4
+      with:
+        name: fastllm-linux-x64-cpu-${{ steps.version.outputs.version }}
+        path: fastllm-linux-x64-cpu
+    
+    - name: Download CUDA Artifact
+      uses: actions/download-artifact@v4
+      with:
+        name: fastllm-linux-x64-cuda-${{ steps.version.outputs.version }}
+        path: fastllm-linux-x64-cuda
+    
+    - name: Download ROCm Artifact
+      uses: actions/download-artifact@v4
+      with:
+        name: fastllm-linux-x64-rocm-${{ steps.version.outputs.version }}
+        path: fastllm-linux-x64-rocm
+      continue-on-error: true
+    
+    - name: Create Archives
+      run: |
+        VERSION="${{ steps.version.outputs.version }}"
+        
+        # Create CPU archive
+        tar -czvf fastllm-linux-x64-cpu-v${VERSION}.tar.gz -C fastllm-linux-x64-cpu .
+        
+        # Create CUDA archive
+        tar -czvf fastllm-linux-x64-cuda-v${VERSION}.tar.gz -C fastllm-linux-x64-cuda .
+        
+        # Create ROCm archive (if exists)
+        if [ -d "fastllm-linux-x64-rocm" ]; then
+          tar -czvf fastllm-linux-x64-rocm-v${VERSION}.tar.gz -C fastllm-linux-x64-rocm .
+        fi
+    
+    - name: Upload Release Assets
+      uses: softprops/action-gh-release@v2
+      with:
+        files: |
+          fastllm-linux-x64-cpu-v${{ steps.version.outputs.version }}.tar.gz
+          fastllm-linux-x64-cuda-v${{ steps.version.outputs.version }}.tar.gz
+          fastllm-linux-x64-rocm-v${{ steps.version.outputs.version }}.tar.gz
+        append_body: true
+        fail_on_unmatched_files: false
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

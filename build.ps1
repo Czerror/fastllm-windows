@@ -396,15 +396,6 @@ function Build-Project {
     Write-Host "  ════════════════════════════════════════════════════════════" -ForegroundColor Cyan
     Write-Host ""
     
-    # 检测子模块更新，自动清理构建目录
-    if ($script:SubmoduleCheckDone -ne $true) {
-        if (Test-SubmoduleUpdated) {
-            Write-Host "  [!] 子模块已更新，需要清理构建以确保使用新版本" -ForegroundColor Yellow
-            $CleanBuild = $true
-        }
-        $script:SubmoduleCheckDone = $true
-    }
-    
     # 清理构建目录
     if ($CleanBuild -and (Test-Path $fullBuildDir)) {
         Write-Host "  [1/3] 清理构建目录..." -ForegroundColor Yellow
@@ -568,19 +559,23 @@ function New-ReleasePackage {
             }
         }
         
-        # 1. bin/ - 可执行文件
+        # 1. 可执行文件 - ftllm.exe 放根目录，其他放 bin/
         Get-ChildItem "$fullBuildDir\Release\*.exe" -ErrorAction SilentlyContinue | ForEach-Object {
-            & $addFile $_.FullName "bin/$($_.Name)"
+            if ($_.Name -eq "ftllm.exe") {
+                & $addFile $_.FullName "ftllm.exe"
+            } else {
+                & $addFile $_.FullName "bin/$($_.Name)"
+            }
         }
         
-        # 2. bin/ - VC++ 运行时
+        # 2. VC++ 运行时 - 放 bin/
         if (Test-Path $VCRuntimePath) {
             Get-ChildItem "$VCRuntimePath\*.dll" -ErrorAction SilentlyContinue | ForEach-Object {
                 & $addFile $_.FullName "bin/$($_.Name)"
             }
         }
         
-        # 3. bin/ - CUDA DLL (仅 CUDA 版本)
+        # 3. CUDA DLL - 放 bin/ (仅 CUDA 版本)
         if ($BuildType -eq "cuda" -and $CudaInfo) {
             @("cublas64_*.dll", "cublasLt64_*.dll", "cudart64_*.dll") | ForEach-Object {
                 Get-ChildItem $CudaInfo.DllPath -Filter $_ -ErrorAction SilentlyContinue | ForEach-Object {
@@ -589,16 +584,28 @@ function New-ReleasePackage {
             }
         }
         
-        # 4. pytools/ - Python 模块 (.pyd)
+        # 4. ftllm/ - Python 模块 (.pyd)
         Get-ChildItem "$fullBuildDir\Release\*.pyd" -ErrorAction SilentlyContinue | ForEach-Object {
-            & $addFile $_.FullName "pytools/$($_.Name)"
+            & $addFile $_.FullName "ftllm/$($_.Name)"
         }
         
-        # 6. pytools/ - ftllm Python 工具
-        $ftllmSource = Join-Path $ProjectRoot "tools\fastllm_pytools"
-        & $addDir $ftllmSource "pytools"
+        # 5. ftllm/ - fastllm_tools.dll (ctypes 加载的原生库)
+        $fastllmToolsDll = Join-Path $fullBuildDir "tools\ftllm\fastllm_tools.dll"
+        if (Test-Path $fastllmToolsDll) {
+            & $addFile $fastllmToolsDll "ftllm/fastllm_tools.dll"
+        }
         
-        # 6.1 pytools/__init__.py - 更新版本号
+        # 6. ftllm/ - Python 工具 (排除 __init__.py 和 __main__.py，因为需要生成特定内容)
+        $ftllmSource = Join-Path $ProjectRoot "tools\fastllm_pytools"
+        if (Test-Path $ftllmSource) {
+            Get-ChildItem $ftllmSource -Recurse -File | Where-Object { $_.Name -notin @("__init__.py", "__main__.py") } | ForEach-Object {
+                $relativePath = $_.FullName.Substring($ftllmSource.Length + 1)
+                $entryName = "ftllm/$relativePath".Replace("\", "/")
+                & $addFile $_.FullName $entryName
+            }
+        }
+        
+        # 6.1 ftllm/__init__.py - 更新版本号
         $initPyContent = @"
 __all__ = ["llm"]
 
@@ -613,10 +620,10 @@ except:
 "@
         $tempInitPy = Join-Path $env:TEMP "ftllm_init_temp.py"
         Set-Content -Path $tempInitPy -Value $initPyContent -Encoding UTF8 -NoNewline
-        & $addFile $tempInitPy "pytools/__init__.py"
+        & $addFile $tempInitPy "ftllm/__init__.py"
         Remove-Item $tempInitPy -Force -ErrorAction SilentlyContinue
         
-        # 6.2 pytools/__main__.py - 支持 python -m pytools
+        # 6.2 ftllm/__main__.py - 支持 python -m ftllm
         $mainPyContent = @"
 """ftllm - FastLLM 命令行入口"""
 from .cli import main
@@ -626,16 +633,10 @@ if __name__ == "__main__":
 "@
         $tempMainPy = Join-Path $env:TEMP "ftllm_main_temp.py"
         Set-Content -Path $tempMainPy -Value $mainPyContent -Encoding UTF8 -NoNewline
-        & $addFile $tempMainPy "pytools/__main__.py"
+        & $addFile $tempMainPy "ftllm/__main__.py"
         Remove-Item $tempMainPy -Force -ErrorAction SilentlyContinue
         
-        # 7. pytools/ - requirements.txt
-        $reqFile = Join-Path $ProjectRoot "tools\fastllm_pytools\requirements.txt"
-        if (Test-Path $reqFile) {
-            & $addFile $reqFile "pytools/requirements.txt"
-        }
-        
-        # 6. web/ - Web UI
+        # 7. web/ - Web UI
         $webSource = Join-Path $ProjectRoot "example\webui\web"
         & $addDir $webSource "web"
         
@@ -807,6 +808,12 @@ else {
 $results = @{}
 $startTime = Get-Date
 
+# 检测子模块更新，统一设置清理标志
+if (Test-SubmoduleUpdated) {
+    Write-Host "  [!] 子模块已更新，将清理所有构建目录以确保使用新版本" -ForegroundColor Yellow
+    $clean = $true
+}
+
 # 构建 CPU 版本
 if ($target -eq "cpu" -or $target -eq "both") {
     $cpuOptions = @{}
@@ -839,7 +846,7 @@ if (($target -eq "cuda" -or $target -eq "both") -and $CudaInfo) {
         $archSuffix = if ($cudaArch -eq "75;80;86;89;90;120") { "all-arch" } 
                       elseif ($cudaArch -eq "native") { "native" } 
                       else { $cudaArch.Replace(";", "-") }
-        New-ReleasePackage -BuildType "cuda" -BuildDir "build-cuda" -PackageName "fastllm-win-x64-cuda-$archSuffix-release" -CudaInfo $cudaInfo
+        New-ReleasePackage -BuildType "cuda" -BuildDir "build-cuda" -PackageName "fastllm-win-x64-cuda-$archSuffix-release" -CudaInfo $CudaInfo
     }
 }
 

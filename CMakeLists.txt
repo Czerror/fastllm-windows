@@ -167,7 +167,8 @@ elseif(CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
     # /wd4244 /wd4267: Suppress type conversion warnings (size_t to int, etc.)
     # /wd4190: Suppress C linkage with UDT return type warning
     # /wd4996: Suppress deprecated std::wstring_convert warning
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DNOMINMAX /std:c++20 /arch:AVX2 /source-charset:utf-8 /bigobj /MP2 /D_CRT_SECURE_NO_WARNINGS /wd4244 /wd4267 /wd4190 /wd4996")
+    # /source-charset:utf-8 /execution-charset:utf-8: Source and execution charset both UTF-8
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DNOMINMAX /std:c++20 /arch:AVX2 /source-charset:utf-8 /execution-charset:utf-8 /bigobj /MP2 /D_CRT_SECURE_NO_WARNINGS /wd4244 /wd4267 /wd4190 /wd4996")
     # Windows MSVC uses AMD64 instead of x86_64
     if (CXX_MAJOR_VERSION GREATER_EQUAL 19 AND (CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64" OR CMAKE_SYSTEM_PROCESSOR MATCHES "AMD64"))
         # MSVC 2022 (19.30+) supports AVX512 intrinsics with /arch:AVX512
@@ -293,10 +294,11 @@ if (USE_SENTENCEPIECE)
         if(EXISTS "${SENTENCEPIECE_SOURCE_DIR}/CMakeLists.txt")
             message(STATUS "Building sentencepiece from source (submodule)")
             
-            # Save current CXX flags (sentencepiece uses /utf-8 which conflicts with /source-charset:utf-8)
+            # Save current CXX flags (sentencepiece uses /utf-8 which conflicts with /source-charset:utf-8 and /execution-charset:utf-8)
             set(SAVED_CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}")
-            # Remove our /source-charset:utf-8 for sentencepiece build
+            # Remove our charset flags for sentencepiece build (it uses /utf-8 internally)
             string(REPLACE "/source-charset:utf-8" "" CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}")
+            string(REPLACE "/execution-charset:utf-8" "" CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}")
             
             # Sentencepiece build options
             set(SPM_ENABLE_SHARED OFF CACHE BOOL "" FORCE)
