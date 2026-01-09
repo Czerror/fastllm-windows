@@ -139,7 +139,6 @@ from .cli import main
 if __name__ == "__main__":
     main()
 EOF
-EOF
         
         # Copy web resources
         cp -r example/webui/web/* release-intel/web/

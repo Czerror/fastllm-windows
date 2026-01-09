@@ -177,11 +177,11 @@ EOF
         
         # Create run script
         cat > release-cpu/run.sh << 'EOF'
-        #!/bin/bash
-        SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-        export LD_LIBRARY_PATH="${SCRIPT_DIR}/lib:${LD_LIBRARY_PATH}"
-        "${SCRIPT_DIR}/ftllm" "$@"
-        EOF
+#!/bin/bash
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export LD_LIBRARY_PATH="${SCRIPT_DIR}/lib:${LD_LIBRARY_PATH}"
+"${SCRIPT_DIR}/ftllm" "$@"
+EOF
         chmod +x release-cpu/run.sh
         chmod +x release-cpu/ftllm
     
@@ -330,11 +330,11 @@ EOF
         
         # Create run script
         cat > release-cuda/run.sh << 'EOF'
-        #!/bin/bash
-        SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-        export LD_LIBRARY_PATH="${SCRIPT_DIR}/lib:${LD_LIBRARY_PATH}"
-        "${SCRIPT_DIR}/ftllm" "$@"
-        EOF
+#!/bin/bash
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export LD_LIBRARY_PATH="${SCRIPT_DIR}/lib:${LD_LIBRARY_PATH}"
+"${SCRIPT_DIR}/ftllm" "$@"
+EOF
         chmod +x release-cuda/run.sh
         chmod +x release-cuda/ftllm
     
