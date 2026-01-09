@@ -393,10 +393,10 @@ jobs:
         
         ### 🚀 快速开始
         
-        1. 下载对应版本的 ZIP 文件
-        2. 解压到任意目录
-        3. 运行 \`bin/install-deps.cmd\` 安装 Python 依赖
-        4. 运行 \`bin/ftllm.exe webui <模型路径>\` 启动 WebUI
+        1. 下载对应版本的 ZIP 文件并解压到任意目录
+        2. 将 \`bin\` 目录添加到系统 PATH 环境变量
+        3. 安装 Python 依赖: \`pip install -r pytools/requirements.txt\`
+        4. 运行: \`ftllm webui <模型路径>\` 启动 WebUI
         
         详细使用说明请参考 [README](https://github.com/Czerror/fastllm-windows#readme)
         EOF
