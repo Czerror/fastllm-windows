@@ -1,37 +1,8 @@
 name: Build Linux Release
 
 on:
-  # 推送版本标签时触发
-  push:
-    tags:
-      - 'v*'
-  
   # 手动触发
   workflow_dispatch:
-    inputs:
-      build_cpu:
-        description: 'Build CPU version'
-        type: boolean
-        default: true
-      build_cuda:
-        description: 'Build CUDA version'
-        type: boolean
-        default: true
-      build_rocm:
-        description: 'Build ROCm version (AMD GPU)'
-        type: boolean
-        default: true
-      cuda_arch:
-        description: 'CUDA architectures (semicolon separated)'
-        type: string
-        default: '75;80;86;89;90;120'
-      rocm_arch:
-        description: 'ROCm architectures (semicolon separated)'
-        type: string
-        default: 'gfx906;gfx908;gfx90a;gfx940;gfx941;gfx942;gfx1030;gfx1031;gfx1032;gfx1100;gfx1101;gfx1102;gfx1200;gfx1201'
-  
-  # 被其他工作流调用
-  workflow_call:
     inputs:
       build_cpu:
         description: 'Build CPU version'
@@ -61,7 +32,7 @@ jobs:
   build-cpu:
     name: Build CPU Version (Linux)
     runs-on: ubuntu-22.04
-    if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_cpu }}
+    if: ${{ inputs.build_cpu }}
     
     steps:
     - name: Checkout repository
@@ -176,12 +147,12 @@ jobs:
         fi
         
         # Create run script
-        cat > release-cpu/run.sh << 'EOF'
-#!/bin/bash
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-export LD_LIBRARY_PATH="${SCRIPT_DIR}/lib:${LD_LIBRARY_PATH}"
-"${SCRIPT_DIR}/ftllm" "$@"
-EOF
+        printf '%s\n' \
+          '#!/bin/bash' \
+          'SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"' \
+          'export LD_LIBRARY_PATH="${SCRIPT_DIR}/lib:${LD_LIBRARY_PATH}"' \
+          '"${SCRIPT_DIR}/ftllm" "$@"' \
+          > release-cpu/run.sh
         chmod +x release-cpu/run.sh
         chmod +x release-cpu/ftllm
     
@@ -196,7 +167,7 @@ EOF
     name: Build CUDA Version (Linux)
     runs-on: ubuntu-22.04
     needs: build-cpu
-    if: ${{ always() && (github.event_name != 'workflow_dispatch' || inputs.build_cuda) }}
+    if: ${{ always() && inputs.build_cuda }}
     
     steps:
     - name: Checkout repository
@@ -329,12 +300,12 @@ EOF
         fi
         
         # Create run script
-        cat > release-cuda/run.sh << 'EOF'
-#!/bin/bash
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-export LD_LIBRARY_PATH="${SCRIPT_DIR}/lib:${LD_LIBRARY_PATH}"
-"${SCRIPT_DIR}/ftllm" "$@"
-EOF
+        printf '%s\n' \
+          '#!/bin/bash' \
+          'SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"' \
+          'export LD_LIBRARY_PATH="${SCRIPT_DIR}/lib:${LD_LIBRARY_PATH}"' \
+          '"${SCRIPT_DIR}/ftllm" "$@"' \
+          > release-cuda/run.sh
         chmod +x release-cuda/run.sh
         chmod +x release-cuda/ftllm
     
@@ -349,7 +320,7 @@ EOF
     name: Build ROCm Version (Linux)
     runs-on: ubuntu-22.04
     needs: build-cuda
-    if: ${{ always() && (github.event_name != 'workflow_dispatch' || inputs.build_rocm) }}
+    if: ${{ always() && inputs.build_rocm }}
     
     steps:
     - name: Checkout repository
@@ -489,13 +460,13 @@ EOF
         fi
         
         # Create run script with ROCm library path
-        cat > release-rocm/run.sh << 'EOF'
-#!/bin/bash
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-export LD_LIBRARY_PATH="${SCRIPT_DIR}/lib:/opt/rocm/lib:${LD_LIBRARY_PATH}"
-export HSA_OVERRIDE_GFX_VERSION=${HSA_OVERRIDE_GFX_VERSION:-}
-"${SCRIPT_DIR}/ftllm" "$@"
-EOF
+        printf '%s\n' \
+          '#!/bin/bash' \
+          'SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"' \
+          'export LD_LIBRARY_PATH="${SCRIPT_DIR}/lib:/opt/rocm/lib:${LD_LIBRARY_PATH}"' \
+          'export HSA_OVERRIDE_GFX_VERSION=${HSA_OVERRIDE_GFX_VERSION:-}' \
+          '"${SCRIPT_DIR}/ftllm" "$@"' \
+          > release-rocm/run.sh
         chmod +x release-rocm/run.sh
         chmod +x release-rocm/ftllm
     
@@ -505,66 +476,3 @@ EOF
         name: fastllm-linux-x64-rocm-${{ steps.version.outputs.version }}
         path: release-rocm/
         retention-days: 30
-
-  # 当标签推送时创建 Release
-  create-release:
-    name: Create Release (Linux)
-    runs-on: ubuntu-latest
-    needs: [build-cpu, build-cuda, build-rocm]
-    if: startsWith(github.ref, 'refs/tags/v')
-    
-    steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
-    
-    - name: Get version from setup.py
-      id: version
-      run: |
-        VERSION=$(sed -n 's/.*version\s*=\s*"\([^"]*\)".*/\1/p' tools/scripts/setup.py)
-        echo "version=${VERSION}" >> $GITHUB_OUTPUT
-    
-    - name: Download CPU Artifact
-      uses: actions/download-artifact@v4
-      with:
-        name: fastllm-linux-x64-cpu-${{ steps.version.outputs.version }}
-        path: fastllm-linux-x64-cpu
-    
-    - name: Download CUDA Artifact
-      uses: actions/download-artifact@v4
-      with:
-        name: fastllm-linux-x64-cuda-${{ steps.version.outputs.version }}
-        path: fastllm-linux-x64-cuda
-    
-    - name: Download ROCm Artifact
-      uses: actions/download-artifact@v4
-      with:
-        name: fastllm-linux-x64-rocm-${{ steps.version.outputs.version }}
-        path: fastllm-linux-x64-rocm
-      continue-on-error: true
-    
-    - name: Create Archives
-      run: |
-        VERSION="${{ steps.version.outputs.version }}"
-        
-        # Create CPU archive
-        tar -czvf fastllm-linux-x64-cpu-v${VERSION}.tar.gz -C fastllm-linux-x64-cpu .
-        
-        # Create CUDA archive
-        tar -czvf fastllm-linux-x64-cuda-v${VERSION}.tar.gz -C fastllm-linux-x64-cuda .
-        
-        # Create ROCm archive (if exists)
-        if [ -d "fastllm-linux-x64-rocm" ]; then
-          tar -czvf fastllm-linux-x64-rocm-v${VERSION}.tar.gz -C fastllm-linux-x64-rocm .
-        fi
-    
-    - name: Upload Release Assets
-      uses: softprops/action-gh-release@v2
-      with:
-        files: |
-          fastllm-linux-x64-cpu-v${{ steps.version.outputs.version }}.tar.gz
-          fastllm-linux-x64-cuda-v${{ steps.version.outputs.version }}.tar.gz
-          fastllm-linux-x64-rocm-v${{ steps.version.outputs.version }}.tar.gz
-        append_body: true
-        fail_on_unmatched_files: false
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
