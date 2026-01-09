@@ -90,50 +90,65 @@ jobs:
         VERSION="${{ steps.version.outputs.version }}"
         
         mkdir -p release-cpu/bin
-        mkdir -p release-cpu/pytools
+        mkdir -p release-cpu/ftllm
         mkdir -p release-cpu/web
         mkdir -p release-cpu/docs
         
-        # Copy executables
-        cp build/Release/*.exe release-cpu/bin/
+        # Copy executables - ftllm.exe to root, others to bin/
+        for exe in build/Release/*.exe; do
+          if [ "$(basename "$exe")" = "ftllm.exe" ]; then
+            cp "$exe" release-cpu/
+          else
+            cp "$exe" release-cpu/bin/
+          fi
+        done
         
         # Copy Python module (.pyd)
-        cp build/Release/*.pyd release-cpu/pytools/ || true
+        cp build/Release/*.pyd release-cpu/ftllm/ || true
+        
+        # Copy fastllm_tools.dll (ctypes native library)
+        if [ -f "build/tools/ftllm/fastllm_tools.dll" ]; then
+          cp build/tools/ftllm/fastllm_tools.dll release-cpu/ftllm/
+        fi
         
         # Copy VC++ runtime
         if [ -d "runtime_libs/vcrt" ]; then
           cp runtime_libs/vcrt/*.dll release-cpu/bin/
         fi
         
-        # Copy Python tools
-        cp -r build/tools/ftllm/* release-cpu/pytools/
+        # Copy Python tools (exclude __init__.py and __main__.py, will be generated)
+        for f in build/tools/ftllm/*; do
+          fname=$(basename "$f")
+          if [ "$fname" != "__init__.py" ] && [ "$fname" != "__main__.py" ]; then
+            cp -r "$f" release-cpu/ftllm/
+          fi
+        done
         
-        # Copy install-deps.cmd (ftllm.exe is already in bin/)
-        cp tools/fastllm_pytools/install-deps.cmd release-cpu/bin/
-        cp tools/fastllm_pytools/requirements.txt release-cpu/pytools/
+        # Copy requirements.txt
+        cp tools/fastllm_pytools/requirements.txt release-cpu/ftllm/
         
         # Generate __init__.py with correct version
-        cat > release-cpu/pytools/__init__.py << EOF
-        __all__ = ["llm"]
-
-        try:
-            from importlib.metadata import version
-            __version__ = version("ftllm")
-        except:
-            try:
-                __version__ = version("ftllm-rocm")
-            except:
-                __version__ = "${VERSION}"
-        EOF
+        printf '%s\n' \
+          '__all__ = ["llm"]' \
+          '' \
+          'try:' \
+          '    from importlib.metadata import version' \
+          '    __version__ = version("ftllm")' \
+          'except:' \
+          '    try:' \
+          '        __version__ = version("ftllm-rocm")' \
+          '    except:' \
+          '        __version__ = "'"${VERSION}"'"' \
+          > release-cpu/ftllm/__init__.py
         
-        # Generate __main__.py for python -m pytools
-        cat > release-cpu/pytools/__main__.py << EOF
-        """ftllm - FastLLM 命令行入口"""
-        from .cli import main
-
-        if __name__ == "__main__":
-            main()
-        EOF
+        # Generate __main__.py for python -m ftllm
+        printf '%s\n' \
+          '"""ftllm - FastLLM 命令行入口"""' \
+          'from .cli import main' \
+          '' \
+          'if __name__ == "__main__":' \
+          '    main()' \
+          > release-cpu/ftllm/__main__.py
         
         # Copy web resources
         cp -r example/webui/web/* release-cpu/web/
@@ -221,15 +236,26 @@ jobs:
         VERSION="${{ steps.version.outputs.version }}"
         
         mkdir -p release-cuda/bin
-        mkdir -p release-cuda/pytools
+        mkdir -p release-cuda/ftllm
         mkdir -p release-cuda/web
         mkdir -p release-cuda/docs
         
-        # Copy executables
-        cp build-cuda/Release/*.exe release-cuda/bin/
+        # Copy executables - ftllm.exe to root, others to bin/
+        for exe in build-cuda/Release/*.exe; do
+          if [ "$(basename "$exe")" = "ftllm.exe" ]; then
+            cp "$exe" release-cuda/
+          else
+            cp "$exe" release-cuda/bin/
+          fi
+        done
         
         # Copy Python module (.pyd)
-        cp build-cuda/Release/*.pyd release-cuda/pytools/ || true
+        cp build-cuda/Release/*.pyd release-cuda/ftllm/ || true
+        
+        # Copy fastllm_tools.dll (ctypes native library)
+        if [ -f "build-cuda/tools/ftllm/fastllm_tools.dll" ]; then
+          cp build-cuda/tools/ftllm/fastllm_tools.dll release-cuda/ftllm/
+        fi
         
         # Copy VC++ runtime
         if [ -d "runtime_libs/vcrt" ]; then
@@ -252,35 +278,39 @@ jobs:
           cp "${CUDA_BIN_X64}/cudart64_"*.dll release-cuda/bin/ 2>/dev/null || true
         fi
         
-        # Copy Python tools
-        cp -r build-cuda/tools/ftllm/* release-cuda/pytools/
+        # Copy Python tools (exclude __init__.py and __main__.py, will be generated)
+        for f in build-cuda/tools/ftllm/*; do
+          fname=$(basename "$f")
+          if [ "$fname" != "__init__.py" ] && [ "$fname" != "__main__.py" ]; then
+            cp -r "$f" release-cuda/ftllm/
+          fi
+        done
         
-        # Copy install-deps.cmd (ftllm.exe is already in bin/)
-        cp tools/fastllm_pytools/install-deps.cmd release-cuda/bin/
-        cp tools/fastllm_pytools/requirements.txt release-cuda/pytools/
+        # Copy requirements.txt
+        cp tools/fastllm_pytools/requirements.txt release-cuda/ftllm/
         
         # Generate __init__.py with correct version
-        cat > release-cuda/pytools/__init__.py << EOF
-        __all__ = ["llm"]
-
-        try:
-            from importlib.metadata import version
-            __version__ = version("ftllm")
-        except:
-            try:
-                __version__ = version("ftllm-rocm")
-            except:
-                __version__ = "${VERSION}"
-        EOF
+        printf '%s\n' \
+          '__all__ = ["llm"]' \
+          '' \
+          'try:' \
+          '    from importlib.metadata import version' \
+          '    __version__ = version("ftllm")' \
+          'except:' \
+          '    try:' \
+          '        __version__ = version("ftllm-rocm")' \
+          '    except:' \
+          '        __version__ = "'"${VERSION}"'"' \
+          > release-cuda/ftllm/__init__.py
         
-        # Generate __main__.py for python -m pytools
-        cat > release-cuda/pytools/__main__.py << EOF
-        """ftllm - FastLLM 命令行入口"""
-        from .cli import main
-
-        if __name__ == "__main__":
-            main()
-        EOF
+        # Generate __main__.py for python -m ftllm
+        printf '%s\n' \
+          '"""ftllm - FastLLM 命令行入口"""' \
+          'from .cli import main' \
+          '' \
+          'if __name__ == "__main__":' \
+          '    main()' \
+          > release-cuda/ftllm/__main__.py
         
         # Copy web resources
         cp -r example/webui/web/* release-cuda/web/
@@ -354,6 +384,7 @@ jobs:
     
     - name: Generate release notes
       id: release_notes
+      shell: bash
       run: |
         VERSION="${{ steps.version.outputs.version }}"
         UPSTREAM_COMMIT="${{ steps.version.outputs.upstream_commit }}"
@@ -361,45 +392,46 @@ jobs:
         PYBIND11="${{ steps.version.outputs.pybind11_version }}"
         SENTENCEPIECE="${{ steps.version.outputs.sentencepiece_version }}"
         TAG_NAME="${GITHUB_REF#refs/tags/}"
+        COMMITS="${{ steps.version.outputs.commits }}"
         
-        cat > release_notes.md << EOF
-        ## FastLLM Windows ${TAG_NAME}
-        
-        Windows 预编译版本，开箱即用，无需编译环境。
-        
-        ### 📦 下载说明
-        
-        | 文件 | 说明 |
-        |------|------|
-        | \`fastllm-win-x64-cpu-*.zip\` | CPU 版本 (无需 GPU) |
-        | \`fastllm-win-x64-cuda-*.zip\` | CUDA 版本 (需要 NVIDIA GPU) |
-        
-        ### 🔧 版本信息
-        
-        | 组件 | 版本 |
-        |------|------|
-        | FastLLM | ${VERSION} |
-        | 上游同步 | [${UPSTREAM_COMMIT}](https://github.com/ztxz16/fastllm/commit/${UPSTREAM_COMMIT}) (${UPSTREAM_DATE}) |
-        | pybind11 | ${PYBIND11} |
-        | sentencepiece | ${SENTENCEPIECE} |
-        | CUDA Toolkit | 13.1.0 |
-        | 编译器 | MSVC 2022 |
-        
-        ### 📝 更新内容
-        
-        \`\`\`
-        ${{ steps.version.outputs.commits }}
-        \`\`\`
-        
-        ### 🚀 快速开始
-        
-        1. 下载对应版本的 ZIP 文件并解压到任意目录
-        2. 将 \`bin\` 目录添加到系统 PATH 环境变量
-        3. 安装 Python 依赖: \`pip install -r pytools/requirements.txt\`
-        4. 运行: \`ftllm webui <模型路径>\` 启动 WebUI
-        
-        详细使用说明请参考 [README](https://github.com/Czerror/fastllm-windows#readme)
-        EOF
+        {
+          echo "## FastLLM Windows ${TAG_NAME}"
+          echo ""
+          echo "Windows 预编译版本，开箱即用，无需编译环境。"
+          echo ""
+          echo "### 📦 下载说明"
+          echo ""
+          echo "| 文件 | 说明 |"
+          echo "|------|------|"
+          echo "| \`fastllm-win-x64-cpu-*.zip\` | CPU 版本 (无需 GPU) |"
+          echo "| \`fastllm-win-x64-cuda-*.zip\` | CUDA 版本 (需要 NVIDIA GPU) |"
+          echo ""
+          echo "### 🔧 版本信息"
+          echo ""
+          echo "| 组件 | 版本 |"
+          echo "|------|------|"
+          echo "| FastLLM | ${VERSION} |"
+          echo "| 上游同步 | [${UPSTREAM_COMMIT}](https://github.com/ztxz16/fastllm/commit/${UPSTREAM_COMMIT}) (${UPSTREAM_DATE}) |"
+          echo "| pybind11 | ${PYBIND11} |"
+          echo "| sentencepiece | ${SENTENCEPIECE} |"
+          echo "| CUDA Toolkit | 13.1.0 |"
+          echo "| 编译器 | MSVC 2022 |"
+          echo ""
+          echo "### 📝 更新内容"
+          echo ""
+          echo "\`\`\`"
+          echo "${COMMITS}"
+          echo "\`\`\`"
+          echo ""
+          echo "### 🚀 快速开始"
+          echo ""
+          echo "1. 下载对应版本的 ZIP 文件并解压到任意目录"
+          echo "2. 将解压后的根目录（ftllm.exe 所在目录）添加到系统 PATH 环境变量"
+          echo "3. 安装 Python 依赖: \`pip install -r ftllm/requirements.txt\`"
+          echo "4. 运行: \`ftllm webui <模型路径>\` 启动 WebUI"
+          echo ""
+          echo "详细使用说明请参考 [README](https://github.com/Czerror/fastllm-windows#readme)"
+        } > release_notes.md
         
         echo "notes_file=release_notes.md" >> $GITHUB_OUTPUT
     
