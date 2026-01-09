@@ -142,6 +142,49 @@ std::string GenerateRandomID() {
     return ss.str();
 }
 
+static const std::string THINK_OPEN_MARK = "<think>";
+static const std::string THINK_CLOSE_MARK = "</think>";
+static const std::string THINK_OPEN_TOKEN_TEXT = "[unused16]";
+static const std::string THINK_CLOSE_TOKEN_TEXT = "[unused17]";
+
+// 是否对输入进行 <think> -> [unused16]/[unused17] 归一化。
+// 仅由命令行参数控制；是否需要开启由主程序（如 ftllm）判断并透传。
+static bool gEnableThinkNormalize = false;
+
+static bool ParseBoolString(const std::string &s, bool defaultValue) {
+    std::string lower;
+    lower.reserve(s.size());
+    for (char c : s) {
+        lower.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+    }
+    if (lower == "1" || lower == "true" || lower == "on" || lower == "yes" || lower == "y") {
+        return true;
+    }
+    if (lower == "0" || lower == "false" || lower == "off" || lower == "no" || lower == "n") {
+        return false;
+    }
+    return defaultValue;
+}
+
+static void ReplaceAllInPlace(std::string &s, const std::string &from, const std::string &to) {
+    if (from.empty()) {
+        return;
+    }
+    size_t startPos = 0;
+    while ((startPos = s.find(from, startPos)) != std::string::npos) {
+        s.replace(startPos, from.length(), to);
+        startPos += to.length();
+    }
+}
+
+static void NormalizeThinkMarkersInPlace(std::string &content) {
+    if (content.empty()) {
+        return;
+    }
+    ReplaceAllInPlace(content, THINK_OPEN_MARK, THINK_OPEN_TOKEN_TEXT);
+    ReplaceAllInPlace(content, THINK_CLOSE_MARK, THINK_CLOSE_TOKEN_TEXT);
+}
+
 std::map <std::string, fastllm::DataType> dataTypeDict = {
     {"float32", fastllm::DataType::FLOAT32},
     {"half", fastllm::DataType::FLOAT16},
@@ -152,9 +195,13 @@ std::map <std::string, fastllm::DataType> dataTypeDict = {
     {"int4g", fastllm::DataType::INT4_GROUP}
 };
 
+static const char* DEFAULT_API_HOST = "127.0.0.1";
+
 struct APIConfig {
     std::string path = "chatglm-6b-int4.bin"; // 模型文件路径
     std::string modelName = "fastllm";
+
+    std::string host = DEFAULT_API_HOST; // 监听地址
 
     int threads = 4; // 使用的线程数
     bool lowMemMode = false; // 是否使用低内存模式
@@ -342,7 +389,11 @@ struct WorkQueue {
 
             std::string output = "";
             fastllm::ChatMessages messages;
-            messages.push_back({"user", node->config["prompt"].string_value()});
+            std::string promptText = node->config["prompt"].string_value();
+            if (gEnableThinkNormalize) {
+                NormalizeThinkMarkersInPlace(promptText);
+            }
+            messages.push_back({"user", promptText});
             auto prompt = model->ApplyChatTemplate(messages);
             auto inputs = model->weight.tokenizer.Encode(prompt);
             std::vector<int> tokens;
@@ -381,10 +432,19 @@ struct WorkQueue {
             fastllm::ChatMessages chatMessages;
             if (node->config["messages"].is_array()) {
                 for (auto &it : node->config["messages"].array_items()) {
-                    chatMessages.push_back({it["role"].string_value(), it["content"].string_value()});
+                    std::string role = it["role"].string_value();
+                    std::string content = it["content"].string_value();
+                    if (gEnableThinkNormalize) {
+                        NormalizeThinkMarkersInPlace(content);
+                    }
+                    chatMessages.push_back({role, content});
                 }
             } else if (node->config["prompt"].is_string()) {
-                chatMessages.push_back({"user", node->config["prompt"].string_value()});
+                std::string promptText = node->config["prompt"].string_value();
+                if (gEnableThinkNormalize) {
+                    NormalizeThinkMarkersInPlace(promptText);
+                }
+                chatMessages.push_back({"user", promptText});
             } else {
                 node->error = "no input.\n";
             }
@@ -598,12 +658,14 @@ void Usage() {
     std::cout << "<-l|--low>:                   使用低内存模式" << std::endl;
     std::cout << "<--dtype> <args>:             设置权重类型(读取hf文件时生效)" << std::endl;
     std::cout << "<--atype> <args>:             设置推理使用的数据类型(float32/float16)" << std::endl;
-    std::cout << "<--batch> <args>:             最大batch数" << std::endl;
+    std::cout << "<--batch/--max_batch> <args>: 最大batch数" << std::endl;
     std::cout << "<--tokens> <args>:            最大tokens容量" << std::endl;
     std::cout << "<--model_name> <args>:        模型名(openai api中使用)" << std::endl;
+    std::cout << "<--host> <args>:              监听地址 (默认: " << DEFAULT_API_HOST << ")" << std::endl;
     std::cout << "<--port> <args>:              网页端口号" << std::endl;
     std::cout << "<--cuda_embedding>:           使用cuda来执行embedding" << std::endl;
     std::cout << "<--device>:                   执行设备" << std::endl;
+    std::cout << "<--nt> <true|false>:          输入 <think> 归一化(短参数)" << std::endl;
 }
 
 void ParseArgs(int argc, char **argv, APIConfig &config) {
@@ -623,6 +685,12 @@ void ParseArgs(int argc, char **argv, APIConfig &config) {
             config.lowMemMode = true;
         } else if (sargv[i] == "--cuda_embedding"){
             config.cudaEmbedding = true;
+        } else if (sargv[i] == "--host") {
+            if (i + 1 >= argc) {
+                Usage();
+                exit(-1);
+            }
+            config.host = sargv[++i];
         } else if (sargv[i] == "--port") {
             config.port = atoi(sargv[++i].c_str());
         } else if (sargv[i] == "--dtype") {
@@ -636,7 +704,7 @@ void ParseArgs(int argc, char **argv, APIConfig &config) {
             config.dtype = dataTypeDict[dtypeStr];
         } else if (sargv[i] == "--tokens") {
             config.tokens = atoi(sargv[++i].c_str());
-        } else if (sargv[i] == "--batch") {
+        } else if (sargv[i] == "--batch" || sargv[i] == "--max_batch") {
             config.batch = atoi(sargv[++i].c_str());
         } else if (sargv[i] == "--atype") {
             std::string atypeStr = sargv[++i];
@@ -647,6 +715,12 @@ void ParseArgs(int argc, char **argv, APIConfig &config) {
             config.modelName = sargv[++i];
         } else if (sargv[i] == "--device") {
             config.devices[sargv[++i]] = 1;
+        } else if (sargv[i] == "--nt") {
+            if (i + 1 >= argc) {
+                Usage();
+                exit(-1);
+            }
+            gEnableThinkNormalize = ParseBoolString(sargv[++i], false);
         } else {
             Usage();
             exit(-1);
@@ -674,6 +748,10 @@ int main(int argc, char** argv) {
     bool isHFDir = fastllm::FileExists(config.path + "/config.json") || fastllm::FileExists(config.path + "config.json");
     workQueue.model = isHFDir ? fastllm::CreateLLMModelFromHF(config.path, config.dtype, config.groupCnt)
         : fastllm::CreateLLMModelFromFile(config.path);
+    workQueue.model->SetSaveHistoryChat(true);
+
+    printf("输入 <think> 归一化: %s\n", gEnableThinkNormalize ? "开启" : "关闭");
+
     workQueue.model->tokensLimit = config.tokens;
     workQueue.model->SetDataType(config.atype);
     workQueue.maxActivateQueryNumber = std::max(1, std::min(256, config.batch));
@@ -686,10 +764,35 @@ int main(int argc, char** argv) {
     }
     std::cout << "socket ready!" << std::endl;
 
+    std::string bindHost = config.host;
+    if (bindHost == "localhost") {
+        bindHost = DEFAULT_API_HOST;
+    }
+
+    in_addr bindInAddr{};
+    {
+        // 1) 优先按 IPv4 字符串解析 (无歧义)
+        const int ptonRet = inet_pton(AF_INET, bindHost.c_str(), &bindInAddr);
+        if (ptonRet != 1) {
+            // 2) 回退到 getaddrinfo：支持 hostname (如机器名/域名)
+            addrinfo hints{};
+            hints.ai_family = AF_INET;
+            hints.ai_socktype = SOCK_STREAM;
+            addrinfo *result = nullptr;
+            const int gaiRet = getaddrinfo(bindHost.c_str(), nullptr, &hints, &result);
+            if (gaiRet != 0 || result == nullptr || result->ai_addr == nullptr) {
+                std::cout << "invalid host: " << bindHost << std::endl;
+                exit(-1);
+            }
+            auto *sa = reinterpret_cast<sockaddr_in *>(result->ai_addr);
+            bindInAddr = sa->sin_addr;
+            freeaddrinfo(result);
+        }
+    }
     struct sockaddr_in local_addr;
     local_addr.sin_family = AF_INET;
     local_addr.sin_port = htons(config.port);  //绑定端口
-    local_addr.sin_addr.s_addr = INADDR_ANY; //绑定本机IP地址
+    local_addr.sin_addr = bindInAddr;
 
     //3.bind()： 将一个网络地址与一个套接字绑定，此处将本地地址绑定到一个套接字上
     int res = bind(local_fd, (struct sockaddr *) &local_addr, sizeof(local_addr));

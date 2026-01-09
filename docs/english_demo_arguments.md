@@ -34,6 +34,9 @@ Configuration related to the model, OpenAI API Server, WebUI, and conversation d
 - **Model Name (`--model_name`)**: Specifies the name of the deployed model, which will be verified during API calls.
 - **API Server Host Address (`--host`)**: Sets the host address of the API server.
 - **API Server Port Number (`--port`)**: Sets the port number of the API server.
+- **API Key (`--api_key`)**: Enables API key auth (no check when empty).
+- **Think Output (`--think`)**: Whether to output `<think>` tags (true/false).
+- **Normalize Think Input (`--nt`)**: Normalizes `<think></think>` in input back to model special tokens to stabilize KV prefix cache hits (true/false).
 
 ## Web UI Configuration Parameters
 - **API Server Port Number (`--port`)**: Sets the port number for the WebUI.

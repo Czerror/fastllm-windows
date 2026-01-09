@@ -35,6 +35,36 @@ jobs:
         # 获取上游 master 分支的最新提交
         UPSTREAM_COMMIT=$(git rev-parse upstream/master)
         LOCAL_UPSTREAM=$(git merge-base HEAD upstream/master 2>/dev/null || echo "none")
+
+        # 记录合并前的本地 HEAD，用于在合并后恢复本地 Windows 定制文件
+        LOCAL_HEAD=$(git rev-parse HEAD)
+
+        # 需要强制保留的本地文件：
+        # 1) 固定的 Windows fork 定制文件白名单
+        # 2) 动态生成：本地分支相对 upstream/master 的全部差异文件（防止上游覆盖本地改动）
+        PROTECTED_BASE=(
+          .github/
+          build.ps1
+          ftllm.cpp
+          CMakeLists.txt
+          README.md
+          README_EN.md
+          docs/使用说明.md
+          .gitmodules
+        )
+
+        # 动态差异文件：列出本地分支相对 upstream/master 的改动文件（新增/修改/删除都会列出）
+        mapfile -t PROTECTED_DYNAMIC < <(git diff --name-only upstream/master...HEAD || true)
+
+        # 合并去重（保持顺序）
+        PROTECTED_FILES=()
+        declare -A _seen
+        for f in "${PROTECTED_BASE[@]}" "${PROTECTED_DYNAMIC[@]}"; do
+          if [ -n "$f" ] && [ -z "${_seen[$f]+x}" ]; then
+            _seen[$f]=1
+            PROTECTED_FILES+=("$f")
+          fi
+        done
         
         echo "Upstream latest: $UPSTREAM_COMMIT"
         echo "Local base: $LOCAL_UPSTREAM"
@@ -42,16 +72,20 @@ jobs:
         if [ "$UPSTREAM_COMMIT" != "$LOCAL_UPSTREAM" ]; then
           echo "New changes detected from upstream"
           
-          # 合并上游更改，保留本地的 Windows 特定文件
+          # 合并上游更改（总体偏向上游，随后会强制恢复本地定制文件）
           git merge upstream/master --no-edit -X theirs || {
-            # 如果有冲突，保留我们的 Windows 特定文件和子模块配置
-            git checkout --ours .github/ build.ps1 ftllm.cpp CMakeLists.txt README.md README_EN.md docs/使用说明.md .gitmodules 2>/dev/null || true
-            git add .
+            # 如果有冲突：对保护文件保留 ours，其余按 merge 结果处理
+            git checkout --ours "${PROTECTED_FILES[@]}" 2>/dev/null || true
+            git add -A
             git commit -m "Merge upstream with local Windows customizations" || true
           }
-          
-          # 确保我们的 Windows 文件和子模块配置没有被覆盖
-          git checkout HEAD -- .github/ build.ps1 ftllm.cpp CMakeLists.txt README.md README_EN.md docs/使用说明.md .gitmodules 2>/dev/null || true
+
+          # 合并完成后：强制把保护文件恢复到合并前本地版本，避免被上游覆盖
+          git checkout "$LOCAL_HEAD" -- "${PROTECTED_FILES[@]}" 2>/dev/null || true
+          if ! git diff --quiet; then
+            git add -A
+            git commit -m "chore: Restore local Windows customizations after upstream merge" || true
+          fi
           
           echo "SYNCED=true" >> $GITHUB_ENV
           echo "synced=true" >> $GITHUB_OUTPUT
@@ -62,7 +96,7 @@ jobs:
         fi
     
     - name: Push upstream sync
-      if: env.SYNCED == 'true'
+      if: steps.sync.outputs.synced == 'true'
       run: |
         git push origin master
     

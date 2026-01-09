@@ -13,7 +13,7 @@ def make_normal_parser(des: str, add_help = True) -> argparse.ArgumentParser:
     parser.add_argument('--atype', type = str, default = "auto", help = '推理类型，可使用float32或float16')
     parser.add_argument('--cuda_embedding', action = 'store_true', help = '在cuda上进行embedding')
     parser.add_argument('--kv_cache_limit', type = str, default = "auto",  help = 'kv缓存最大使用量')
-    parser.add_argument('--max_batch', type = int, default = -1,  help = '每次最多同时推理的询问数量')
+    parser.add_argument('--max_batch', '--batch', type = int, default = -1,  help = '每次最多同时推理的询问数量')
     parser.add_argument('--device', type = str, help = '使用的设备')
     parser.add_argument('--moe_device', type = str, default = "", help = 'moe使用的设备')
     parser.add_argument('--moe_experts', type = int, default = -1, help = 'moe使用的专家数')
@@ -36,10 +36,11 @@ def make_normal_parser(des: str, add_help = True) -> argparse.ArgumentParser:
 
 def add_server_args(parser):
     parser.add_argument("--model_name", type = str, default = '', help = "部署的模型名称, 调用api时会进行名称核验")
-    parser.add_argument("--host", type = str, default="0.0.0.0", help = "API server host")
-    parser.add_argument("--port", type = int, default = 8080, help = "API server port")
-    parser.add_argument("--api_key", type = str, default = "", help = "API Key")
-    parser.add_argument("--think", type = str, default = "false", help="if <think> lost")
+    parser.add_argument("--host", type = str, default="127.0.0.1", help = "API 服务器监听地址 (默认: 127.0.0.1)")
+    parser.add_argument("--port", type = int, default = 8080, help = "API 服务器端口号 (默认: 8080)")
+    parser.add_argument("--api_key", type = str, default = "", help = "API Key 认证 (为空则不校验)")
+    parser.add_argument("--think", type = str, default = "false", help = "是否输出 <think> 标签 (true/false)")
+    parser.add_argument("--nt", type = str, default = None, help = "输入 <think> 归一化为特殊 token，以稳定 KV 缓存命中 (true/false)")
     parser.add_argument("--hide_input", action = 'store_true', help = "不显示请求信息")
     parser.add_argument("--dev_mode", action = 'store_true', help = "开发模式, 启用后能够获取对话列表并主动停止")
 
@@ -69,9 +70,9 @@ def make_normal_llm_model(args):
     if not(os.path.exists(args.path)):
         if (hasattr(args, "model_name") and args.model_name == ''):
             args.model_name = args.path
-        from ftllm.download import HFDNormalDownloader
-        from ftllm.download import find_metadata
-        from ftllm.download import search_model
+            from ftllm.download import HFDNormalDownloader
+            from ftllm.download import find_metadata
+            from ftllm.download import search_model
         if (not(os.path.exists(get_fastllm_cache_path(args.path, args.cache_dir))) and not(find_metadata(args.path))):
             print("Can't find model \"" + args.path + "\", try to find similar one.")
             search_result = search_model(args.path)

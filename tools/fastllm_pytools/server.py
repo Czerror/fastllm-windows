@@ -3,6 +3,8 @@ import fastapi
 import logging
 import sys
 import uvicorn
+import os
+import json
 from fastapi import Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -21,7 +23,7 @@ global fastllm_model
 global dev_mode_enabled
 
 def parse_args():
-    parser = make_normal_parser("OpenAI-compatible API server")
+    parser = make_normal_parser("OpenAI 兼容 API 服务")
     add_server_args(parser)
     return parser.parse_args()
 
@@ -164,7 +166,38 @@ def fastllm_server(args):
         args.model_name = args.path
         if (args.model_name is None or args.model_name == ''):
             args.model_name = args.model
-    fastllm_completion = FastLLmCompletion(model_name = args.model_name, model = model, think = (args.think.lower() != "false"), hide_input = args.hide_input)
+
+    # 输入 <think> 归一化开关：由主程序决定并传入 FastLLmCompletion。
+    # 优先级：显式参数 > 自动判断(读取 config.json) > 默认关闭
+    normalize_think = False
+    nt_value = getattr(args, 'nt', '')
+    if isinstance(nt_value, str) and nt_value != "":
+        v = nt_value.strip().lower()
+        if v in ["1", "true", "on", "yes", "y"]:
+            normalize_think = True
+        elif v in ["0", "false", "off", "no", "n"]:
+            normalize_think = False
+    else:
+        config_path = os.path.join(args.path, "config.json")
+        if os.path.exists(config_path):
+            try:
+                with open(config_path, "r", encoding="utf-8") as f:
+                    cfg = json.load(f)
+                arch0 = ""
+                if isinstance(cfg.get("architectures"), list) and len(cfg["architectures"]) > 0:
+                    arch0 = str(cfg["architectures"][0])
+                if ("Qwen3" in arch0) or ("Qwen3Next" in arch0):
+                    normalize_think = True
+            except Exception:
+                pass
+
+    fastllm_completion = FastLLmCompletion(
+        model_name = args.model_name,
+        model = model,
+        think = (args.think.lower() != "false"),
+        hide_input = args.hide_input,
+        normalize_think = normalize_think
+    )
     fastllm_embed = FastLLmEmbed(model_name = args.model_name, model = model)
     fastllm_reranker = FastLLmReranker(model_name = args.model_name, model = model)
     fastllm_model = FastLLmModel(model_name = args.model_name)

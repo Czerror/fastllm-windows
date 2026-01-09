@@ -116,16 +116,15 @@ jobs:
           cp runtime_libs/vcrt/*.dll release-cpu/bin/
         fi
         
-        # Copy Python tools (exclude __init__.py and __main__.py, will be generated)
-        for f in build/tools/ftllm/*; do
-          fname=$(basename "$f")
-          if [ "$fname" != "__init__.py" ] && [ "$fname" != "__main__.py" ]; then
-            cp -r "$f" release-cpu/ftllm/
+        # Copy Python tools from source (exclude root __init__.py; it will be generated)
+        while IFS= read -r -d '' srcFile; do
+          relPath="${srcFile#tools/fastllm_pytools/}"
+          if [ "$relPath" = "__init__.py" ]; then
+            continue
           fi
-        done
-        
-        # Copy requirements.txt
-        cp tools/fastllm_pytools/requirements.txt release-cpu/ftllm/
+          mkdir -p "release-cpu/ftllm/$(dirname "$relPath")"
+          cp "$srcFile" "release-cpu/ftllm/$relPath"
+        done < <(find tools/fastllm_pytools -type f -print0)
         
         # Generate __init__.py with correct version
         printf '%s\n' \
@@ -141,20 +140,18 @@ jobs:
           '        __version__ = "'"${VERSION}"'"' \
           > release-cpu/ftllm/__init__.py
         
-        # Generate __main__.py for python -m ftllm
-        printf '%s\n' \
-          '"""ftllm - FastLLM 命令行入口"""' \
-          'from .cli import main' \
-          '' \
-          'if __name__ == "__main__":' \
-          '    main()' \
-          > release-cpu/ftllm/__main__.py
+        # Copy __main__.py for python -m ftllm (keep identical to source)
+        cp tools/fastllm_pytools/__main__.py release-cpu/ftllm/__main__.py
         
         # Copy web resources
         cp -r example/webui/web/* release-cpu/web/
         
-        # Copy docs (exclude 使用说明.md for root)
-        find docs -name "*.md" ! -name "使用说明.md" -exec cp {} release-cpu/docs/ \;
+        # Copy docs (only top-level docs/*.md; exclude 使用说明.md for root)
+        for md in docs/*.md; do
+          if [ "$(basename "$md")" != "使用说明.md" ]; then
+            cp "$md" release-cpu/docs/
+          fi
+        done
         cp README*.md release-cpu/docs/
         
         # Copy 使用说明.md to root
@@ -278,16 +275,15 @@ jobs:
           cp "${CUDA_BIN_X64}/cudart64_"*.dll release-cuda/bin/ 2>/dev/null || true
         fi
         
-        # Copy Python tools (exclude __init__.py and __main__.py, will be generated)
-        for f in build-cuda/tools/ftllm/*; do
-          fname=$(basename "$f")
-          if [ "$fname" != "__init__.py" ] && [ "$fname" != "__main__.py" ]; then
-            cp -r "$f" release-cuda/ftllm/
+        # Copy Python tools from source (exclude root __init__.py; it will be generated)
+        while IFS= read -r -d '' srcFile; do
+          relPath="${srcFile#tools/fastllm_pytools/}"
+          if [ "$relPath" = "__init__.py" ]; then
+            continue
           fi
-        done
-        
-        # Copy requirements.txt
-        cp tools/fastllm_pytools/requirements.txt release-cuda/ftllm/
+          mkdir -p "release-cuda/ftllm/$(dirname "$relPath")"
+          cp "$srcFile" "release-cuda/ftllm/$relPath"
+        done < <(find tools/fastllm_pytools -type f -print0)
         
         # Generate __init__.py with correct version
         printf '%s\n' \
@@ -303,20 +299,18 @@ jobs:
           '        __version__ = "'"${VERSION}"'"' \
           > release-cuda/ftllm/__init__.py
         
-        # Generate __main__.py for python -m ftllm
-        printf '%s\n' \
-          '"""ftllm - FastLLM 命令行入口"""' \
-          'from .cli import main' \
-          '' \
-          'if __name__ == "__main__":' \
-          '    main()' \
-          > release-cuda/ftllm/__main__.py
+        # Copy __main__.py for python -m ftllm (keep identical to source)
+        cp tools/fastllm_pytools/__main__.py release-cuda/ftllm/__main__.py
         
         # Copy web resources
         cp -r example/webui/web/* release-cuda/web/
         
-        # Copy docs (exclude 使用说明.md for root)
-        find docs -name "*.md" ! -name "使用说明.md" -exec cp {} release-cuda/docs/ \;
+        # Copy docs (only top-level docs/*.md; exclude 使用说明.md for root)
+        for md in docs/*.md; do
+          if [ "$(basename "$md")" != "使用说明.md" ]; then
+            cp "$md" release-cuda/docs/
+          fi
+        done
         cp README*.md release-cuda/docs/
         
         # Copy 使用说明.md to root

@@ -11,6 +11,9 @@
 #include <vector>
 #include <algorithm>
 #include <cstdlib>
+#include <cctype>
+#include <fstream>
+#include <iterator>
 #ifdef _WIN32
 #include <windows.h>
 #else
@@ -85,6 +88,40 @@ bool isDirectory(const std::string& path) {
     struct stat st;
     return (stat(path.c_str(), &st) == 0) && S_ISDIR(st.st_mode);
 #endif
+}
+
+std::string toLowerCopy(std::string s) {
+    std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    return s;
+}
+
+bool containsQwen3Hint(const std::string& s) {
+    const std::string lower = toLowerCopy(s);
+    return (lower.find("qwen3") != std::string::npos) || (lower.find("qwen-3") != std::string::npos);
+}
+
+std::string readAllTextFile(const std::string& path) {
+    std::ifstream ifs(path, std::ios::in | std::ios::binary);
+    if (!ifs.is_open()) return "";
+    return std::string(std::istreambuf_iterator<char>(ifs), std::istreambuf_iterator<char>());
+}
+
+bool shouldEnableThinkNormalizeForModelPath(const std::string& modelPath) {
+    if (modelPath.empty()) return false;
+    if (!isDirectory(modelPath)) return false;
+
+    const std::string configPathWin = modelPath + "\\config.json";
+    const std::string configPathPosix = modelPath + "/config.json";
+    std::string configPath;
+    if (fileExists(configPathWin)) configPath = configPathWin;
+    else if (fileExists(configPathPosix)) configPath = configPathPosix;
+    else return false;
+
+    const std::string raw = readAllTextFile(configPath);
+    if (raw.empty()) return false;
+    return containsQwen3Hint(raw);
 }
 
 // ============================================================================
@@ -238,13 +275,23 @@ int executeNativeProgram(const std::string& exeName, int argc, char** argv, int 
     // 检查是否已有 -p/--path 参数
     bool hasPathArg = false;
     std::string positionalModelPath;
+    std::string pathArgValue;
+    bool hasNtArg = false;
     
     for (int i = startArg; i < argc; i++) {
         std::string arg = argv[i];
         if (arg == "-p" || arg == "--path") {
             hasPathArg = true;
+            if (i + 1 < argc) {
+                pathArgValue = argv[i + 1];
+            }
             break;
         }
+    }
+
+    for (int i = startArg; i < argc; i++) {
+        std::string arg = argv[i];
+        if (arg == "--nt") hasNtArg = true;
     }
     
     // 处理参数
@@ -260,8 +307,11 @@ int executeNativeProgram(const std::string& exeName, int argc, char** argv, int 
                 arg.find('/') != std::string::npos ||
                 arg.find('\\') != std::string::npos) {
                 positionalModelPath = arg;
-                // 为原生程序添加 -p 参数
-                cmd += " -p";
+                // 仅对支持 -p 的原生程序自动补全 -p。
+                // FastllmStudio_cli 在当前源码中只接受位置参数 model_path。
+                if (exeName != "FastllmStudio_cli.exe") {
+                    cmd += " -p";
+                }
             }
         }
         
@@ -279,6 +329,14 @@ int executeNativeProgram(const std::string& exeName, int argc, char** argv, int 
             cmd += " \"" + escaped + "\"";
         } else {
             cmd += " " + arg;
+        }
+    }
+
+    // 仅对 apiserver.exe：主程序根据 config.json 判断是否为 Qwen3，并透传归一化开关。
+    if (exeName == "apiserver.exe" && !hasNtArg) {
+        const std::string modelPath = !pathArgValue.empty() ? pathArgValue : positionalModelPath;
+        if (shouldEnableThinkNormalizeForModelPath(modelPath)) {
+            cmd += " --nt true";
         }
     }
     
@@ -384,9 +442,10 @@ void Usage() {
     std::cout << "  --lora <路径>                 LoRA 路径 (自动切换 Python)" << std::endl;
     std::cout << std::endl;
     std::cout << "服务器参数:" << std::endl;
-    std::cout << "  --host <地址>                 监听地址 (默认: 0.0.0.0)" << std::endl;
+    std::cout << "  --host <地址>                 监听地址 (默认: 127.0.0.1)" << std::endl;
     std::cout << "  --port <端口>                 监听端口 (默认: 8080)" << std::endl;
     std::cout << "  --api_key <密钥>              API 密钥" << std::endl;
+    std::cout << "  --nt <true|false>             输入<think>归一化(稳定KV缓存命中)" << std::endl;
     std::cout << std::endl;
     std::cout << "示例:" << std::endl;
     std::cout << "  ftllm run D:\\Models\\Qwen2.5-7B --device cuda" << std::endl;
@@ -480,75 +539,142 @@ int main(int argc, char **argv) {
     // 完整对比见: C++ apiserver/webui/benchmark vs Python util.py/cli.py
     std::vector<std::string> unsupportedArgs;
     if (!usePython) {
-        static const char* pythonOnlyArgs[] = {
-            // ===== MOE / 设备配置 =====
-            "--host",               // apiserver 不支持 host 绑定
-            "--moe_device",         // MOE 设备配置 (如 "{'cuda':1,'cpu':4}")
-            "--moe_dtype",          // MOE 权重类型
-            "--moe_experts",        // MOE 专家数
-            
-            // ===== CUDA 配置 =====
-            "--cuda_embedding",     // CUDA embedding
-            "--kv_cache_limit",     // KV 缓存最大使用量
-            
-            // ===== 缓存 / 内存配置 =====
-            "--max_batch",          // 最大批次 (Python 用 max_batch, 原生用 batch)
-            "--cache_history",      // 缓存历史对话
-            "--cache_fast",         // 快速缓存（消耗显存）
-            "--cache_dir",          // 模型缓存目录
-            
-            // ===== 模型特性 =====
-            "--enable_thinking",    // 硬思考开关（需要模型支持）
-            "--cuda_shared_expert", // CUDA 共享专家 (--cuda_se)
-            "--cuda_se",            // 同上的别名
-            "--enable_amx",         // AMX 加速
-            "--amx",                // 同上的别名
-            "--flash_attn",         // Flash Attention
-            
-            // ===== LoRA / 自定义 =====
-            "--lora",               // LoRA 路径
-            "--adapter",            // LoRA adapter (别名)
-            "--custom",             // 自定义模型 python 文件
-            "--dtype_config",       // 权重类型配置文件
-            "--ori",                // 原始模型权重（GGUF）
-            
-            // ===== 模板 / 解析 =====
-            "--tool_call_parser",   // tool_call 解析器
-            "--chat_template",      // 聊天模板文件
-            
-            // ===== Server 专用 =====
-            "--model_name",         // 模型名称
-            "--api_key",            // API 密钥
-            "--think",              // 处理 <think> 标签
-            "--hide_input",         // 不显示请求信息
-            "--dev_mode",           // 开发模式
-            
-            // ===== 采样参数 (部分原生支持) =====
-            "--top_p",              // 采样参数
-            "--top_k",              // 采样参数
-            "--temperature",        // 温度参数
-            "--repeat_penalty",     // 重复惩罚
-            
-            nullptr
-        };
-        
-        for (int i = 1; i < argc; i++) {
-            std::string arg = argv[i];
-            for (int j = 0; pythonOnlyArgs[j]; j++) {
-                if (arg == pythonOnlyArgs[j]) {
-                    unsupportedArgs.push_back(arg);
-                    break;
+        const std::string cmdLower = toLowerCopy(command);
+        const bool canFallbackToPython = (
+            cmdLower == "chat" || cmdLower == "run" ||
+            cmdLower == "serve" || cmdLower == "server" || cmdLower == "api" ||
+            cmdLower == "webui" || cmdLower == "web"
+        );
+
+        // bench/quant 等仅有原生实现：不要因为“Python-only 参数”误切到 Python
+        if (canFallbackToPython) {
+            const char* const* pythonOnlyArgs = nullptr;
+
+            // serve/server/api: C++ apiserver 已支持 --host / --port / --batch/--max_batch / --cuda_embedding / --model_name / --device / --nt 等
+            static const char* pythonOnlyArgsServe[] = {
+                "--api_key",            // Python server 支持
+                "--think",              // Python server 支持
+                "--hide_input",         // Python server 支持
+                "--dev_mode",           // Python server 支持
+
+                // ===== MOE / 设备配置 =====
+                "--moe_device",
+                "--moe_dtype",
+                "--moe_experts",
+
+                // ===== CUDA / 内存 / 缓存 =====
+                "--kv_cache_limit",
+                "--cache_history",
+                "--cache_fast",
+                "--cache_dir",
+
+                // ===== 模型特性 =====
+                "--enable_thinking",
+                "--cuda_shared_expert",
+                "--cuda_se",
+                "--enable_amx",
+                "--amx",
+
+                // ===== LoRA / 自定义 =====
+                "--lora",
+                "--custom",
+                "--dtype_config",
+                "--ori",
+
+                // ===== 模板 / 解析 =====
+                "--tool_call_parser",
+                "--chat_template",
+
+                nullptr
+            };
+
+            // webui/web: C++ webui 参数面很窄，Python webui 额外支持很多运行参数
+            static const char* pythonOnlyArgsWebui[] = {
+                "--cuda_embedding",
+                "--kv_cache_limit",
+                "--max_batch",
+                "--max_token",          // Python webui 子命令参数
+                "--think",              // Python webui 子命令参数
+
+                "--moe_device",
+                "--moe_dtype",
+                "--moe_experts",
+                "--cache_history",
+                "--cache_fast",
+                "--cache_dir",
+
+                "--enable_thinking",
+                "--cuda_shared_expert",
+                "--cuda_se",
+                "--enable_amx",
+                "--amx",
+
+                "--lora",
+                "--custom",
+                "--dtype_config",
+                "--ori",
+
+                "--tool_call_parser",
+                "--chat_template",
+
+                nullptr
+            };
+
+            // chat/run: C++ FastllmStudio_cli 参数面有限；Python chat/run 支持更多模型配置类参数
+            static const char* pythonOnlyArgsChat[] = {
+                "--moe_device",
+                "--moe_dtype",
+                "--moe_experts",
+                "--cuda_embedding",
+                "--kv_cache_limit",
+                "--max_batch",
+                "--cache_history",
+                "--cache_fast",
+                "--cache_dir",
+
+                "--enable_thinking",
+                "--cuda_shared_expert",
+                "--cuda_se",
+                "--enable_amx",
+                "--amx",
+
+                "--lora",
+                "--custom",
+                "--dtype_config",
+                "--ori",
+
+                "--tool_call_parser",
+                "--chat_template",
+
+                nullptr
+            };
+
+            if (cmdLower == "serve" || cmdLower == "server" || cmdLower == "api") {
+                pythonOnlyArgs = pythonOnlyArgsServe;
+            } else if (cmdLower == "webui" || cmdLower == "web") {
+                pythonOnlyArgs = pythonOnlyArgsWebui;
+            } else {
+                pythonOnlyArgs = pythonOnlyArgsChat;
+            }
+
+            for (int i = 1; i < argc; i++) {
+                std::string arg = argv[i];
+                for (int j = 0; pythonOnlyArgs[j]; j++) {
+                    if (arg == pythonOnlyArgs[j]) {
+                        unsupportedArgs.push_back(arg);
+                        break;
+                    }
                 }
             }
-        }
-        
-        if (!unsupportedArgs.empty()) {
-            std::cout << "[提示] 以下参数在 C++ 原生程序中不支持:" << std::endl;
-            for (const auto& arg : unsupportedArgs) {
-                std::cout << "  - " << arg << std::endl;
+
+            if (!unsupportedArgs.empty()) {
+                std::cout << "[提示] 以下参数在当前 C++ 原生子命令中不支持:" << std::endl;
+                for (const auto& arg : unsupportedArgs) {
+                    std::cout << "  - " << arg << std::endl;
+                }
+                std::cout << "[自动切换] 使用 Python 后端以支持这些参数" << std::endl;
+                usePython = true;
             }
-            std::cout << "[自动切换] 使用 Python 后端以支持这些参数" << std::endl;
-            usePython = true;
         }
     }
     
@@ -619,9 +745,9 @@ int main(int argc, char **argv) {
         if (!cliExe.empty()) {
 #ifdef _WIN32
             // chcp 65001 确保子进程使用 UTF-8 代码页，避免中文乱码
-            std::string cmd = "chcp 65001 >nul && \"" + cliExe + "\" -p \"" + command + "\"";
+            std::string cmd = "chcp 65001 >nul && \"" + cliExe + "\" \"" + command + "\"";
 #else
-            std::string cmd = "\"" + cliExe + "\" -p \"" + command + "\"";
+            std::string cmd = "\"" + cliExe + "\" \"" + command + "\"";
 #endif
             // 添加剩余参数
             for (int i = commandIndex + 1; i < argc; i++) {

@@ -595,11 +595,17 @@ function New-ReleasePackage {
             & $addFile $fastllmToolsDll "ftllm/fastllm_tools.dll"
         }
         
-        # 6. ftllm/ - Python 工具 (排除 __init__.py 和 __main__.py，因为需要生成特定内容)
+        # 6. ftllm/ - Python 工具
+        # 仅排除根目录的 ftllm/__init__.py（因为下面会生成特定内容以写入版本号）。
+        # 子包的 __init__.py 必须保留，否则会变成 namespace package，导致 import 出现 (unknown location)
+        # 并且类似 `from ftllm.openai_server.tool_parsers import ToolParserManager` 失败。
         $ftllmSource = Join-Path $ProjectRoot "tools\fastllm_pytools"
         if (Test-Path $ftllmSource) {
-            Get-ChildItem $ftllmSource -Recurse -File | Where-Object { $_.Name -notin @("__init__.py", "__main__.py") } | ForEach-Object {
+            Get-ChildItem $ftllmSource -Recurse -File | ForEach-Object {
                 $relativePath = $_.FullName.Substring($ftllmSource.Length + 1)
+                if ($relativePath -in @("__init__.py")) {
+                    return
+                }
                 $entryName = "ftllm/$relativePath".Replace("\", "/")
                 & $addFile $_.FullName $entryName
             }
@@ -622,19 +628,6 @@ except:
         Set-Content -Path $tempInitPy -Value $initPyContent -Encoding UTF8 -NoNewline
         & $addFile $tempInitPy "ftllm/__init__.py"
         Remove-Item $tempInitPy -Force -ErrorAction SilentlyContinue
-        
-        # 6.2 ftllm/__main__.py - 支持 python -m ftllm
-        $mainPyContent = @"
-"""ftllm - FastLLM 命令行入口"""
-from .cli import main
-
-if __name__ == "__main__":
-    main()
-"@
-        $tempMainPy = Join-Path $env:TEMP "ftllm_main_temp.py"
-        Set-Content -Path $tempMainPy -Value $mainPyContent -Encoding UTF8 -NoNewline
-        & $addFile $tempMainPy "ftllm/__main__.py"
-        Remove-Item $tempMainPy -Force -ErrorAction SilentlyContinue
         
         # 7. web/ - Web UI
         $webSource = Join-Path $ProjectRoot "example\webui\web"

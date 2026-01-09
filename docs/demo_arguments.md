@@ -34,6 +34,9 @@
 - **模型名称 (`--model_name`)**: 指定部署的模型名称，API调用时会进行名称核验
 - **API服务器主机地址 (`--host`)**: 设置API服务器的主机地址
 - **API服务器端口号 (`--port`)**: 设置API服务器的端口号
+- **API Key (`--api_key`)**: 设置API Key认证（为空不校验）
+- **输出 think (`--think`)**: 是否输出 `<think>` 标签 (true/false)
+- **输入 think 归一化 (`--nt`)**: 将输入中的 `<think></think>` 归一化为模型特殊 token，以稳定 KV 缓存命中 (true/false)
 
 
 ## Web UI 配置参数

@@ -89,16 +89,15 @@ jobs:
         cp build/tools/ftllm/*.so release-intel/ftllm/ 2>/dev/null || true
         cp build/tools/ftllm/*.dylib release-intel/ftllm/ 2>/dev/null || true
         
-        # Copy Python tools
-        for f in build/tools/ftllm/*; do
-          fname=$(basename "$f")
-          if [ "$fname" != "__init__.py" ] && [ "$fname" != "__main__.py" ]; then
-            cp -r "$f" release-intel/ftllm/ 2>/dev/null || true
+        # Copy Python tools from source (exclude root __init__.py; it will be generated)
+        while IFS= read -r -d '' srcFile; do
+          relPath="${srcFile#tools/fastllm_pytools/}"
+          if [ "$relPath" = "__init__.py" ]; then
+            continue
           fi
-        done
-        
-        # Copy requirements.txt
-        cp tools/fastllm_pytools/requirements.txt release-intel/ftllm/
+          mkdir -p "release-intel/ftllm/$(dirname "$relPath")"
+          cp "$srcFile" "release-intel/ftllm/$relPath"
+        done < <(find tools/fastllm_pytools -type f -print0)
         
         # Generate __init__.py with correct version
         printf '%s\n' \
@@ -114,20 +113,18 @@ jobs:
           '        __version__ = "'"${VERSION}"'"' \
           > release-intel/ftllm/__init__.py
         
-        # Generate __main__.py for python -m ftllm
-        printf '%s\n' \
-          '"""ftllm - FastLLM 命令行入口"""' \
-          'from .cli import main' \
-          '' \
-          'if __name__ == "__main__":' \
-          '    main()' \
-          > release-intel/ftllm/__main__.py
+        # Copy __main__.py for python -m ftllm (keep identical to source)
+        cp tools/fastllm_pytools/__main__.py release-intel/ftllm/__main__.py
         
         # Copy web resources
         cp -r example/webui/web/* release-intel/web/
         
-        # Copy docs
-        find docs -name "*.md" ! -name "使用说明.md" -exec cp {} release-intel/docs/ \;
+        # Copy docs (only top-level docs/*.md; exclude 使用说明.md for root)
+        for md in docs/*.md; do
+          if [ "$(basename "$md")" != "使用说明.md" ]; then
+            cp "$md" release-intel/docs/
+          fi
+        done
         cp README*.md release-intel/docs/
         
         # Copy 使用说明.md to root
@@ -224,16 +221,15 @@ jobs:
         cp build/tools/ftllm/*.so release-arm/ftllm/ 2>/dev/null || true
         cp build/tools/ftllm/*.dylib release-arm/ftllm/ 2>/dev/null || true
         
-        # Copy Python tools
-        for f in build/tools/ftllm/*; do
-          fname=$(basename "$f")
-          if [ "$fname" != "__init__.py" ] && [ "$fname" != "__main__.py" ]; then
-            cp -r "$f" release-arm/ftllm/ 2>/dev/null || true
+        # Copy Python tools from source (exclude root __init__.py; it will be generated)
+        while IFS= read -r -d '' srcFile; do
+          relPath="${srcFile#tools/fastllm_pytools/}"
+          if [ "$relPath" = "__init__.py" ]; then
+            continue
           fi
-        done
-        
-        # Copy requirements.txt
-        cp tools/fastllm_pytools/requirements.txt release-arm/ftllm/
+          mkdir -p "release-arm/ftllm/$(dirname "$relPath")"
+          cp "$srcFile" "release-arm/ftllm/$relPath"
+        done < <(find tools/fastllm_pytools -type f -print0)
         
         # Generate __init__.py with correct version
         printf '%s\n' \
@@ -249,20 +245,18 @@ jobs:
           '        __version__ = "'"${VERSION}"'"' \
           > release-arm/ftllm/__init__.py
         
-        # Generate __main__.py for python -m ftllm
-        printf '%s\n' \
-          '"""ftllm - FastLLM 命令行入口"""' \
-          'from .cli import main' \
-          '' \
-          'if __name__ == "__main__":' \
-          '    main()' \
-          > release-arm/ftllm/__main__.py
+        # Copy __main__.py for python -m ftllm (keep identical to source)
+        cp tools/fastllm_pytools/__main__.py release-arm/ftllm/__main__.py
         
         # Copy web resources
         cp -r example/webui/web/* release-arm/web/
         
-        # Copy docs
-        find docs -name "*.md" ! -name "使用说明.md" -exec cp {} release-arm/docs/ \;
+        # Copy docs (only top-level docs/*.md; exclude 使用说明.md for root)
+        for md in docs/*.md; do
+          if [ "$(basename "$md")" != "使用说明.md" ]; then
+            cp "$md" release-arm/docs/
+          fi
+        done
         cp README*.md release-arm/docs/
         
         # Copy 使用说明.md to root
