@@ -39,54 +39,49 @@ jobs:
         # 记录合并前的本地 HEAD，用于在合并后恢复本地 Windows 定制文件
         LOCAL_HEAD=$(git rev-parse HEAD)
 
-        # 需要强制保留的本地文件：
-        # 1) 固定的 Windows fork 定制文件白名单
-        # 2) 动态生成：本地分支相对 upstream/master 的全部差异文件（防止上游覆盖本地改动）
-        PROTECTED_BASE=(
-          .github/
-          build.ps1
-          ftllm.cpp
-          CMakeLists.txt
-          README.md
-          README_EN.md
-          docs/使用说明.md
-          .gitmodules
-        )
+        # ===== Patch Replay 模式 =====
+        # 思路：
+        # 1) 计算本地相对 upstream/master 的“自定义提交列表”
+        # 2) reset 到 upstream/master
+        # 3) 按顺序 cherry-pick 这些提交
+        # 这样不会出现“先合并再强制覆盖保护文件”导致的隐性丢改动；
+        # 如果上游改动与本地定制冲突，会明确失败并要求人工处理。
+        BASE_COMMIT=$(git merge-base HEAD upstream/master 2>/dev/null || echo "")
+        if [ -z "$BASE_COMMIT" ]; then
+          echo "[ERROR] Cannot find merge-base between HEAD and upstream/master."
+          exit 1
+        fi
 
-        # 动态差异文件：列出本地分支相对 upstream/master 的改动文件（新增/修改/删除都会列出）
-        mapfile -t PROTECTED_DYNAMIC < <(git diff --name-only upstream/master...HEAD || true)
-
-        # 合并去重（保持顺序）
-        PROTECTED_FILES=()
-        declare -A _seen
-        for f in "${PROTECTED_BASE[@]}" "${PROTECTED_DYNAMIC[@]}"; do
-          if [ -n "$f" ] && [ -z "${_seen[$f]+x}" ]; then
-            _seen[$f]=1
-            PROTECTED_FILES+=("$f")
-          fi
-        done
+        UPSTREAM_AHEAD_COUNT=$(git rev-list --count HEAD..upstream/master 2>/dev/null || echo "0")
+        LOCAL_COMMITS_FILE="$(mktemp)"
+        # 只重放非 merge 的本地提交，避免把历史 merge upstream 的 merge commit 再重放一遍
+        git rev-list --reverse --no-merges "$BASE_COMMIT..$LOCAL_HEAD" > "$LOCAL_COMMITS_FILE" || true
+        LOCAL_COMMIT_COUNT=$(wc -l < "$LOCAL_COMMITS_FILE" | tr -d ' ')
         
         echo "Upstream latest: $UPSTREAM_COMMIT"
         echo "Local base: $LOCAL_UPSTREAM"
         
-        if [ "$UPSTREAM_COMMIT" != "$LOCAL_UPSTREAM" ]; then
-          echo "New changes detected from upstream"
-          
-          # 合并上游更改（总体偏向上游，随后会强制恢复本地定制文件）
-          git merge upstream/master --no-edit -X theirs || {
-            # 如果有冲突：对保护文件保留 ours，其余按 merge 结果处理
-            git checkout --ours "${PROTECTED_FILES[@]}" 2>/dev/null || true
-            git add -A
-            git commit -m "Merge upstream with local Windows customizations" || true
-          }
+        if [ "$UPSTREAM_AHEAD_COUNT" -gt 0 ]; then
+          echo "New changes detected from upstream (ahead by: $UPSTREAM_AHEAD_COUNT commits)"
+          echo "Local customization commits to replay: $LOCAL_COMMIT_COUNT"
 
-          # 合并完成后：强制把保护文件恢复到合并前本地版本，避免被上游覆盖
-          git checkout "$LOCAL_HEAD" -- "${PROTECTED_FILES[@]}" 2>/dev/null || true
-          if ! git diff --quiet; then
-            git add -A
-            git commit -m "chore: Restore local Windows customizations after upstream merge" || true
+          # 先对齐到上游最新
+          git reset --hard upstream/master
+
+          # 再逐个重放本地提交
+          if [ "$LOCAL_COMMIT_COUNT" -gt 0 ]; then
+            while IFS= read -r sha; do
+              [ -z "$sha" ] && continue
+              echo "Cherry-pick: $sha"
+              if ! git cherry-pick "$sha"; then
+                echo "[ERROR] Cherry-pick failed at $sha. Manual resolution required."
+                git status --porcelain || true
+                git cherry-pick --abort || true
+                exit 1
+              fi
+            done < "$LOCAL_COMMITS_FILE"
           fi
-          
+
           echo "SYNCED=true" >> $GITHUB_ENV
           echo "synced=true" >> $GITHUB_OUTPUT
         else

@@ -147,6 +147,9 @@ static const std::string THINK_CLOSE_MARK = "</think>";
 static const std::string THINK_OPEN_TOKEN_TEXT = "[unused16]";
 static const std::string THINK_CLOSE_TOKEN_TEXT = "[unused17]";
 
+static const size_t CHUNK_HEADER_MAX_BYTES = 64;
+static const char *HTTP_CRLF = "\r\n";
+
 // 是否对输入进行 <think> -> [unused16]/[unused17] 归一化。
 // 仅由命令行参数控制；是否需要开启由主程序（如 ftllm）判断并透传。
 static bool gEnableThinkNormalize = false;
@@ -183,6 +186,27 @@ static void NormalizeThinkMarkersInPlace(std::string &content) {
     }
     ReplaceAllInPlace(content, THINK_OPEN_MARK, THINK_OPEN_TOKEN_TEXT);
     ReplaceAllInPlace(content, THINK_CLOSE_MARK, THINK_CLOSE_TOKEN_TEXT);
+}
+
+static bool WriteAll(int fd, const char *data, size_t len) {
+    if (len == 0) {
+        return true;
+    }
+    const char *p = data;
+    size_t left = len;
+    while (left > 0) {
+        int written = write(fd, p, static_cast<unsigned int>(left));
+        if (written <= 0) {
+            return false;
+        }
+        p += written;
+        left -= static_cast<size_t>(written);
+    }
+    return true;
+}
+
+static bool WriteAll(int fd, const std::string &s) {
+    return WriteAll(fd, s.data(), s.size());
 }
 
 std::map <std::string, fastllm::DataType> dataTypeDict = {
@@ -382,7 +406,7 @@ struct WorkQueue {
             if (node->error != "") {
                 printf("error body = %s, prompt = %s, error = %s\n", node->request.body.c_str(), node->config["prompt"].string_value().c_str(), node->error.c_str());
                 message += node->error;
-                int ret = write(node->client, message.c_str(), message.length()); //返回error
+                (void)WriteAll(node->client, message);
                 close(node->client);
                 return;
             }
@@ -414,12 +438,16 @@ struct WorkQueue {
                     output += model->weight.tokenizer.Decode(fastllm::Data (fastllm::DataType::FLOAT32, {(int)results.size()}, results));
 
                     std::string cur = (message + output);
-                    int ret = write(node->client, cur.c_str(), cur.length()); //返回message
+                    if (!WriteAll(node->client, cur)) {
+                        model->AbortResponse(handleId);
+                        close(node->client);
+                        return;
+                    }
                 }
             }
 
             message += output;
-            int ret = write(node->client, message.c_str(), message.length()); //返回message
+            (void)WriteAll(node->client, message);
 
             close(node->client);
         } else if ((req->route == "/v1/chat/completions" || req->route == "/v1/chat/completions/") && req->method == "POST") {
@@ -455,7 +483,7 @@ struct WorkQueue {
 
             if (node->error != "") {                
                 message += node->error;
-                int ret = write(node->client, message.c_str(), message.length()); //返回error
+                (void)WriteAll(node->client, message);
                 close(node->client);
                 return;
             }
@@ -499,7 +527,11 @@ struct WorkQueue {
                 message += "server:fastllm api server\r\n";
                 message += "Transfer-Encoding: chunked\r\n";
                 message += "\r\n";
-                int ret = write(node->client, message.c_str(), message.length()); //返回初始信息
+                if (!WriteAll(node->client, message)) {
+                    model->AbortResponse(handleId);
+                    close(node->client);
+                    return;
+                }
             
                 json11::Json startResult = json11::Json::object {
                     {"id", curId},
@@ -520,11 +552,15 @@ struct WorkQueue {
                 };
                 std::string cur = ("data: " + startResult.dump() + "\r\n");
 
-                char chunk_header[50];
+                char chunk_header[CHUNK_HEADER_MAX_BYTES];
                 sprintf(chunk_header, "%zx\r\n", cur.size());
-                ret = write(node->client, chunk_header, strlen(chunk_header));
-                ret = write(node->client, cur.data(), cur.size());
-                ret = write(node->client, "\r\n", 2);
+                if (!WriteAll(node->client, chunk_header, strlen(chunk_header))
+                    || !WriteAll(node->client, cur)
+                    || !WriteAll(node->client, HTTP_CRLF, 2)) {
+                    model->AbortResponse(handleId);
+                    close(node->client);
+                    return;
+                }
 
                 int outputTokens = 0;
                 std::vector<float> results;
@@ -556,9 +592,9 @@ struct WorkQueue {
 
                         std::string cur = ("data: " + partResult.dump() + "\r\n");
                         sprintf(chunk_header, "%zx\r\n", cur.size());
-                        ret = write(node->client, chunk_header, strlen(chunk_header));
-                        ret = write(node->client, cur.data(), cur.size());
-                        ret = write(node->client, "\r\n", 2);
+                        (void)WriteAll(node->client, chunk_header, strlen(chunk_header));
+                        (void)WriteAll(node->client, cur);
+                        (void)WriteAll(node->client, HTTP_CRLF, 2);
                         break;
                     } else {
                         outputTokens++;
@@ -585,19 +621,23 @@ struct WorkQueue {
 
                         std::string cur = ("data: " + partResult.dump() + "\r\n");
                         sprintf(chunk_header, "%zx\r\n", cur.size());
-                        ret = write(node->client, chunk_header, strlen(chunk_header));
-                        ret = write(node->client, cur.data(), cur.size());
-                        ret = write(node->client, "\r\n", 2);
+                        if (!WriteAll(node->client, chunk_header, strlen(chunk_header))
+                            || !WriteAll(node->client, cur)
+                            || !WriteAll(node->client, HTTP_CRLF, 2)) {
+                            model->AbortResponse(handleId);
+                            close(node->client);
+                            return;
+                        }
                     }
                 }
 
                 cur = ("data: [DONE]");
                 sprintf(chunk_header, "%zx\r\n", cur.size());
-                ret = write(node->client, chunk_header, strlen(chunk_header));
-                ret = write(node->client, cur.data(), cur.size());
-                ret = write(node->client, "\r\n", 2);
+                (void)WriteAll(node->client, chunk_header, strlen(chunk_header));
+                (void)WriteAll(node->client, cur);
+                (void)WriteAll(node->client, HTTP_CRLF, 2);
 
-                ret = write(node->client, "0\r\n\r\n", 5);
+                (void)WriteAll(node->client, "0\r\n\r\n", 5);
                 close(node->client);
             } else {
                 int outputTokens = 0;
@@ -639,7 +679,7 @@ struct WorkQueue {
                 };
 
                 message += result.dump();
-                int ret = write(node->client, message.c_str(), message.length()); //返回message
+                (void)WriteAll(node->client, message);
                 close(node->client);
             }
             return;

@@ -4,6 +4,7 @@
 
 #include "basellm.h"
 #include "utils.h"
+#include <algorithm>
 #include <sstream>
 #include <cstring>
 

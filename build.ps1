@@ -29,9 +29,6 @@
 .PARAMETER UseSentencePiece
     启用 SentencePiece 分词器 (默认: 开启)
 
-.PARAMETER BuildCli
-    构建命令行工具 (默认: 开启)
-
 .PARAMETER PyApi
     构建 Python API (默认: 开启)
 
@@ -61,15 +58,37 @@ param(
     [switch]$Clean,
     [switch]$CleanCache,
     [switch]$NoPackage,
+
+    # 编译并行度（cmake --build --parallel）。
+    # 0 表示自动（使用 CPU 逻辑核数）。
+    [ValidateRange(0, 128)]
+    [int]$Parallel = 0,
     
     # CMake 选项
     [Nullable[bool]]$UseMmap = $null,
     [Nullable[bool]]$UseSentencePiece = $null,
-    [Nullable[bool]]$BuildCli = $null,
     [Nullable[bool]]$PyApi = $null,
     [Nullable[bool]]$UnitTest = $null,
     [Nullable[bool]]$CudaNoTensorCore = $null
 )
+
+# ============== 并行度策略 ==============
+$script:DEFAULT_PARALLEL_AUTO = 0
+$script:MAX_PARALLEL_JOBS = 128
+
+function Resolve-BuildParallelJobs {
+    param(
+        [int]$Requested
+    )
+
+    if ($Requested -gt 0) {
+        return [Math]::Min($Requested, $script:MAX_PARALLEL_JOBS)
+    }
+
+    $cpuCount = [Environment]::ProcessorCount
+    if ($cpuCount -lt 1) { $cpuCount = 1 }
+    return [Math]::Min($cpuCount, $script:MAX_PARALLEL_JOBS)
+}
 
 # ============== 全局错误处理 ==============
 trap {
@@ -165,7 +184,6 @@ $script:CudaArchPresets = @(
 $script:CMakeOptions = @{
     USE_MMAP = @{ Default = $true; Desc = "使用内存映射加载模型文件 (减少内存占用)" }
     USE_SENTENCEPIECE = @{ Default = $true; Desc = "启用 SentencePiece 分词器 (从子模块构建)" }
-    BUILD_CLI = @{ Default = $true; Desc = "构建命令行界面工具 (FastllmStudio CLI)" }
     PY_API = @{ Default = $true; Desc = "构建 Python API 绑定 (需要 pybind11 子模块和 Python)" }
     UNIT_TEST = @{ Default = $true; Desc = "构建单元测试" }
     CUDA_NO_TENSOR_CORE = @{ Default = $false; Desc = "针对无 Tensor Core 的旧款 GPU 优化 (GTX 10系列)" }
@@ -458,7 +476,10 @@ function Build-Project {
         Write-Host "  [2/3] 编译中 (可能需要几分钟)..." -ForegroundColor Yellow
         
         $buildStart = Get-Date
-        $buildOutput = & $CMakePath --build . --config Release --parallel 2 2>&1
+        # 默认自动并行（CPU 逻辑核数）。如遇到工具链/内存压力导致异常，可用 -Parallel 降低并行度。
+        $parallelJobs = Resolve-BuildParallelJobs -Requested $Parallel
+        Write-Host "        并行度: $parallelJobs" -ForegroundColor DarkGray
+        $buildOutput = & $CMakePath --build . --config Release --parallel $parallelJobs 2>&1
         $buildTime = (Get-Date) - $buildStart
         
         if ($LASTEXITCODE -ne 0) {
@@ -562,7 +583,7 @@ function New-ReleasePackage {
         # 1. 可执行文件 - ftllm.exe 放根目录，其他放 bin/
         Get-ChildItem "$fullBuildDir\Release\*.exe" -ErrorAction SilentlyContinue | ForEach-Object {
             if ($_.Name -eq "ftllm.exe") {
-                & $addFile $_.FullName "ftllm.exe"
+                & $addFile $_.FullName $_.Name
             } else {
                 & $addFile $_.FullName "bin/$($_.Name)"
             }
@@ -701,7 +722,6 @@ if ($Auto) {
     # 应用命令行 CMake 选项
     if ($null -ne $UseMmap) { $cmakeValues["USE_MMAP"] = $UseMmap }
     if ($null -ne $UseSentencePiece) { $cmakeValues["USE_SENTENCEPIECE"] = $UseSentencePiece }
-    if ($null -ne $BuildCli) { $cmakeValues["BUILD_CLI"] = $BuildCli }
     if ($null -ne $PyApi) { $cmakeValues["PY_API"] = $PyApi }
     if ($null -ne $UnitTest) { $cmakeValues["UNIT_TEST"] = $UnitTest }
     if ($null -ne $CudaNoTensorCore) { $cmakeValues["CUDA_NO_TENSOR_CORE"] = $CudaNoTensorCore }
@@ -843,16 +863,27 @@ if (($target -eq "cuda" -or $target -eq "both") -and $CudaInfo) {
     }
 }
 
-# ========== 清理临时文件 ==========
+# ========== 清理临时文件 ============
+# 仅当构建流程成功时清理构建目录；失败时保留现场便于排障。
 if ($package) {
-    Write-Host ""
-    Write-Host "  清理临时构建文件..." -ForegroundColor Gray
-    $buildDirs = @("build", "build-cuda") | ForEach-Object { Join-Path $ProjectRoot $_ }
-    foreach ($dir in $buildDirs) {
-        if (Test-Path $dir) {
-            Remove-Item -Recurse -Force $dir -ErrorAction SilentlyContinue
-            Write-Host "    已删除: $([System.IO.Path]::GetFileName($dir))" -ForegroundColor DarkGray
+    $allSucceeded = $true
+    foreach ($k in $results.Keys) {
+        if (-not $results[$k]) { $allSucceeded = $false; break }
+    }
+
+    if ($allSucceeded) {
+        Write-Host ""
+        Write-Host "  清理临时构建文件..." -ForegroundColor Gray
+        $buildDirs = @("build", "build-cuda") | ForEach-Object { Join-Path $ProjectRoot $_ }
+        foreach ($dir in $buildDirs) {
+            if (Test-Path $dir) {
+                Remove-Item -Recurse -Force $dir -ErrorAction SilentlyContinue
+                Write-Host "    已删除: $([System.IO.Path]::GetFileName($dir))" -ForegroundColor DarkGray
+            }
         }
+    } else {
+        Write-Host ""
+        Write-Host "  [!] 构建未全部成功，已保留构建目录用于排障" -ForegroundColor Yellow
     }
 }
 

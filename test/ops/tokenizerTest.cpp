@@ -129,8 +129,8 @@ int main(int argc, char **argv) {
         for (auto const &i: inputTokens)
             std::cout << i << " ";
         std::cout << std::endl;
-        printf("tokens: %d\n", inputTokens.size());
-        std::string response = config.defaultResponse.empty() ? u8"<think>\n\n</think>Hello, how can I assist you today ?" : config.defaultResponse; 
+        printf("tokens: %zu\n", inputTokens.size());
+        std::string response = config.defaultResponse.empty() ? "<think>\n\n</think>Hello, how can I assist you today ?" : config.defaultResponse;
 #if defined(_WIN32) || defined(_WIN64)
         printf("%s: %s\n", modelType.c_str(), utf8_to_gbk(response).c_str());
 #else

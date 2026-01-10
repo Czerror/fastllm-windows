@@ -5,6 +5,12 @@
 #ifndef TEST_FASTLLM_H
 #define TEST_FASTLLM_H
 
+#if defined(_WIN32) || defined(_WIN64)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#endif
+
 #define _USE_MATH_DEFINES
 #include <vector>
 #include <cstdint>

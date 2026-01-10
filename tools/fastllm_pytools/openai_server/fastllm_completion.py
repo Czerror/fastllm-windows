@@ -11,7 +11,6 @@ from typing import (AsyncGenerator, AsyncIterator, Awaitable, Dict, Iterable, Li
 import uuid
 from openai.types.chat import (ChatCompletionContentPartParam,
                                ChatCompletionRole)
-from starlette.background import BackgroundTask
 
 from .protocal.openai_protocol import *
 
@@ -188,9 +187,9 @@ class FastLLmCompletion:
         if request.stream:
             return (
                 self.chat_completion_stream_generator(
-                    request, raw_request, result_generator, request_id, input_token_len, think=self.think
+                    request, raw_request, handle, result_generator, request_id, input_token_len, think=self.think
                 ),
-                BackgroundTask(self.check_disconnect, raw_request, request_id, handle)
+                None
             )
         else:
             try:
@@ -199,22 +198,6 @@ class FastLLmCompletion:
                 )
             except ValueError as e:
                 return self.create_error_response(str(e))
-
-    async def check_disconnect(self, raw_request: Request, request_id, handle: int):
-        # 仅在客户端真正断开连接时才 abort。
-        # 注意：BackgroundTask 会在响应生命周期内被调度，但不代表客户端已断开。
-        # 如果这里一进来就 abort，会导致：
-        # 1) 生成被提前中止；2) 历史 KV cache 无法在正常结束路径被记录；
-        # 从而表现为"每轮都 Long Prefill（KV 前缀缓存不命中）"。
-        while True:
-            try:
-                if await raw_request.is_disconnected():
-                    self.model.abort_handle(handle)
-                    logging.info(f"Abort request (client disconnected): {request_id}")
-                    return
-            except Exception as e:
-                logging.warning(f"Disconnect check failed for {request_id}: {e}")
-            await asyncio.sleep(1)
 
     async def chat_completion_full_generator(
         self,
@@ -269,6 +252,7 @@ class FastLLmCompletion:
         self,
         request: ChatCompletionRequest,
         raw_request: Request,
+        handle: int,
         result_generator: AsyncIterator,
         request_id: str,
         input_token_len: int,
@@ -280,6 +264,7 @@ class FastLLmCompletion:
 
         # TODO: 支持request.n 和 request.echo配置
         first_iteration = True
+        completion_tokens = 0
         try:
             if first_iteration:
                 # 1. role部分
@@ -300,26 +285,6 @@ class FastLLmCompletion:
                 yield f"data: {data}\n\n"
                 first_iteration = False
 
-            # 新增：发送<think>标签
-            has_sent_label = False
-            if not has_sent_label and think:
-                choice_data = ChatCompletionResponseStreamChoice(
-                    index=0,
-                    delta=DeltaMessage(content="<think>\n"),
-                    logprobs=None,
-                    finish_reason=None
-                )
-                chunk = ChatCompletionStreamResponseWithUsage(
-                    id=request_id,
-                    object=chunk_object_type,
-                    created=created_time,
-                    choices=[choice_data],
-                    model=model_name
-                )
-                data = chunk.model_dump_json(exclude_unset=True)
-                yield f"data: {data}\n\n"  # 发送标签块
-                has_sent_label = True  # 标记已发送标签
-
             # 2. content部分
 
             if request.tools and self.tool_parser is None:
@@ -332,14 +297,16 @@ class FastLLmCompletion:
                     force_type=self.model.tool_call_parser
                 )(self.model.hf_tokenizer)
 
-            completion_tokens = 0
-
             previous_token_ids = []
             current_token_ids = []
             previous_text = ""
             current_text = ""
 
             async for res in result_generator:
+                if await raw_request.is_disconnected():
+                    self.model.abort_handle(handle)
+                    logging.info(f"Abort stream request (client disconnected): {request_id}")
+                    return
                 if res == "[unused16]":
                     res = "<think>"
                 elif res == "[unused17]":
@@ -417,11 +384,19 @@ class FastLLmCompletion:
             data = self.create_streaming_error_response(str(e))
             yield f"data: {data}\n\n"
             await asyncio.sleep(0)
-
-        # After completion, remove the conversation from tracking dictionary
-        if request_id in self.conversation_handles:
-            del self.conversation_handles[request_id]
-            logging.info(f"Removed completed stream conversation from tracking: {request_id}")
+        except asyncio.CancelledError:
+            # 客户端断开通常会触发取消；确保模型侧也尽快停止
+            try:
+                self.model.abort_handle(handle)
+                logging.info(f"Abort stream request (cancelled): {request_id}")
+            except Exception:
+                pass
+            raise
+        finally:
+            # 正常结束时不要调用 abort，否则会破坏历史 KV cache 写入，导致每轮 Long Prefill。
+            if request_id in self.conversation_handles:
+                del self.conversation_handles[request_id]
+                logging.info(f"Removed completed stream conversation from tracking: {request_id}")
 
         yield "data: [DONE]\n\n"
         await asyncio.sleep(0)

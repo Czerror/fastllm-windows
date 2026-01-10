@@ -63,9 +63,11 @@ jobs:
         cd build
         cmake .. -G Ninja \
           -DCMAKE_BUILD_TYPE=Release \
+          -DCMAKE_CXX_STANDARD=20 \
+          -DCMAKE_CXX_STANDARD_REQUIRED=ON \
+          -DCMAKE_CXX_EXTENSIONS=OFF \
           -DUSE_MMAP=ON \
           -DUSE_SENTENCEPIECE=ON \
-          -DBUILD_CLI=ON \
           -DPY_API=ON
     
     - name: Build (CPU Release)
@@ -210,11 +212,13 @@ jobs:
         cd build-cuda
         cmake .. -G Ninja \
           -DCMAKE_BUILD_TYPE=Release \
+          -DCMAKE_CXX_STANDARD=20 \
+          -DCMAKE_CXX_STANDARD_REQUIRED=ON \
+          -DCMAKE_CXX_EXTENSIONS=OFF \
           -DUSE_CUDA=ON \
           -DCUDA_ARCH="${CUDA_ARCH}" \
           -DUSE_MMAP=ON \
           -DUSE_SENTENCEPIECE=ON \
-          -DBUILD_CLI=ON \
           -DPY_API=ON
       env:
         CUDA_PATH: ${{ steps.cuda-toolkit.outputs.CUDA_PATH }}
@@ -366,11 +370,13 @@ jobs:
         cd build-rocm
         cmake .. -G Ninja \
           -DCMAKE_BUILD_TYPE=Release \
+          -DCMAKE_CXX_STANDARD=20 \
+          -DCMAKE_CXX_STANDARD_REQUIRED=ON \
+          -DCMAKE_CXX_EXTENSIONS=OFF \
           -DUSE_ROCM=ON \
           -DROCM_ARCH="${ROCM_ARCH}" \
           -DUSE_MMAP=ON \
           -DUSE_SENTENCEPIECE=ON \
-          -DBUILD_CLI=ON \
           -DPY_API=ON
       env:
         ROCM_PATH: /opt/rocm

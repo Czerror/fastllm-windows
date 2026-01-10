@@ -74,15 +74,17 @@ jobs:
         mkdir build
         cd build
         cmake .. -G "Visual Studio 17 2022" -A x64 `
+          -DCMAKE_CXX_STANDARD=20 `
+          -DCMAKE_CXX_STANDARD_REQUIRED=ON `
+          -DCMAKE_CXX_EXTENSIONS=OFF `
           -DUSE_MMAP=ON `
           -DUSE_SENTENCEPIECE=ON `
-          -DBUILD_CLI=ON `
           -DPY_API=ON
     
     - name: Build (CPU Release)
       run: |
         cd build
-        cmake --build . --config Release --parallel 4
+        cmake --build . --config Release --parallel $env:NUMBER_OF_PROCESSORS
     
     - name: Prepare Release Package (CPU)
       shell: bash
@@ -96,7 +98,8 @@ jobs:
         
         # Copy executables - ftllm.exe to root, others to bin/
         for exe in build/Release/*.exe; do
-          if [ "$(basename "$exe")" = "ftllm.exe" ]; then
+          name=$(basename "$exe")
+          if [ "$name" = "ftllm.exe" ]; then
             cp "$exe" release-cpu/
           else
             cp "$exe" release-cpu/bin/
@@ -213,11 +216,13 @@ jobs:
         mkdir build-cuda
         cd build-cuda
         cmake .. -G "Visual Studio 17 2022" -A x64 `
+          -DCMAKE_CXX_STANDARD=20 `
+          -DCMAKE_CXX_STANDARD_REQUIRED=ON `
+          -DCMAKE_CXX_EXTENSIONS=OFF `
           -DUSE_CUDA=ON `
           -DCUDA_ARCH="$cudaArch" `
           -DUSE_MMAP=ON `
           -DUSE_SENTENCEPIECE=ON `
-          -DBUILD_CLI=ON `
           -DPY_API=ON
       env:
         CUDA_PATH: ${{ steps.cuda-toolkit.outputs.CUDA_PATH }}
@@ -225,7 +230,7 @@ jobs:
     - name: Build (CUDA Release)
       run: |
         cd build-cuda
-        cmake --build . --config Release --parallel 2  # 减少并行度避免内存不足
+        cmake --build . --config Release --parallel $env:NUMBER_OF_PROCESSORS
     
     - name: Prepare Release Package (CUDA)
       shell: bash
@@ -239,7 +244,8 @@ jobs:
         
         # Copy executables - ftllm.exe to root, others to bin/
         for exe in build-cuda/Release/*.exe; do
-          if [ "$(basename "$exe")" = "ftllm.exe" ]; then
+          name=$(basename "$exe")
+          if [ "$name" = "ftllm.exe" ]; then
             cp "$exe" release-cuda/
           else
             cp "$exe" release-cuda/bin/

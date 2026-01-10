@@ -2,9 +2,14 @@ cmake_minimum_required(VERSION 3.18...3.31)
 
 project(fastllm LANGUAGES CXX)
 
+# 默认使用 C++20（Windows 已通过 /std:c++20 设置；这里用于跨平台与 IDE/IntelliSense 统一）
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+
 # ============== 编译选项说明 ==============
 # 使用方法: cmake .. -D选项名=ON/OFF
-# 例如: cmake .. -DUSE_CUDA=ON -DBUILD_CLI=ON
+# 例如: cmake .. -DUSE_CUDA=ON -DBUILD_STUDIO_CLI=ON
 
 # 启用 NVIDIA CUDA GPU 加速 (需要安装 CUDA Toolkit)
 option(USE_CUDA "use CUDA" OFF)
@@ -30,11 +35,15 @@ option(USE_SENTENCEPIECE "use sentencepiece" ON)
 # 启用天数智芯 Iluvatar CoreX GPU 支持
 option(USE_IVCOREX "use iluvatar corex gpu" OFF)
 
-# 构建命令行界面工具 (FastllmStudio CLI)
-option(BUILD_CLI "build cli" ON)
+# 构建 FastllmStudio CLI (交互式 TUI，通常不需要)
+option(BUILD_STUDIO_CLI "build FastllmStudio CLI" OFF)
 
 # 构建单元测试
 option(UNIT_TEST "build unit tests" ON)
+
+# CUDA 编译的 C++ 标准（NVCC -std），默认跟随全局 CMAKE_CXX_STANDARD（本工程默认 C++20）。
+# 如需显式覆盖：-DFASTLLM_CUDA_STANDARD=17 或 -DFASTLLM_CUDA_STANDARD=20
+set(FASTLLM_CUDA_STANDARD "${CMAKE_CXX_STANDARD}" CACHE STRING "C++ standard for CUDA (nvcc -std=...). Default follows CMAKE_CXX_STANDARD.")
 
 # CUDA 架构设置，默认编译全架构版本 (RTX 20/30/40/50 系列)
 # 如需仅编译本机 GPU 架构以加快编译速度并减小体积，可使用:
@@ -146,7 +155,7 @@ message(STATUS "For legacy CUDA GPUs: ${CUDA_NO_TENSOR_CORE}")
 
 message(STATUS "PYTHON_API: ${PY_API}")
 
-message(STATUS "BUILD_CLI: ${BUILD_CLI}")
+message(STATUS "BUILD_STUDIO_CLI: ${BUILD_STUDIO_CLI}")
 
 message(STATUS "USE_SENTENCEPIECE: ${USE_SENTENCEPIECE}")
 
@@ -159,7 +168,8 @@ set(CMAKE_BUILD_TYPE "Release")
 string(REGEX REPLACE "^([0-9]+)\\.[0-9]+\\.[0-9]+$" "\\1" CXX_MAJOR_VERSION "${CMAKE_CXX_COMPILER_VERSION}")
 
 if (CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -pthread --std=c++17 -O2")
+    # 统一由 CMAKE_CXX_STANDARD 控制语言标准（本项目默认 C++20），避免手动 --std 覆盖。
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -pthread -O2")
 elseif(CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
     string(REPLACE "/Ob2" "/Ob1 /Gy" CMAKE_CXX_FLAGS_RELEASE ${CMAKE_CXX_FLAGS_RELEASE})
     # Use C++20 for designated initializers support (gguf.cpp requires it)
@@ -168,7 +178,7 @@ elseif(CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
     # /wd4190: Suppress C linkage with UDT return type warning
     # /wd4996: Suppress deprecated std::wstring_convert warning
     # /source-charset:utf-8 /execution-charset:utf-8: Source and execution charset both UTF-8
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DNOMINMAX /std:c++20 /arch:AVX2 /source-charset:utf-8 /execution-charset:utf-8 /bigobj /MP2 /D_CRT_SECURE_NO_WARNINGS /wd4244 /wd4267 /wd4190 /wd4996")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /DNOMINMAX /std:c++20 /arch:AVX2 /source-charset:utf-8 /execution-charset:utf-8 /bigobj /MP2 /D_CRT_SECURE_NO_WARNINGS /wd4244 /wd4267 /wd4190 /wd4996")
     # Windows MSVC uses AMD64 instead of x86_64
     if (CXX_MAJOR_VERSION GREATER_EQUAL 19 AND (CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64" OR CMAKE_SYSTEM_PROCESSOR MATCHES "AMD64"))
         # MSVC 2022 (19.30+) supports AVX512 intrinsics with /arch:AVX512
@@ -206,9 +216,9 @@ elseif(CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
     endif()
 else()
     if (MAKE_WHL_X86)
-        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -pthread --std=c++17 -O2 -mavx -mavx2 -mf16c -mfma -static-libstdc++ -static-libgcc -fPIC -Wl,-Bsymbolic -Wl,--exclude-libs,ALL")
+        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -pthread -O2 -mavx -mavx2 -mf16c -mfma -static-libstdc++ -static-libgcc -fPIC -Wl,-Bsymbolic -Wl,--exclude-libs,ALL")
     else()
-        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -pthread --std=c++17 -O2 -march=native")
+        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -pthread -O2 -march=native")
     endif()
     message(STATUS "CMAKE_SYSTEM_PROCESSOR: ${CMAKE_SYSTEM_PROCESSOR}")
     if (CXX_MAJOR_VERSION GREATER_EQUAL 10 AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64")
@@ -280,7 +290,6 @@ if (USE_MMAP)
 endif()
 
 if (USE_SENTENCEPIECE)
-    set(CMAKE_CXX_STANDARD 17)
     add_compile_definitions(USE_SENTENCEPIECE)
     
     # Try to find sentencepiece via vcpkg/system first
@@ -328,8 +337,8 @@ endif()
 
 if (USE_CUDA)
     enable_language(CUDA)
-    # CUDA 13.1+ Thrust requires C++17
-    set(CMAKE_CUDA_STANDARD 17)
+    # CUDA 侧的 -std（NVCC）。默认跟随 FASTLLM_CUDA_STANDARD（默认与 CMAKE_CXX_STANDARD 一致）。
+    set(CMAKE_CUDA_STANDARD ${FASTLLM_CUDA_STANDARD})
     set(CMAKE_CUDA_STANDARD_REQUIRED ON)
     # Pass UTF-8 charset to host compiler for Chinese comments
     if (MSVC)
@@ -534,7 +543,7 @@ target_link_libraries(benchmark fastllm)
 add_executable(apiserver example/apiserver/apiserver.cpp)
 target_link_libraries(apiserver fastllm)
 
-if (BUILD_CLI)
+if (BUILD_STUDIO_CLI)
     add_executable(FastllmStudio_cli example/FastllmStudio/cli/cli.cpp example/FastllmStudio/cli/ui.cpp)
     target_link_libraries(FastllmStudio_cli fastllm)
 endif()
