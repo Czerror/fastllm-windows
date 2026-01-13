@@ -138,152 +138,14 @@ using socket_t = int;
 #include "model.h"
 
 // ===== 控制台美化输出支持 =====
-namespace console {
-static bool g_ansi = false;
+#include "utils/inference_stats.h"
+#include "utils/console.h"
+#include "utils/log_handler.h"  // 日志回调处理模块
 
-// ANSI 颜色代码
-static constexpr const char* RESET = "\x1b[0m";
-static constexpr const char* BOLD = "\x1b[1m";
-static constexpr const char* DIM = "\x1b[2m";
-static constexpr const char* GREEN = "\x1b[32m";
-static constexpr const char* YELLOW = "\x1b[33m";
-static constexpr const char* CYAN = "\x1b[36m";
-static constexpr const char* BRIGHT_GREEN = "\x1b[92m";
-static constexpr const char* BRIGHT_CYAN = "\x1b[96m";
-
-// Unicode 图标
-static constexpr const char* ICON_CHECK = "\xe2\x9c\x93";  // ✓
-static constexpr const char* ICON_INFO = "\xe2\x84\xb9";   // ℹ
-static constexpr const char* ICON_GEAR = "\xe2\x9a\x99";   // ⚙
-static constexpr const char* ICON_PLAY = "\xe2\x96\xb6";   // ▶
-
-inline void init() {
-#ifdef _WIN32
-    // 设置控制台输出为 UTF-8
-    SetConsoleOutputCP(CP_UTF8);
-    SetConsoleCP(CP_UTF8);
-    
-    // 检查父进程是否已启用 ANSI (通过环境变量)
-    const char* env = std::getenv("FTLLM_ANSI");
-    if (env && std::string(env) == "1") {
-        g_ansi = true;
-    } else {
-        // 尝试自行启用 ANSI
-        HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE);
-        if (hOut != INVALID_HANDLE_VALUE) {
-            DWORD mode = 0;
-            if (GetConsoleMode(hOut, &mode)) {
-                if (SetConsoleMode(hOut, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING)) {
-                    g_ansi = true;
-                }
-            }
-        }
-    }
-#else
-    // Unix 系统通常默认支持
-    g_ansi = true;
-#endif
-}
-
-inline void printStyled(const char* color, const std::string& text) {
-    if (g_ansi) std::cout << color << text << RESET;
-    else std::cout << text;
-}
-
-inline void printSuccess(const std::string& msg) {
-    if (g_ansi) std::cout << GREEN << ICON_CHECK << " " << RESET << msg << std::endl;
-    else std::cout << "[OK] " << msg << std::endl;
-}
-
-inline void printInfo(const std::string& msg) {
-    if (g_ansi) std::cout << CYAN << ICON_INFO << " " << RESET << msg << std::endl;
-    else std::cout << "[INFO] " << msg << std::endl;
-}
-
-inline void printConfig(const std::string& key, const std::string& value) {
-    if (g_ansi) std::cout << "  " << DIM << key << RESET << ": " << BRIGHT_CYAN << value << RESET << std::endl;
-    else std::cout << "  " << key << ": " << value << std::endl;
-}
-
-inline void printHeader(const std::string& title) {
-    if (g_ansi) {
-        std::cout << std::endl << BOLD << CYAN << ICON_PLAY << " " << title << RESET << std::endl;
-        std::cout << "────────────────────────────────────────" << std::endl;
-    } else {
-        std::cout << std::endl << "=== " << title << " ===" << std::endl;
-    }
-}
-
-// 显示推理统计信息
-inline void printStats(int promptTokens, int outputTokens, double totalTime, double firstTokenTime, double speed) {
-    if (g_ansi) {
-        std::cout << GREEN << ICON_CHECK << RESET 
-                  << " 提示词: " << BRIGHT_CYAN << promptTokens << RESET
-                  << ", 输出: " << BRIGHT_CYAN << outputTokens << RESET
-                  << ", 耗时: " << YELLOW << std::fixed << std::setprecision(2) << totalTime << "s" << RESET
-                  << ", 首字: " << YELLOW << std::fixed << std::setprecision(2) << firstTokenTime << "s" << RESET
-                  << ", 速度: " << BRIGHT_GREEN << std::fixed << std::setprecision(0) << speed << " t/s" << RESET
-                  << std::endl;
-    } else {
-        std::cout << "[完成] 提示词: " << promptTokens 
-                  << ", 输出: " << outputTokens 
-                  << ", 耗时: " << std::fixed << std::setprecision(2) << totalTime << "s"
-                  << ", 首字: " << std::fixed << std::setprecision(2) << firstTokenTime << "s"
-                  << ", 速度: " << std::fixed << std::setprecision(0) << speed << " t/s"
-                  << std::endl;
-    }
-}
-} // namespace console
-
-// 推理统计助手类 - 用于统一各端点的性能统计
-struct InferenceStats {
-    std::chrono::high_resolution_clock::time_point requestStart;
-    std::chrono::high_resolution_clock::time_point firstTokenTime;
-    int promptTokens = 0;
-    int outputTokens = 0;
-    bool firstTokenReceived = false;
-    
-    InferenceStats(int promptToks = 0) : promptTokens(promptToks) {
-        requestStart = std::chrono::high_resolution_clock::now();
-    }
-    
-    // 记录收到第一个 token
-    void onFirstToken() {
-        if (!firstTokenReceived) {
-            firstTokenReceived = true;
-            firstTokenTime = std::chrono::high_resolution_clock::now();
-        }
-    }
-    
-    // 记录输出 token
-    void onToken() {
-        onFirstToken();
-        outputTokens++;
-    }
-    
-    // 获取首字延迟（秒）
-    double getFirstTokenLatency() const {
-        if (!firstTokenReceived) return 0;
-        return std::chrono::duration<double>(firstTokenTime - requestStart).count();
-    }
-    
-    // 获取总耗时（秒）
-    double getTotalTime() const {
-        auto now = std::chrono::high_resolution_clock::now();
-        return std::chrono::duration<double>(now - requestStart).count();
-    }
-    
-    // 获取生成速度（tokens/s，排除首字延迟）
-    double getSpeed() const {
-        double generateTime = getTotalTime() - getFirstTokenLatency();
-        return (outputTokens > 0 && generateTime > 0) ? outputTokens / generateTime : 0;
-    }
-    
-    // 打印统计信息
-    void print() const {
-        console::printStats(promptTokens, outputTokens, getTotalTime(), getFirstTokenLatency(), getSpeed());
-    }
-};
+// 本地别名，保持兼容性
+using InferenceStats = fastllm::InferenceStatsHelper;
+namespace console = fastllm::console;
+namespace log_handler = fastllm::log_handler;
 
 long long _GetCurrentTime() {
     auto now = std::chrono::high_resolution_clock::now();
@@ -757,6 +619,59 @@ static std::string BuildJsonModePrompt(const ResponseFormatInfo &format) {
         return "\n\nYou must respond with valid JSON that follows this schema:\n" + format.schema + "\n\nDo not include any text outside of the JSON object.";
     }
     return "";
+}
+
+// ========== Tools Prompt 构建 ==========
+
+// 将 tools 定义转换为 prompt 格式，注入到 system message 中
+static std::string BuildToolsPrompt(const json11::Json &config) {
+    if (!HasToolsInRequest(config)) {
+        return "";
+    }
+    
+    std::string toolChoice = GetToolChoice(config);
+    
+    std::stringstream ss;
+    ss << "\n\n# Tools\n\n";
+    ss << "You have access to the following tools:\n\n";
+    
+    for (auto &tool : config["tools"].array_items()) {
+        if (tool["type"].string_value() == "function" && tool["function"].is_object()) {
+            auto func = tool["function"];
+            std::string name = func["name"].string_value();
+            std::string desc = func["description"].string_value();
+            
+            ss << "## " << name << "\n\n";
+            if (!desc.empty()) {
+                ss << desc << "\n\n";
+            }
+            
+            // 添加参数 schema
+            if (func["parameters"].is_object()) {
+                ss << "Parameters:\n```json\n" << func["parameters"].dump() << "\n```\n\n";
+            }
+        }
+    }
+    
+    // 添加工具调用格式说明
+    ss << "# Tool Call Format\n\n";
+    ss << "When you need to use a tool, respond with a JSON object in this exact format:\n";
+    ss << "```json\n";
+    ss << "{\n";
+    ss << "  \"name\": \"tool_name\",\n";
+    ss << "  \"arguments\": { ... }\n";
+    ss << "}\n";
+    ss << "```\n\n";
+    
+    if (toolChoice == "required") {
+        ss << "You MUST use one of the available tools to respond.\n";
+    } else if (toolChoice == "none") {
+        ss << "Do NOT use any tools. Respond directly with text.\n";
+    } else {
+        ss << "Use a tool if it helps answer the user's question. Otherwise, respond directly.\n";
+    }
+    
+    return ss.str();
 }
 
 static bool WriteAll(socket_t fd, const char *data, size_t len) {
@@ -1648,6 +1563,24 @@ struct WorkQueue {
                 return;
             }
 
+            // 处理 tools - 将工具定义注入到 system prompt
+            std::string toolsPrompt = BuildToolsPrompt(node->config);
+            if (!toolsPrompt.empty()) {
+                // 查找是否已有 system 消息
+                bool hasSystem = false;
+                for (auto &msg : chatMessages) {
+                    if (msg.first == "system") {
+                        msg.second += toolsPrompt;
+                        hasSystem = true;
+                        break;
+                    }
+                }
+                if (!hasSystem) {
+                    // 在开头添加 system 消息
+                    chatMessages.insert(chatMessages.begin(), {"system", toolsPrompt.substr(2)}); // 去掉开头的 \n\n
+                }
+            }
+
             // 处理 response_format
             auto responseFormat = ParseResponseFormat(node->config);
             if (responseFormat.type == "json_object" || responseFormat.type == "json_schema") {
@@ -2414,11 +2347,28 @@ int main(int argc, char** argv) {
     console::init();  // 初始化控制台美化
     ParseArgs(argc, argv, config);
 
-    console::printHeader("API Server 配置");
+    // 启用美化日志输出（一行代码即可）
+    log_handler::EnablePrettyLogging();
+
+    // 显示系统信息
+    console::printHeader("系统信息");
+    auto cpuFlags = fastllm::cpuInstructInfo.getFlags();
+    std::string enabledFlags;
+    if (cpuFlags.avx2) enabledFlags += "AVX2 ";
+    if (cpuFlags.avx512f) enabledFlags += "AVX512F ";
+    if (cpuFlags.avx512vnni) enabledFlags += "AVX512_VNNI ";
+    if (cpuFlags.avx512bf16) enabledFlags += "AVX512_BF16 ";
+    if (cpuFlags.amx) enabledFlags += "AMX ";
+    if (enabledFlags.empty()) enabledFlags = "无";
+    console::printConfig("CPU 指令集", enabledFlags);
+    if (config.threads > 0) {
+        console::printConfig("线程数", std::to_string(config.threads));
+    }
+    console::printConfig("低内存模式", config.lowMemMode ? "是" : "否");
     
+    // 硬件配置（设备映射）
     if (config.devices.size() != 0) {
         fastllm::SetDeviceMap(config.devices);
-        // 输出设备映射配置
         std::string deviceMapStr;
         for (auto &it : config.devices) {
             if (!deviceMapStr.empty()) deviceMapStr += ", ";
@@ -2428,7 +2378,6 @@ int main(int argc, char** argv) {
     }
     if (config.moeDevices.size() != 0) {
         fastllm::SetMoeDeviceMap(config.moeDevices);
-        // 输出 MoE 设备映射配置
         std::string moeDeviceMapStr;
         for (auto &it : config.moeDevices) {
             if (!moeDeviceMapStr.empty()) moeDeviceMapStr += ", ";
@@ -2436,6 +2385,51 @@ int main(int argc, char** argv) {
         }
         console::printConfig("MoE 设备映射", moeDeviceMapStr);
     }
+    if (config.cudaEmbedding) {
+        console::printConfig("CUDA Embedding", "是");
+    }
+
+    console::printHeader("API Server 配置");
+    
+    // 【模型配置】
+    console::printInfo("【模型配置】");
+    console::printConfig("模型路径", config.path);
+    if (config.dtype != fastllm::DataType::FLOAT32) {
+        std::string dtypeStr;
+        switch (config.dtype) {
+            case fastllm::DataType::FLOAT16: dtypeStr = "float16"; break;
+            case fastllm::DataType::INT8: dtypeStr = "int8"; break;
+            case fastllm::DataType::INT4: dtypeStr = "int4"; break;
+            case fastllm::DataType::INT4_NOZERO: dtypeStr = "int4g"; break;
+            default: dtypeStr = "auto";
+        }
+        console::printConfig("数据类型", dtypeStr);
+    }
+    if (config.atype != fastllm::DataType::FLOAT32) {
+        std::string atypeStr = config.atype == fastllm::DataType::FLOAT16 ? "float16" : "float32";
+        console::printConfig("激活类型", atypeStr);
+    }
+    if (config.tokens > 0) {
+        console::printConfig("上下文限制", std::to_string(config.tokens) + " tokens");
+    }
+    if (config.chunkedPrefillSize > 0) {
+        console::printConfig("分块 Prefill", std::to_string(config.chunkedPrefillSize));
+    }
+    
+    // 【服务配置】
+    console::printInfo("【服务配置】");
+    console::printConfig("监听地址", config.host);
+    console::printConfig("端口", std::to_string(config.port));
+    if (config.batch > 1) {
+        console::printConfig("最大批次", std::to_string(config.batch));
+    }
+    if (!config.apiKey.empty()) {
+        console::printConfig("API Key", "******");
+    }
+    if (config.devMode) {
+        console::printConfig("开发模式", "已启用");
+    }
+    
     fastllm::SetThreads(config.threads);
     fastllm::SetLowMemMode(config.lowMemMode);
     fastllm::SetCudaEmbedding(config.cudaEmbedding);

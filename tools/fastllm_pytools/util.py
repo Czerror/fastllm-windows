@@ -15,46 +15,70 @@ def format_device_map(device_map):
         return ", ".join(f"{dev}:{cnt}" for dev, cnt in device_map.items())
     return str(device_map)
 
-def make_normal_parser(des: str, add_help = True) -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description = des, add_help = add_help)
-    parser.add_argument('model', nargs='?', help = '模型路径，fastllm模型文件或HF模型文件夹或配置文件')
-    parser.add_argument('-p', '--path', type = str, required = False, default = '', help = '模型路径，fastllm模型文件或HF模型文件夹')
-    parser.add_argument('-t', '--threads', type = int, default = -1,  help = '线程数量')
-    parser.add_argument('-l', '--low', action = 'store_true', help = '是否使用低内存模式')
-    parser.add_argument('--dtype', type = str, default = "auto", help = '权重类型（读取HF模型时有效）')
-    parser.add_argument('--moe_dtype', type = str, default = "", help = 'MOE层使用的权重类型（读取HF模型时有效）')
-    parser.add_argument('--atype', type = str, default = "auto", help = '推理类型，可使用float32或float16')
-    parser.add_argument('--cuda_embedding', action = 'store_true', help = '在cuda上进行embedding')
-    parser.add_argument('--kv_cache_limit', type = str, default = "auto",  help = 'kv缓存最大使用量')
-    parser.add_argument('--max_batch', '--batch', type = int, default = -1,  help = '每次最多同时推理的询问数量')
-    parser.add_argument('--device', type = str, help = '使用的设备')
-    parser.add_argument('--moe_device', type = str, default = "", help = 'moe使用的设备')
-    parser.add_argument('--moe_experts', type = int, default = -1, help = 'moe使用的专家数')
-    parser.add_argument("--cache_history", type = str, default = "", help = "缓存历史对话")
-    parser.add_argument("--cache_fast", type = str, default = "", help = "是否启用快速缓存（会消耗一定显存）")
-    parser.add_argument("--enable_thinking", type = str, default = "", help = "是否开启硬思考开关（需要模型支持）")
-    parser.add_argument("--cuda_shared_expert", "--cuda_se", type = str, default = "true", help = "是否使用cuda来执行共享专家")
-    parser.add_argument("--enable_amx", "--amx", type = str, default = "false", help = "是否开启amx加速")
-    
-    parser.add_argument('--custom', type = str, default = "", help = '指定描述自定义模型的python文件')
-    parser.add_argument('--lora', type = str, default = "", help = '指定lora路径')
-    parser.add_argument('--cache_dir', type = str, default = "", help = '指定缓存模型文件的路径')
-    parser.add_argument('--dtype_config', type = str, default = "", help = '指定权重类型配置文件')
-    parser.add_argument('--ori', type = str, default = "", help = '原始模型权重，读取GGUF文件时可以使用')
 
-    parser.add_argument('--tool_call_parser', type = str, default = "auto", help = '使用的tool_call_parser类型')
-    parser.add_argument('--chat_template', type = str, default = "", help = '使用的chat_template文件')
+# ============================================================================
+# 从 help_text 导入统一定义
+# ============================================================================
+from . import help_text as _ht
+
+def make_normal_parser(des: str, add_help = True) -> argparse.ArgumentParser:
+    """
+    创建标准参数解析器，使用统一的帮助定义
+    注意: 部分参数保留原有定义以确保兼容性
+    """
+    parser = argparse.ArgumentParser(description = des, add_help = add_help)
+    
+    # 位置参数 (保留原有定义)
+    parser.add_argument('model', nargs='?', help = '模型路径，fastllm模型文件或HF模型文件夹或配置文件')
+    
+    # 基础参数 - 保留原有定义确保兼容性，但描述使用统一文本
+    parser.add_argument('-p', '--path', type = str, required = False, default = '', help = '模型路径')
+    parser.add_argument('-t', '--threads', type = int, default = -1,  help = 'CPU 线程数')
+    parser.add_argument('-l', '--low', action = 'store_true', help = '低内存模式')
+    parser.add_argument('--dtype', type = str, default = "auto", help = '权重类型 (float16, int8, int4, int4g)')
+    parser.add_argument('--atype', type = str, default = "auto", help = '推理类型 (float32, float16)')
+    parser.add_argument('--device', type = str, help = '使用的设备 (cuda, cpu, numa)')
+    
+    # MOE 参数
+    parser.add_argument('--moe_dtype', type = str, default = "", help = 'MOE专家层数据类型')
+    parser.add_argument('--moe_device', type = str, default = "", help = 'MOE专家层设备 (cuda, cpu)')
+    parser.add_argument('--moe_experts', type = int, default = -1, help = '启用的MOE专家数量')
+    
+    # CUDA / 加速参数
+    parser.add_argument('--cuda_embedding', action = 'store_true', help = '在CUDA上运行Embedding层')
+    parser.add_argument("--cuda_shared_expert", "--cuda_se", type = str, default = "true", help = "CUDA共享专家优化(MOE)")
+    parser.add_argument("--enable_amx", "--amx", type = str, default = "false", help = "启用Intel AMX加速")
+    
+    # 缓存参数
+    parser.add_argument('--kv_cache_limit', type = str, default = "auto",  help = 'KV缓存限制(如8G, 4096M)')
+    parser.add_argument('--max_batch', '--batch', type = int, default = -1,  help = '最大批处理数量')
+    parser.add_argument("--cache_history", type = str, default = "", help = "启用历史缓存")
+    parser.add_argument("--cache_fast", type = str, default = "", help = "启用快速缓存模式")
+    parser.add_argument('--cache_dir', type = str, default = "", help = '缓存目录路径')
+    
+    # LoRA / 自定义参数
+    parser.add_argument('--custom', type = str, default = "", help = '自定义模型配置')
+    parser.add_argument('--lora', type = str, default = "", help = 'LoRA适配器路径')
+    parser.add_argument('--dtype_config', type = str, default = "", help = '数据类型配置文件')
+    parser.add_argument('--ori', type = str, default = "", help = '使用原始权重(禁用量化)')
+    
+    # 模板 / 工具调用
+    parser.add_argument('--tool_call_parser', type = str, default = "auto", help = '工具调用解析器类型')
+    parser.add_argument('--chat_template', type = str, default = "", help = '对话模板(覆盖自动检测)')
+    parser.add_argument("--enable_thinking", type = str, default = "", help = "启用思考模式(<think>标签)")
 
     return parser
 
+
 def add_server_args(parser):
-    parser.add_argument("--model_name", type = str, default = '', help = "部署的模型名称, 调用api时会进行名称核验")
-    parser.add_argument("--host", type = str, default="127.0.0.1", help = "API 服务器监听地址 (默认: 127.0.0.1)")
-    parser.add_argument("--port", type = int, default = 8080, help = "API 服务器端口号 (默认: 8080)")
-    parser.add_argument("--api_key", type = str, default = "", help = "API Key 认证 (为空则不校验)")
-    parser.add_argument("--think", type = str, default = "false", help = "是否输出 <think> 标签 (true/false)")
-    parser.add_argument("--hide_input", action = 'store_true', help = "不显示请求信息")
-    parser.add_argument("--dev_mode", action = 'store_true', help = "开发模式, 启用后能够获取对话列表并主动停止")
+    """添加服务器相关参数 - 与C++端保持一致"""
+    parser.add_argument("--model_name", type = str, default = '', help = "模型显示名称(用于API返回)")
+    parser.add_argument("--host", type = str, default="127.0.0.1", help = "监听地址(默认: 127.0.0.1)")
+    parser.add_argument("--port", type = int, default = 8080, help = "监听端口(默认: 8080)")
+    parser.add_argument("--api_key", type = str, default = "", help = "API密钥认证(Bearer Token)")
+    parser.add_argument("--think", type = str, default = "false", help = "Python后端思考模式")
+    parser.add_argument("--show_input", action = 'store_true', help = "显示输入消息(调试用)")
+    parser.add_argument("--dev_mode", action = 'store_true', help = "开发模式(启用调试接口)")
 
 def make_normal_llm_model(args):
     if (args.model and args.model != ''):
@@ -264,23 +288,27 @@ def make_download_parser(add_help = True):
     return parser
 
 def get_fastllm_cache_path(model_name: str, cache_path = ""):
-    system = sys.platform
-
+    """获取模型缓存路径
+    
+    优先级:
+    1. 用户指定的 cache_path 参数
+    2. 环境变量 FASTLLM_CACHEDIR
+    3. 默认: ftllm 程序目录下的 model 文件夹
+    """
     if cache_path == "":
-        if system == "win32":
-            # Windows: %LOCALAPPDATA%\Temp 或 C:\Users\<user>\AppData\Local\Temp
-            cache_path = os.getenv('LOCALAPPDATA', os.path.expanduser('~\\AppData\\Local')) + '\\Temp'
-        elif system == "darwin":
-            # macOS: ~/Library/Caches
-            cache_path = os.path.expanduser('~/Library/Caches')
-        else:
-            # Linux 和其他 Unix-like 系统: ~/.cache 或 $XDG_CACHE_HOME
-            cache_path = os.getenv('XDG_CACHE_HOME', os.path.expanduser('~/.cache'))
-        cache_path = os.path.join(cache_path, "fastllm")
-
+        # 优先使用环境变量
         cache_dir = os.getenv("FASTLLM_CACHEDIR")
-        if (cache_dir and os.path.isdir(cache_dir)):
+        if cache_dir and os.path.isdir(cache_dir):
             cache_path = cache_dir
+        else:
+            # 默认: ftllm 程序所在目录下的 model 文件夹
+            # __file__ 是当前模块路径，向上一级即为 ftllm 目录
+            ftllm_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            cache_path = os.path.join(ftllm_dir, "models")
+            
+            # 确保目录存在
+            if not os.path.exists(cache_path):
+                os.makedirs(cache_path, exist_ok=True)
 
     cache_path = os.path.join(cache_path, model_name)
     return cache_path

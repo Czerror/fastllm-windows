@@ -13,6 +13,7 @@ from openai.types.chat import (ChatCompletionContentPartParam,
                                ChatCompletionRole)
 
 from .protocal.openai_protocol import *
+from .. import console
 
 
 class ConversationMessage:
@@ -77,12 +78,12 @@ class ChatCompletionStreamResponseWithUsage(BaseModel):
 
 
 class FastLLmCompletion:
-    def __init__(self, model_name, model, think, hide_input):
+    def __init__(self, model_name, model, think, show_input):
         self.model_name = model_name
         self.model = model
         self.init_fast_llm_model()
         self.think = think
-        self.hide_input = hide_input
+        self.show_input = show_input
         # Store mapping between conversation IDs and handles
         self.conversation_handles = {}
         self.tool_parser = None
@@ -483,7 +484,7 @@ class FastLLmCompletion:
         min_length = request.min_tokens if request.min_tokens else 0
         # logging.info(request)
 
-        if not self.hide_input:
+        if self.show_input:
             logging.info(f"fastllm input message: {messages}")
             # logging.info(f"input tokens: {input_token_len}")
 
@@ -587,6 +588,14 @@ class FastLLmCompletion:
             ),
             system_fingerprint=self.system_fingerprint
         )
+
+        # 打印推理统计信息
+        stats = self.model.get_handle_stats(handle)
+        if stats:
+            console.print_inference_stats(
+                stats.prompt_tokens, stats.output_tokens,
+                stats.total_time, stats.first_token_time, stats.speed
+            )
 
         # After completion, remove the conversation from tracking dictionary
         if request_id in self.conversation_handles:
@@ -775,10 +784,18 @@ class FastLLmCompletion:
                 pass
             raise
         finally:
+            # 打印推理统计信息
+            stats = self.model.get_handle_stats(handle)
+            if stats:
+                console.print_inference_stats(
+                    stats.prompt_tokens, stats.output_tokens,
+                    stats.total_time, stats.first_token_time, stats.speed
+                )
+            
             # 正常结束时不要调用 abort，否则会破坏历史 KV cache 写入，导致每轮 Long Prefill。
             if request_id in self.conversation_handles:
                 del self.conversation_handles[request_id]
-                logging.info(f"Removed completed stream conversation from tracking: {request_id}")
+                logging.debug(f"已移除已完成的流式对话: {request_id}")
 
         yield "data: [DONE]\n\n"
         await asyncio.sleep(0)
@@ -930,6 +947,14 @@ class FastLLmCompletion:
             )
         )
         
+        # 打印推理统计信息
+        stats = self.model.get_handle_stats(handle)
+        if stats:
+            console.print_inference_stats(
+                stats.prompt_tokens, stats.output_tokens,
+                stats.total_time, stats.first_token_time, stats.speed
+            )
+        
         if request_id in self.conversation_handles:
             del self.conversation_handles[request_id]
         
@@ -1009,6 +1034,14 @@ class FastLLmCompletion:
             yield f"data: {chunk.model_dump_json(exclude_unset=True)}\n\n"
             
         finally:
+            # 打印推理统计信息
+            stats = self.model.get_handle_stats(handle)
+            if stats:
+                console.print_inference_stats(
+                    stats.prompt_tokens, stats.output_tokens,
+                    stats.total_time, stats.first_token_time, stats.speed
+                )
+            
             if request_id in self.conversation_handles:
                 del self.conversation_handles[request_id]
         

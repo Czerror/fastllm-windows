@@ -999,7 +999,7 @@ namespace fastllm {
     }
 
     void PanguMOEModel::WarmUp() {
-        printf("Warmup...\n");
+        EmitWarmUpLog();
         int old = this->moe_num_groups;
         this->moe_num_groups = 1;
 

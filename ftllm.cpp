@@ -25,256 +25,50 @@
 #include <shellapi.h>
 #include <io.h>
 
-static constexpr const char* FTLLM_VERSION = "1.0";
+// 使用统一的控制台模块和帮助文本
+#include "utils/console.h"
+#include "utils/help_text.h"
+namespace ui = fastllm::console;
+namespace help = fastllm::help;
+
 static constexpr int DEFAULT_SERVE_PORT = 8080;
 static constexpr const char* REPL_PROMPT = "ftllm> ";
 
-// ===== UI 边框和分隔线 =====
-static constexpr const char* UI_LINE = "════════════════════════════════════════════════════════════";
-static constexpr const char* UI_THIN_LINE = "────────────────────────────────────────────────────────────";
-static constexpr const char* UI_STATUS_OK = "[√]";
-static constexpr const char* UI_STATUS_WARN = "[!]";
-static constexpr const char* UI_STATUS_ERR = "[×]";
+// 版本号引用统一定义
+#define FTLLM_VERSION help::PROGRAM_VERSION
 
-static bool g_hasAnsi = false;
+// 引用 console 模块的常量
+static constexpr const char* UI_LINE = fastllm::console::LINE_DOUBLE;
+static constexpr const char* UI_THIN_LINE = fastllm::console::LINE_SINGLE;
+static constexpr const char* UI_STATUS_OK = fastllm::console::STATUS_OK;
+static constexpr const char* UI_STATUS_WARN = fastllm::console::STATUS_WARN;
+static constexpr const char* UI_STATUS_ERR = fastllm::console::STATUS_ERR;
 
-namespace ui {
-// ===== ANSI 样式代码 =====
-static constexpr const char* RESET = "\x1b[0m";
-static constexpr const char* BOLD = "\x1b[1m";
-static constexpr const char* DIM = "\x1b[2m";
-static constexpr const char* UNDERLINE = "\x1b[4m";
-static constexpr const char* BLINK = "\x1b[5m";
-static constexpr const char* REVERSE = "\x1b[7m";
+// g_hasAnsi 作为对统一模块的引用
+#define g_hasAnsi fastllm::console::getAnsiEnabled()
 
-// ===== 前景色 =====
-static constexpr const char* BLACK = "\x1b[30m";
-static constexpr const char* RED = "\x1b[31m";
-static constexpr const char* GREEN = "\x1b[32m";
-static constexpr const char* YELLOW = "\x1b[33m";
-static constexpr const char* BLUE = "\x1b[34m";
-static constexpr const char* MAGENTA = "\x1b[35m";
-static constexpr const char* CYAN = "\x1b[36m";
-static constexpr const char* WHITE = "\x1b[37m";
+// 直接使用 console 模块的函数（创建本地别名）
+using ui::printSuccess;
+using ui::printError;
+using ui::printInfo;
+using ui::printWarning;
+using ui::printArrow;
+using ui::printBullet;
+using ui::printRule;
+using ui::printKV;
+using ui::printConfig;
+using ui::printHeader;
+using ui::printStatus;
+using ui::printStatusOk;
+using ui::printStatusWarn;
+using ui::printStatusErr;
+using ui::printStyled;
+using ui::StatusType;
 
-// ===== 亮色前景 =====
-static constexpr const char* BRIGHT_BLACK = "\x1b[90m";   // 灰色
-static constexpr const char* BRIGHT_RED = "\x1b[91m";
-static constexpr const char* BRIGHT_GREEN = "\x1b[92m";
-static constexpr const char* BRIGHT_YELLOW = "\x1b[93m";
-static constexpr const char* BRIGHT_BLUE = "\x1b[94m";
-static constexpr const char* BRIGHT_MAGENTA = "\x1b[95m";
-static constexpr const char* BRIGHT_CYAN = "\x1b[96m";
-static constexpr const char* BRIGHT_WHITE = "\x1b[97m";
-
-// ===== 背景色 =====
-static constexpr const char* BG_BLACK = "\x1b[40m";
-static constexpr const char* BG_RED = "\x1b[41m";
-static constexpr const char* BG_GREEN = "\x1b[42m";
-static constexpr const char* BG_YELLOW = "\x1b[43m";
-static constexpr const char* BG_BLUE = "\x1b[44m";
-static constexpr const char* BG_MAGENTA = "\x1b[45m";
-static constexpr const char* BG_CYAN = "\x1b[46m";
-static constexpr const char* BG_WHITE = "\x1b[47m";
-
-// ===== 状态图标 (Unicode) =====
-static constexpr const char* ICON_CHECK = "\xe2\x9c\x93";      // ✓
-static constexpr const char* ICON_CROSS = "\xe2\x9c\x97";      // ✗
-static constexpr const char* ICON_ARROW = "\xe2\x86\x92";      // →
-static constexpr const char* ICON_BULLET = "\xe2\x97\x8f";     // ●
-static constexpr const char* ICON_CIRCLE = "\xe2\x97\x8b";     // ○
-static constexpr const char* ICON_PLAY = "\xe2\x96\xb6";       // ▶
-static constexpr const char* ICON_STOP = "\xe2\x96\xa0";       // ■
-static constexpr const char* ICON_STAR = "\xe2\x98\x85";       // ★
-static constexpr const char* ICON_INFO = "\xe2\x84\xb9";       // ℹ
-static constexpr const char* ICON_WARN = "\xe2\x9a\xa0";       // ⚠
-static constexpr const char* ICON_GEAR = "\xe2\x9a\x99";       // ⚙
-
-// ===== Box Drawing 边框字符 =====
-static constexpr const char* BOX_H = "\xe2\x94\x80";           // ─
-static constexpr const char* BOX_V = "\xe2\x94\x82";           // │
-static constexpr const char* BOX_TL = "\xe2\x94\x8c";          // ┌
-static constexpr const char* BOX_TR = "\xe2\x94\x90";          // ┐
-static constexpr const char* BOX_BL = "\xe2\x94\x94";          // └
-static constexpr const char* BOX_BR = "\xe2\x94\x98";          // ┘
-static constexpr const char* BOX_T = "\xe2\x94\xac";           // ┬
-static constexpr const char* BOX_B = "\xe2\x94\xb4";           // ┴
-static constexpr const char* BOX_L = "\xe2\x94\x9c";           // ├
-static constexpr const char* BOX_R = "\xe2\x94\xa4";           // ┤
-static constexpr const char* BOX_X = "\xe2\x94\xbc";           // ┼
-
-// 双线边框
-static constexpr const char* BOX2_H = "\xe2\x95\x90";          // ═
-static constexpr const char* BOX2_V = "\xe2\x95\x91";          // ║
-static constexpr const char* BOX2_TL = "\xe2\x95\x94";         // ╔
-static constexpr const char* BOX2_TR = "\xe2\x95\x97";         // ╗
-static constexpr const char* BOX2_BL = "\xe2\x95\x9a";         // ╚
-static constexpr const char* BOX2_BR = "\xe2\x95\x9d";         // ╝
-
-// ===== 光标控制 =====
-static constexpr const char* CURSOR_HIDE = "\x1b[?25l";
-static constexpr const char* CURSOR_SHOW = "\x1b[?25h";
-static constexpr const char* CLEAR_LINE = "\x1b[2K\r";
-static constexpr const char* CLEAR_SCREEN = "\x1b[2J\x1b[H";
-static constexpr const char* CURSOR_UP = "\x1b[A";
-static constexpr const char* CURSOR_DOWN = "\x1b[B";
-static constexpr const char* CURSOR_SAVE = "\x1b[s";
-static constexpr const char* CURSOR_RESTORE = "\x1b[u";
-
-// 便捷格式化输出：自动处理 ANSI 开关
-inline std::ostream& ansi(std::ostream& os, const char* code) {
-    if (g_hasAnsi && code) os << code;
-    return os;
-}
-inline std::ostream& reset(std::ostream& os) {
-    if (g_hasAnsi) os << ui::RESET;
-    return os;
-}
-}
-
-static void printStyled(const char* color, const std::string& text, bool newline = true) {
-    ui::ansi(std::cout, color) << text;
-    ui::reset(std::cout);
-    if (newline) std::cout << std::endl;
-}
-
-static void printRule(const char* title = nullptr) {
-    std::cout << UI_LINE << std::endl;
-    if (title && *title) {
-        ui::ansi(std::cout, ui::BOLD);
-        ui::ansi(std::cout, ui::CYAN) << title;
-        ui::reset(std::cout) << std::endl;
-        std::cout << UI_THIN_LINE << std::endl;
-    }
-}
-
-enum class StatusType { Ok, Warn, Err };
-
-static void printStatus(StatusType type, const std::string& label, const std::string& detail = {}) {
-    const char* icon = nullptr;
-    const char* color = nullptr;
-    switch (type) {
-        case StatusType::Ok:   icon = UI_STATUS_OK;   color = ui::GREEN;  break;
-        case StatusType::Warn: icon = UI_STATUS_WARN; color = ui::YELLOW; break;
-        case StatusType::Err:  icon = UI_STATUS_ERR;  color = ui::RED;    break;
-    }
-    if (g_hasAnsi) std::cout << color << icon << ui::RESET;
-    else std::cout << icon;
-    std::cout << " " << label;
-    if (!detail.empty()) std::cout << ": " << detail;
-    std::cout << std::endl;
-}
-
-static inline void printStatusOk(const std::string& label, const std::string& detail = {}) {
-    printStatus(StatusType::Ok, label, detail);
-}
-static inline void printStatusWarn(const std::string& label, const std::string& detail = {}) {
-    printStatus(StatusType::Warn, label, detail);
-}
-static inline void printStatusErr(const std::string& label, const std::string& detail = {}) {
-    printStatus(StatusType::Err, label, detail);
-}
-
-static void printKV(const std::string& key, const std::string& value) {
-    std::cout << "    ";
-    ui::ansi(std::cout, ui::DIM) << key;
-    ui::reset(std::cout) << ": " << value << std::endl;
-}
-
-// ===== 进度显示 (简易 Spinner 动画帧) =====
-static constexpr const char* SPINNER_FRAMES[] = {
-    "\xe2\xa0\x8b", // ⠋
-    "\xe2\xa0\x99", // ⠙
-    "\xe2\xa0\xb9", // ⠹
-    "\xe2\xa0\xb8", // ⠸
-    "\xe2\xa0\xbc", // ⠼
-    "\xe2\xa0\xb4", // ⠴
-    "\xe2\xa0\xa6", // ⠦
-    "\xe2\xa0\xa7", // ⠧
-    "\xe2\xa0\x87", // ⠇
-    "\xe2\xa0\x8f"  // ⠏
-};
-static constexpr int SPINNER_FRAME_COUNT = 10;
-
-// 打印带图标的状态消息
-static void printStatusIcon(const char* icon, const char* color, const std::string& msg) {
-    ui::ansi(std::cout, color) << icon << " ";
-    ui::reset(std::cout) << msg << std::endl;
-}
-
-// 简便函数：各种状态图标消息
-static inline void printSuccess(const std::string& msg) {
-    printStatusIcon(ui::ICON_CHECK, ui::GREEN, msg);
-}
-static inline void printError(const std::string& msg) {
-    printStatusIcon(ui::ICON_CROSS, ui::RED, msg);
-}
-static inline void printInfo(const std::string& msg) {
-    printStatusIcon(ui::ICON_INFO, ui::CYAN, msg);
-}
-static inline void printWarning(const std::string& msg) {
-    printStatusIcon(ui::ICON_WARN, ui::YELLOW, msg);
-}
-static inline void printArrow(const std::string& msg) {
-    printStatusIcon(ui::ICON_ARROW, ui::BRIGHT_BLUE, msg);
-}
-static inline void printBullet(const std::string& msg) {
-    printStatusIcon(ui::ICON_BULLET, ui::DIM, msg);
-}
+// 保留 ftllm 特有的扩展函数（使用 console 模块基础设施）
 
 // 计算字符串的显示宽度（正确处理中文和 ANSI 转义序列）
-static int getDisplayWidth(const std::string& text) {
-    int width = 0;
-    bool inEscape = false;
-    const unsigned char* p = reinterpret_cast<const unsigned char*>(text.c_str());
-    while (*p) {
-        if (inEscape) {
-            // ANSI 转义序列以 'm' 结束
-            if (*p == 'm') inEscape = false;
-            ++p;
-        } else if (*p == '\x1b') {
-            // ANSI 转义序列开始
-            inEscape = true;
-            ++p;
-        } else if (*p >= 0x80) {
-            // UTF-8 多字节字符
-            if ((*p & 0xE0) == 0xC0) {
-                // 2字节 UTF-8 (大部分拉丁扩展，宽度1)
-                width += 1;
-                p += 2;
-            } else if ((*p & 0xF0) == 0xE0) {
-                // 3字节 UTF-8
-                // 检查是否是 CJK 字符 (中日韩字符，宽度2)
-                // CJK 范围: U+4E00-U+9FFF, U+3400-U+4DBF, U+F900-U+FAFF 等
-                unsigned int codepoint = ((p[0] & 0x0F) << 12) | ((p[1] & 0x3F) << 6) | (p[2] & 0x3F);
-                if ((codepoint >= 0x4E00 && codepoint <= 0x9FFF) ||   // CJK Unified Ideographs
-                    (codepoint >= 0x3400 && codepoint <= 0x4DBF) ||   // CJK Extension A
-                    (codepoint >= 0xF900 && codepoint <= 0xFAFF) ||   // CJK Compatibility Ideographs
-                    (codepoint >= 0x3000 && codepoint <= 0x303F) ||   // CJK Symbols and Punctuation
-                    (codepoint >= 0xFF00 && codepoint <= 0xFFEF) ||   // Halfwidth and Fullwidth Forms
-                    (codepoint >= 0xAC00 && codepoint <= 0xD7AF)) {   // Hangul Syllables
-                    width += 2;
-                } else {
-                    // 其他 3 字节字符（如 ⚙ ▶ ✓ ℹ 等符号）宽度通常为 1
-                    width += 1;
-                }
-                p += 3;
-            } else if ((*p & 0xF8) == 0xF0) {
-                // 4字节 UTF-8 (emoji 等，宽度2)
-                width += 2;
-                p += 4;
-            } else {
-                // 无效 UTF-8，跳过
-                ++p;
-            }
-        } else {
-            // ASCII 字符
-            width += 1;
-            ++p;
-        }
-    }
-    return width;
-}
+// 直接使用 ui::getDisplayWidth
 
 // 绘制带边框的框（Box Drawing）
 static void printBoxTop(int width = 60) {
@@ -289,7 +83,7 @@ static void printBoxBottom(int width = 60) {
 }
 static void printBoxLine(const std::string& text, int width = 60) {
     std::cout << ui::BOX_V << " " << text;
-    int displayWidth = getDisplayWidth(text);
+    int displayWidth = ui::getDisplayWidth(text);
     int pad = width - 4 - displayWidth;
     for (int i = 0; i < pad; ++i) std::cout << " ";
     std::cout << " " << ui::BOX_V << std::endl;
@@ -314,27 +108,10 @@ static void printBox2Bottom(int width = 60) {
 
 static void printBox2Line(const std::string& text, int width = 60) {
     std::cout << ui::BOX2_V << " " << text;
-    int displayWidth = getDisplayWidth(text);
+    int displayWidth = ui::getDisplayWidth(text);
     int pad = width - 4 - displayWidth;
     for (int i = 0; i < pad; ++i) std::cout << " ";
     std::cout << " " << ui::BOX2_V << std::endl;
-}
-
-// 进度条
-static void printProgressBar(double progress, int width = 40, const char* label = nullptr) {
-    if (label) {
-        ui::ansi(std::cout, ui::DIM) << label << " ";
-        ui::reset(std::cout);
-    }
-    int filled = static_cast<int>(progress * width);
-    std::cout << "[";
-    ui::ansi(std::cout, ui::GREEN);
-    for (int i = 0; i < filled; ++i) std::cout << "█";
-    ui::reset(std::cout);
-    ui::ansi(std::cout, ui::DIM);
-    for (int i = filled; i < width; ++i) std::cout << "░";
-    ui::reset(std::cout);
-    std::cout << "] " << static_cast<int>(progress * 100) << "%" << std::endl;
 }
 
 // 单行进度更新 (覆盖当前行)
@@ -837,24 +614,15 @@ static int runChildProcessWindows(const std::string& program, const std::vector<
 
 /**
  * 初始化 Windows 控制台以支持 UTF-8 输出
+ * 使用统一的 console 模块初始化，并设置环境变量供子进程使用
  */
 void initWindowsConsole() {
-    // 设置控制台输出代码页为 UTF-8
-    SetConsoleOutputCP(CP_UTF8);
-    SetConsoleCP(CP_UTF8);
+    // 使用统一模块初始化
+    fastllm::console::init();
     
-    // 启用 ANSI 转义序列（用于彩色输出）
-    HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE);
-    if (hOut != INVALID_HANDLE_VALUE) {
-        DWORD mode = 0;
-        if (GetConsoleMode(hOut, &mode)) {
-            const DWORD desired = mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING;
-            if (SetConsoleMode(hOut, desired)) {
-                g_hasAnsi = true;
-                // 设置环境变量，供子进程检测 ANSI 支持
-                _putenv_s("FTLLM_ANSI", "1");
-            }
-        }
+    // 设置环境变量，供子进程检测 ANSI 支持
+    if (g_hasAnsi) {
+        _putenv_s("FTLLM_ANSI", "1");
     }
 }
 
@@ -891,145 +659,35 @@ int executeNativeProgram(const std::string& exeName, int argc, char** argv, int 
 int executePythonBackend(int argc, char** argv, int startArg);
 
 // ============================================================================
-// 统一命令定义表（驱动命令检测、帮助输出、执行分发）
+// 使用统一帮助定义 (来自 help_text.h)
 // ============================================================================
-
+// 本地 Backend 枚举用于兼容现有代码
 enum class Backend { Native, Python };
 
-struct CommandDef {
-    const char* name;           // 主命令名
-    const char* aliases[3];     // 别名列表
-    const char* nativeExe;      // C++ 原生程序名 (nullptr 表示无原生版)
-    const char* description;    // 描述
-    Backend defaultBackend;     // 默认后端
-};
+// 使用统一命令定义类型
+using CommandDef = help::CommandDef;
 
-static const CommandDef ALL_COMMANDS[] = {
-    // C++ 原生程序
-    {"serve",    {"server", "api", nullptr},      "apiserver.exe",  "OpenAI API 服务器",   Backend::Native},
-    {"webui",    {"web", nullptr, nullptr},       "webui.exe",      "Web 聊天界面",        Backend::Native},
-    {"bench",    {"benchmark", nullptr, nullptr}, "benchmark.exe",  "性能测试",            Backend::Native},
-    {"quant",    {"quantize", nullptr, nullptr},  "quant.exe",      "模型量化",            Backend::Native},
-    // Python 专用
-    {"run",      {"chat", nullptr, nullptr},      nullptr,          "交互式聊天",          Backend::Python},
-    {"download", {nullptr, nullptr, nullptr},     nullptr,          "下载 HuggingFace 模型", Backend::Python},
-    {"ui",       {nullptr, nullptr, nullptr},     nullptr,          "启动图形界面",        Backend::Python},
-    {"config",   {nullptr, nullptr, nullptr},     nullptr,          "生成配置文件模板",    Backend::Python},
-    {"export",   {nullptr, nullptr, nullptr},     nullptr,          "导出模型",            Backend::Python},
-};
-static constexpr size_t NUM_COMMANDS = sizeof(ALL_COMMANDS) / sizeof(ALL_COMMANDS[0]);
+// 从统一定义创建本地引用（保持向后兼容）
+static const auto& ALL_COMMANDS = help::COMMANDS;
+static constexpr size_t NUM_COMMANDS = help::NUM_COMMANDS;
 
-// ============================================================================
-// 统一帮助系统 - 参数/示例定义
-// ============================================================================
-
-// 参数定义
-struct ParamDef {
-    const char* param;      // 参数名 (如 "-p, --path <路径>")
-    const char* desc;       // 描述
-};
-
-// 参数组定义
-struct ParamGroup {
-    const char* title;                      // 组标题
-    std::initializer_list<ParamDef> params; // 参数列表
-};
-
-// 示例定义
-struct ExampleDef {
-    const char* cmd;        // 命令
-    const char* model;      // 模型
-    const char* args;       // 参数 (可为 nullptr)
-};
-
-// ===== 所有参数组定义 =====
-static const ParamGroup PARAM_GROUPS[] = {
-    {"基础参数", {
-        {"-p, --path <路径>", "模型路径"},
-        {"--device <设备>", "cuda, cpu, numa"},
-        {"--dtype <类型>", "float16, int8, int4, int4g"},
-        {"-t, --threads <数量>", "CPU 线程数"},
-        {"--model_name <名称>", "模型显示名称 (用于 API 返回)"},
-    }},
-    {"服务器参数 (serve/webui)", {
-        {"--host <地址>", "监听地址 (默认: 127.0.0.1)"},
-        {"--port <端口>", "监听端口 (默认: 8080)"},
-        {"--api_key <密钥>", "API 密钥认证 (Bearer Token)"},
-        {"--embedding_path <路径>", "Embedding 模型路径 (/v1/embeddings)"},
-        {"--dev_mode", "开发模式 (启用调试接口)"},
-    }},
-    {"Batch / 并发参数", {
-        {"--batch <数量>", "批处理大小"},
-        {"--max_batch <数量>", "最大批处理数量"},
-        {"--max_token <数量>", "最大生成 Token 数 (webui)"},
-        {"--chunk_size <数量>", "Chunked Prefill 分块大小 (默认: 自动)"},
-    }},
-    {"CUDA / 加速参数", {
-        {"--cuda_embedding", "在 CUDA 上运行 Embedding 层"},
-        {"--cuda_shared_expert", "CUDA 共享专家优化 (MOE)"},
-        {"--cuda_se", "--cuda_shared_expert 简写"},
-        {"--enable_amx, --amx", "启用 Intel AMX 加速"},
-    }},
-    {"MOE (混合专家) 参数", {
-        {"--moe_device <设备>", "MOE 专家层设备 (cuda, cpu)"},
-        {"--moe_dtype <类型>", "MOE 专家层数据类型"},
-        {"--moe_experts <数量>", "启用的 MOE 专家数量"},
-    }},
-    {"缓存参数", {
-        {"--kv_cache_limit <大小>", "KV 缓存限制 (如 8G, 4096M)"},
-        {"--cache_history", "启用历史缓存"},
-        {"--cache_fast", "启用快速缓存模式"},
-        {"--cache_dir <路径>", "缓存目录路径"},
-    }},
-    {"LoRA 参数 (自动切换 Python)", {
-        {"--lora <路径>", "LoRA 适配器路径"},
-        {"--custom <配置>", "自定义模型配置"},
-        {"--dtype_config <配置>", "数据类型配置文件"},
-        {"--ori", "使用原始权重 (禁用量化)"},
-    }},
-    {"模板 / 工具调用", {
-        {"--chat_template <模板>", "对话模板 (覆盖自动检测)"},
-        {"--tool_call_parser <类型>", "工具调用解析器类型"},
-        {"--enable_thinking", "启用思考模式 (<think>标签)"},
-        {"--think", "Python 后端思考模式"},
-        {"--hide_input", "隐藏输入内容 (隐私保护)"},
-    }},
-    {"开发 / 调试", {
-        {"-v, --version", "显示版本信息"},
-        {"-h, --help", "显示帮助信息"},
-    }},
-};
-
-// ===== 示例定义 =====
-static const ExampleDef EXAMPLES[] = {
-    {"run", "D:\\Models\\Qwen2.5-7B", "--device cuda"},
-    {"run", "D:\\Models\\Qwen2.5-7B", "--lora ./lora"},
-    {"serve", "D:\\Models\\Qwen2.5-7B", "--port 8080 --batch 4"},
-    {"serve", "D:\\Models\\Qwen2.5-7B", "--api_key sk-xxx --dev_mode"},
-    {"webui", "D:\\Models\\Qwen2.5-7B", "--port 1616"},
-    {"download", "Qwen/Qwen2.5-7B-Instruct", nullptr},
-};
-
-// ===== 模型格式定义 =====
-static const ParamDef MODEL_FORMATS[] = {
-    {".flm", "FastLLM 原生格式"},
-    {".gguf", "GGUF 格式"},
-    {"HuggingFace 目录", "本地目录 (含 config.json)"},
-    {"HuggingFace Repo ID", "如 Qwen/Qwen2.5-7B (自动下载, 需 -py)"},
-};
+// 辅助函数：将统一定义转换为本地 Backend 枚举
+static Backend getBackend(const help::CommandDef& cmd) {
+    return cmd.is_native ? Backend::Native : Backend::Python;
+}
 
 // ============================================================================
 // 统一帮助输出函数
 // ============================================================================
 
 // 打印命令列表（带颜色）
-static void printCommandList(Backend filter, const char* title) {
+static void printCommandList(bool is_native, const char* title) {
     ui::ansi(std::cout, ui::BOLD);
     ui::ansi(std::cout, ui::CYAN) << title;
     ui::reset(std::cout) << std::endl;
     
     for (const auto& cmd : ALL_COMMANDS) {
-        if (cmd.defaultBackend != filter) continue;
+        if (cmd.is_native != is_native) continue;
         
         // 格式化命令名和别名
         std::string names = cmd.name;
@@ -1044,7 +702,7 @@ static void printCommandList(Backend filter, const char* title) {
         ui::reset(std::cout);
         // 填充空格到固定宽度
         for (size_t i = names.size(); i < 28; i++) std::cout << ' ';
-        std::cout << cmd.description << std::endl;
+        std::cout << cmd.desc << std::endl;
     }
     std::cout << std::endl;
 }
@@ -1080,18 +738,18 @@ static void printGroupTitle(const char* title) {
     ui::reset(std::cout) << std::endl;
 }
 
-// 打印单个参数组
-static void printParamGroup(const ParamGroup& group) {
+// 打印单个参数组（使用统一定义）
+static void printParamGroup(const help::ParamGroup& group) {
     printGroupTitle(group.title);
     for (const auto& param : group.params) {
-        printParamLine(param.param, param.desc);
+        printParamLine(param.name, param.desc);
     }
     std::cout << std::endl;
 }
 
 // 打印所有参数组
 static void printAllParamGroups() {
-    for (const auto& group : PARAM_GROUPS) {
+    for (const auto& group : help::PARAM_GROUPS) {
         printParamGroup(group);
     }
 }
@@ -1099,11 +757,11 @@ static void printAllParamGroups() {
 // 打印模型格式
 static void printModelFormats() {
     printGroupTitle("模型格式 (自动识别)");
-    for (const auto& fmt : MODEL_FORMATS) {
+    for (const auto& fmt : help::MODEL_FORMATS) {
         std::cout << "  ";
-        ui::ansi(std::cout, ui::YELLOW) << fmt.param;
+        ui::ansi(std::cout, ui::YELLOW) << fmt.format;
         ui::reset(std::cout);
-        for (size_t i = strlen(fmt.param); i < 28; i++) std::cout << ' ';
+        for (size_t i = strlen(fmt.format); i < 28; i++) std::cout << ' ';
         std::cout << fmt.desc << std::endl;
     }
     std::cout << std::endl;
@@ -1112,7 +770,7 @@ static void printModelFormats() {
 // 打印所有示例
 static void printAllExamples() {
     printGroupTitle("示例");
-    for (const auto& ex : EXAMPLES) {
+    for (const auto& ex : help::EXAMPLES) {
         printExampleLine(ex.cmd, ex.model, ex.args);
     }
     std::cout << std::endl;
@@ -1311,8 +969,8 @@ static int executeReplDirectCommand(const std::string& cmd, const std::vector<st
     
     // 使用统一命令表查找
     const CommandDef* def = findCommandDef(cmd);
-    if (def && def->nativeExe) {
-        return executeNativeProgram(def->nativeExe, static_cast<int>(argv2.size()), argv2.data(), 2);
+    if (def && def->exe) {
+        return executeNativeProgram(def->exe, static_cast<int>(argv2.size()), argv2.data(), 2);
     }
     // Python 后端
     return executePythonBackend(static_cast<int>(argv2.size()), argv2.data(), 1);
@@ -1513,8 +1171,8 @@ static void keepConsoleOpenUntilClose() {
         // 详细帮助 (help)
         if (lower == "help") {
             // 使用统一帮助系统
-            printCommandList(Backend::Native, "命令 (C++ 原生程序):");
-            printCommandList(Backend::Python, "命令 (Python 后端):");
+            printCommandList(true, "命令 (C++ 原生程序):");
+            printCommandList(false, "命令 (Python 后端):");
             
             // 模式切换
             printGroupTitle("模式切换");
@@ -1821,12 +1479,12 @@ void Usage() {
     std::cout << "Usage: ftllm <command> [options] [model_path]" << std::endl;
     std::cout << std::endl;
     ui::ansi(std::cout, ui::BOLD);
-    std::cout << "FastLLM - 高性能大语言模型推理引擎 (v" << FTLLM_VERSION << ")";
+    std::cout << "FastLLM - 高性能大语言模型推理引擎 (v" << help::PROGRAM_VERSION << ")";
     ui::reset(std::cout) << std::endl;
     std::cout << std::endl;
     
-    printCommandList(Backend::Native, "命令 (C++ 原生程序):");
-    printCommandList(Backend::Python, "命令 (Python 后端):");
+    printCommandList(true, "命令 (C++ 原生程序):");
+    printCommandList(false, "命令 (Python 后端):");
     
     // 模式切换
     printGroupTitle("模式切换:");
@@ -1928,7 +1586,7 @@ int main(int argc, char **argv) {
     
     // Python 专用命令（使用统一命令表检测）
     const CommandDef* cmdDef = findCommandDef(command);
-    if (cmdDef && cmdDef->defaultBackend == Backend::Python) {
+    if (cmdDef && !cmdDef->is_native) {
         usePython = true;
     }
     
@@ -2084,9 +1742,9 @@ int main(int argc, char **argv) {
     }
     
     // 查找命令定义（复用前面已查找的 cmdDef）
-    if (cmdDef && cmdDef->nativeExe) {
+    if (cmdDef && cmdDef->exe) {
         // 执行 C++ 原生程序
-        return executeNativeProgram(cmdDef->nativeExe, argc, argv, commandIndex + 1);
+        return executeNativeProgram(cmdDef->exe, argc, argv, commandIndex + 1);
     }
     
     // 空命令时显示帮助

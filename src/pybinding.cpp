@@ -1,5 +1,6 @@
 #include "model.h"
 #include "factoryllm.h"
+#include "models/basellm.h"  // 日志回调系统
 
 #include <pybind11/pybind11.h>
 #include <pybind11/numpy.h>
@@ -419,6 +420,61 @@ PYBIND11_MODULE(pyfastllm, m) {
 	  .def_readwrite("temperature", &fastllm::GenerationConfig::temperature)
 	  .def_readwrite("enable_hash_id", &fastllm::GenerationConfig::enable_hash_id)
 	  .def("is_simple_greedy", &fastllm::GenerationConfig::IsSimpleGreedy); 
+
+  // ===== 日志回调系统绑定 =====
+  py::enum_<fastllm::LogLevel>(m, "LogLevel")
+    .value("DEBUG", fastllm::LogLevel::Debug)
+    .value("INFO", fastllm::LogLevel::Info)
+    .value("WARNING", fastllm::LogLevel::Warn)
+    .value("ERROR", fastllm::LogLevel::Error)
+    .export_values();
+
+  py::enum_<fastllm::LogEvent>(m, "LogEvent")
+    .value("KVCACHE_CONFIG", fastllm::LogEvent::KVCacheConfig)
+    .value("KVCACHE_HIT", fastllm::LogEvent::KVCacheHit)
+    .value("KVCACHE_MISS", fastllm::LogEvent::KVCacheMiss)
+    .value("PREFILL_PROGRESS", fastllm::LogEvent::PrefillProgress)
+    .value("PREFILL_COMPLETE", fastllm::LogEvent::PrefillComplete)
+    .value("BATCH_STATUS", fastllm::LogEvent::BatchStatus)
+    .value("GENERAL", fastllm::LogEvent::General)
+    .export_values();
+
+  // LogData 结构体绑定
+  py::class_<fastllm::LogData>(m, "LogData")
+    .def(py::init<>())
+    .def_readwrite("event", &fastllm::LogData::event)
+    .def_readwrite("level", &fastllm::LogData::level)
+    .def_readwrite("tag", &fastllm::LogData::tag)
+    .def_readwrite("message", &fastllm::LogData::message)
+    .def_property("current", 
+      [](const fastllm::LogData& d) { return d.data.current; },
+      [](fastllm::LogData& d, int v) { d.data.current = v; })
+    .def_property("total", 
+      [](const fastllm::LogData& d) { return d.data.total; },
+      [](fastllm::LogData& d, int v) { d.data.total = v; })
+    .def_property("speed", 
+      [](const fastllm::LogData& d) { return d.data.speed; },
+      [](fastllm::LogData& d, float v) { d.data.speed = v; })
+    .def_property("elapsed", 
+      [](const fastllm::LogData& d) { return d.data.elapsed; },
+      [](fastllm::LogData& d, float v) { d.data.elapsed = v; })
+    .def_property("active", 
+      [](const fastllm::LogData& d) { return d.data.active; },
+      [](fastllm::LogData& d, int v) { d.data.active = v; })
+    .def_property("pending", 
+      [](const fastllm::LogData& d) { return d.data.pending; },
+      [](fastllm::LogData& d, int v) { d.data.pending = v; })
+    .def_property("context_len", 
+      [](const fastllm::LogData& d) { return d.data.contextLen; },
+      [](fastllm::LogData& d, int v) { d.data.contextLen = v; })
+    .def_property("device", 
+      [](const fastllm::LogData& d) { return d.data.device; },
+      [](fastllm::LogData& d, const std::string& v) { d.data.device = v; });
+
+  // 日志回调设置函数
+  m.def("set_log_callback", &fastllm::SetLogCallback, "Set the global log callback function",
+        py::arg("callback"));
+  m.def("get_log_callback", &fastllm::GetLogCallback, "Get the current log callback function");
 
   // high level
   m.def("set_threads", &fastllm::SetThreads)

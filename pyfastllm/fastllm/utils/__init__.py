@@ -2,6 +2,14 @@ from transformers import AutoConfig, AutoModel, AutoModelForCausalLM, AutoTokeni
 
 from .quantizer import QuantType
 from .converter import ChatglmConverter, BaichuanConverter, QwenConverter, MossConverter
+from .log_handler import (
+    enable_logging, 
+    disable_logging, 
+    set_custom_handler,
+    get_current_stats,
+    print_stats,
+    InferenceStats
+)
 
 def convert(hf_model_name_or_path:str, save_path:str, q_type=QuantType.INT4):
     config = AutoConfig.from_pretrained(hf_model_name_or_path, trust_remote_code=True)

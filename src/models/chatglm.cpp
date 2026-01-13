@@ -941,7 +941,7 @@ namespace fastllm {
     }
 
     void ChatGLMModel::WarmUp() {
-    	printf("Warmup...\n");
+    	EmitWarmUpLog();
 	    Data inputIds = Data(DataType::FLOAT32, {1, 1}, {(float)bos_token_id});
 	    Data attentionMask = Data(DataType::FLOAT32, {1, 1}, {0});
 	    Data positionIds = Data(DataType::FLOAT32, {2, 1}, {0, 0});

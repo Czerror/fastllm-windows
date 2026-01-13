@@ -17,6 +17,7 @@ from .openai_server.fastllm_model import FastLLmModel
 from .util import make_normal_parser
 from .util import add_server_args
 from . import console
+from .llm import set_log_callback, LogHandlers
 
 global fastllm_completion
 global fastllm_embed
@@ -43,6 +44,78 @@ fastllm_completion:FastLLmCompletion
 fastllm_embed:FastLLmEmbed
 fastllm_model:FastLLmModel
 dev_mode_enabled:bool = False
+
+
+def _display_system_info(args) -> None:
+    """显示系统信息（与 C++ 端一致）"""
+    threads = getattr(args, 'threads', -1)
+    if threads is not None and threads > 0:
+        console.config("线程数", str(threads))
+    low = getattr(args, 'low', False)
+    console.config("低内存模式", "是" if low else "否")
+    
+    # 设备映射
+    device = getattr(args, 'device', None)
+    if device:
+        console.config("设备映射", str(device))
+    device_map = getattr(args, 'device_map', None)
+    if device_map:
+        console.config("设备映射", str(device_map))
+    moe_device = getattr(args, 'moe_device', None)
+    if moe_device:
+        console.config("MoE 设备映射", str(moe_device))
+    moe_device_map = getattr(args, 'moe_device_map', None)
+    if moe_device_map:
+        console.config("MoE 设备映射", str(moe_device_map))
+    cuda_embedding = getattr(args, 'cuda_embedding', False)
+    if cuda_embedding:
+        console.config("CUDA Embedding", "是")
+
+
+def _display_server_config(args) -> None:
+    """显示 API Server 配置（与 C++ 端一致）"""
+    # 【模型配置】
+    console.info("【模型配置】")
+    model = getattr(args, 'model', None)
+    if model:
+        console.config("模型路径", str(model))
+    dtype = getattr(args, 'dtype', None)
+    if dtype and dtype != 'auto':
+        console.config("数据类型", str(dtype))
+    atype = getattr(args, 'atype', None)
+    if atype and atype != 'auto':
+        console.config("激活类型", str(atype))
+    
+    # 【KV Cache 配置】
+    kv_cache_limit = getattr(args, 'kv_cache_limit', 'auto')
+    if kv_cache_limit and kv_cache_limit != 'auto':
+        console.config("KV Cache 限制", str(kv_cache_limit))
+    cache_history = getattr(args, 'cache_history', '')
+    if cache_history:
+        console.config("历史缓存", "已启用")
+    cache_fast = getattr(args, 'cache_fast', '')
+    if cache_fast:
+        console.config("快速缓存", "已启用")
+    cache_dir = getattr(args, 'cache_dir', '')
+    if cache_dir:
+        console.config("缓存目录", str(cache_dir))
+    
+    # 【服务配置】
+    console.info("【服务配置】")
+    host = getattr(args, 'host', '127.0.0.1')
+    console.config("监听地址", str(host))
+    port = getattr(args, 'port', 8080)
+    console.config("端口", str(port))
+    batch = getattr(args, 'max_batch', -1)
+    if batch is not None and batch > 1:
+        console.config("最大批次", str(batch))
+    api_key = getattr(args, 'api_key', '')
+    if api_key:
+        console.config("API Key", "******")
+    dev_mode = getattr(args, 'dev_mode', False)
+    if dev_mode:
+        console.config("开发模式", "已启用")
+
 
 @app.post("/v1/chat/completions")
 async def create_chat_completion(request: ChatCompletionRequest,
@@ -237,15 +310,23 @@ def fastllm_server(args):
     global fastllm_model
     global dev_mode_enabled
     
+    # 显示系统信息
+    console.header("系统信息")
+    _display_system_info(args)
+    
+    # 显示 API Server 配置
     console.header("API Server 配置")
     
     # Set development mode from args
     dev_mode_enabled = args.dev_mode
-    if dev_mode_enabled:
-        console.config("开发模式", "已启用 (会话管理 API 已激活)")
     
     init_logging()
-    logging.info(args)
+    
+    # 美化显示配置参数
+    _display_server_config(args)
+    
+    # 设置日志回调，使用统一的美化处理器
+    set_log_callback(LogHandlers.pretty_handler)
     
     from .util import make_normal_llm_model, format_device_map
     model = make_normal_llm_model(args)
@@ -266,7 +347,7 @@ def fastllm_server(args):
         model_name = args.model_name,
         model = model,
         think = (args.think.lower() != "false"),
-        hide_input = args.hide_input
+        show_input = args.show_input
     )
     fastllm_embed = FastLLmEmbed(model_name = args.model_name, model = model)
     fastllm_reranker = FastLLmReranker(model_name = args.model_name, model = model)

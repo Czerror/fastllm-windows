@@ -1,0 +1,120 @@
+{
+  "version": "1.0",
+  "program": {
+    "name": "ftllm",
+    "description": "FastLLM 统一命令行工具",
+    "version": "1.0"
+  },
+  "commands": {
+    "native": [
+      {"name": "serve", "aliases": ["server", "api"], "exe": "apiserver.exe", "desc": "启动 OpenAI 兼容 API 服务器"},
+      {"name": "webui", "aliases": ["web"], "exe": "webui.exe", "desc": "启动 Web 界面"},
+      {"name": "bench", "aliases": ["benchmark"], "exe": "benchmark.exe", "desc": "性能测试"},
+      {"name": "quant", "aliases": ["quantize"], "exe": "quant.exe", "desc": "模型量化"}
+    ],
+    "python": [
+      {"name": "run", "aliases": ["chat"], "desc": "交互式聊天"},
+      {"name": "download", "aliases": [], "desc": "下载 HuggingFace 模型"},
+      {"name": "ui", "aliases": [], "desc": "启动图形界面"},
+      {"name": "config", "aliases": [], "desc": "生成配置文件模板"},
+      {"name": "export", "aliases": [], "desc": "导出模型"}
+    ]
+  },
+  "param_groups": [
+    {
+      "title": "基础参数",
+      "params": [
+        {"name": "-p, --path <路径>", "desc": "模型路径", "py_name": "path", "py_type": "str"},
+        {"name": "--device <设备>", "desc": "cuda, cpu, numa", "py_name": "device", "py_type": "str"},
+        {"name": "--dtype <类型>", "desc": "float16, int8, int4, int4g", "py_name": "dtype", "py_type": "str"},
+        {"name": "-t, --threads <数量>", "desc": "CPU 线程数", "py_name": "threads", "py_type": "int"},
+        {"name": "--model_name <名称>", "desc": "模型显示名称 (用于 API 返回)", "py_name": "model_name", "py_type": "str"}
+      ]
+    },
+    {
+      "title": "服务器参数",
+      "params": [
+        {"name": "--host <地址>", "desc": "监听地址 (默认: 127.0.0.1)", "py_name": "host", "py_type": "str", "default": "127.0.0.1"},
+        {"name": "--port <端口>", "desc": "监听端口 (默认: 8080)", "py_name": "port", "py_type": "int", "default": 8080},
+        {"name": "--api_key <密钥>", "desc": "API 密钥认证 (Bearer Token)", "py_name": "api_key", "py_type": "str"},
+        {"name": "--embedding_path <路径>", "desc": "Embedding 模型路径 (/v1/embeddings)", "py_name": "embedding_path", "py_type": "str"},
+        {"name": "--dev_mode", "desc": "开发模式 (启用调试接口)", "py_name": "dev_mode", "py_type": "bool"}
+      ]
+    },
+    {
+      "title": "Batch / 并发参数",
+      "params": [
+        {"name": "--batch <数量>", "desc": "批处理大小", "py_name": "max_batch", "py_type": "int"},
+        {"name": "--max_batch <数量>", "desc": "最大批处理数量", "py_name": "max_batch", "py_type": "int"},
+        {"name": "--max_token <数量>", "desc": "最大生成 Token 数 (webui)", "py_name": "max_token", "py_type": "int"},
+        {"name": "--chunk_size <数量>", "desc": "Chunked Prefill 分块大小 (默认: 自动)", "py_name": "chunk_size", "py_type": "int"}
+      ]
+    },
+    {
+      "title": "CUDA / 加速参数",
+      "params": [
+        {"name": "--cuda_embedding", "desc": "在 CUDA 上运行 Embedding 层", "py_name": "cuda_embedding", "py_type": "bool"},
+        {"name": "--cuda_shared_expert", "desc": "CUDA 共享专家优化 (MOE)", "py_name": "cuda_shared_expert", "py_type": "str"},
+        {"name": "--cuda_se", "desc": "--cuda_shared_expert 简写", "py_name": "cuda_se", "py_type": "str"},
+        {"name": "--enable_amx, --amx", "desc": "启用 Intel AMX 加速", "py_name": "enable_amx", "py_type": "str"}
+      ]
+    },
+    {
+      "title": "MOE (混合专家) 参数",
+      "params": [
+        {"name": "--moe_device <设备>", "desc": "MOE 专家层设备 (cuda, cpu)", "py_name": "moe_device", "py_type": "str"},
+        {"name": "--moe_dtype <类型>", "desc": "MOE 专家层数据类型", "py_name": "moe_dtype", "py_type": "str"},
+        {"name": "--moe_experts <数量>", "desc": "启用的 MOE 专家数量", "py_name": "moe_experts", "py_type": "int"}
+      ]
+    },
+    {
+      "title": "缓存参数",
+      "params": [
+        {"name": "--kv_cache_limit <大小>", "desc": "KV 缓存限制 (如 8G, 4096M)", "py_name": "kv_cache_limit", "py_type": "str"},
+        {"name": "--cache_history", "desc": "启用历史缓存", "py_name": "cache_history", "py_type": "str"},
+        {"name": "--cache_fast", "desc": "启用快速缓存模式", "py_name": "cache_fast", "py_type": "str"},
+        {"name": "--cache_dir <路径>", "desc": "缓存目录路径", "py_name": "cache_dir", "py_type": "str"}
+      ]
+    },
+    {
+      "title": "LoRA 参数",
+      "params": [
+        {"name": "--lora <路径>", "desc": "LoRA 适配器路径", "py_name": "lora", "py_type": "str"},
+        {"name": "--custom <配置>", "desc": "自定义模型配置", "py_name": "custom", "py_type": "str"},
+        {"name": "--dtype_config <配置>", "desc": "数据类型配置文件", "py_name": "dtype_config", "py_type": "str"},
+        {"name": "--ori", "desc": "使用原始权重 (禁用量化)", "py_name": "ori", "py_type": "str"}
+      ]
+    },
+    {
+      "title": "模板 / 工具调用",
+      "params": [
+        {"name": "--chat_template <模板>", "desc": "对话模板 (覆盖自动检测)", "py_name": "chat_template", "py_type": "str"},
+        {"name": "--tool_call_parser <类型>", "desc": "工具调用解析器类型", "py_name": "tool_call_parser", "py_type": "str"},
+        {"name": "--enable_thinking", "desc": "启用思考模式 (<think>标签)", "py_name": "enable_thinking", "py_type": "str"},
+        {"name": "--think", "desc": "Python 后端思考模式", "py_name": "think", "py_type": "str"},
+        {"name": "--hide_input", "desc": "隐藏输入内容 (隐私保护)", "py_name": "hide_input", "py_type": "bool"}
+      ]
+    },
+    {
+      "title": "开发 / 调试",
+      "params": [
+        {"name": "-v, --version", "desc": "显示版本信息"},
+        {"name": "-h, --help", "desc": "显示帮助信息"}
+      ]
+    }
+  ],
+  "examples": [
+    {"cmd": "run", "model": "D:\\Models\\Qwen2.5-7B", "args": "--device cuda"},
+    {"cmd": "run", "model": "D:\\Models\\Qwen2.5-7B", "args": "--lora ./lora"},
+    {"cmd": "serve", "model": "D:\\Models\\Qwen2.5-7B", "args": "--port 8080 --batch 4"},
+    {"cmd": "serve", "model": "D:\\Models\\Qwen2.5-7B", "args": "--api_key sk-xxx --dev_mode"},
+    {"cmd": "webui", "model": "D:\\Models\\Qwen2.5-7B", "args": "--port 1616"},
+    {"cmd": "download", "model": "Qwen/Qwen2.5-7B-Instruct", "args": null}
+  ],
+  "model_formats": [
+    {"format": ".flm", "desc": "FastLLM 原生格式"},
+    {"format": ".gguf", "desc": "GGUF 格式"},
+    {"format": "HuggingFace 目录", "desc": "本地目录 (含 config.json)"},
+    {"format": "HuggingFace Repo ID", "desc": "如 Qwen/Qwen2.5-7B (自动下载, 需 -py)"}
+  ]
+}

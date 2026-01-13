@@ -219,7 +219,7 @@ namespace fastllm {
     }
 
     void BertModel::WarmUp() {
-        printf("Warmup...\n");
+        EmitWarmUpLog();
         int batch = 1, len = 1;
         std::vector <float> ids = std::vector <float> (batch * len, 0.0f);
         std::vector <float> seqLens = std::vector <float> (batch, 0.0f);

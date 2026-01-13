@@ -526,6 +526,25 @@ extern "C" {
         return ret;
     }
 
+    // 获取推理统计信息
+    // 返回: [promptTokens, outputTokens, totalTime, firstTokenTime, speed]
+    DLL_EXPORT bool get_response_stats_llm_model(int modelId, int handleId, 
+                                                  int *promptTokens, int *outputTokens,
+                                                  double *totalTime, double *firstTokenTime, double *speed) {
+        auto model = models.GetModel(modelId);
+        auto context = model->responseContextDict.GetHandle(handleId);
+        if (context == nullptr) {
+            return false;
+        }
+        auto stats = context->GetStats();
+        *promptTokens = stats.promptTokens;
+        *outputTokens = stats.outputTokens;
+        *totalTime = stats.totalTime;
+        *firstTokenTime = stats.firstTokenTime;
+        *speed = stats.speed;
+        return true;
+    }
+
     DLL_EXPORT void add_cache_llm_model(int modelId, int len, int *values) {
         std::vector <int> input;
         for (int i = 0; i < len; i++) {
@@ -606,5 +625,73 @@ extern "C" {
             fvalue[i] = ret[i];
         }
         return fvalue;
+    }
+
+    // ============================================================================
+    // 日志回调接口 - Python端可注册回调来处理日志输出
+    // ============================================================================
+    
+    // C风格的日志数据结构，用于跨语言传递
+    struct CLogData {
+        int event;          // LogEvent枚举值
+        int level;          // LogLevel枚举值
+        const char* tag;
+        const char* message;
+        // 结构化数据
+        int current;
+        int total;
+        float speed;
+        float elapsed;
+        int active;
+        int pending;
+        int contextLen;
+        const char* device;
+    };
+
+    // C风格的回调函数类型
+    typedef void (*CLogCallback)(const CLogData*);
+    
+    static CLogCallback g_pyLogCallback = nullptr;
+    static std::string g_tagBuffer;
+    static std::string g_messageBuffer;
+    static std::string g_deviceBuffer;
+
+    DLL_EXPORT void set_log_callback(CLogCallback callback) {
+        g_pyLogCallback = callback;
+        if (callback != nullptr) {
+            // 注册内部回调，将LogData转换为CLogData并调用Python回调
+            fastllm::SetLogCallback([](const fastllm::LogData& logData) {
+                if (g_pyLogCallback != nullptr) {
+                    // 保存字符串到缓冲区，防止悬空指针
+                    g_tagBuffer = logData.tag;
+                    g_messageBuffer = logData.message;
+                    g_deviceBuffer = logData.data.device;
+                    
+                    CLogData cData;
+                    cData.event = static_cast<int>(logData.event);
+                    cData.level = static_cast<int>(logData.level);
+                    cData.tag = g_tagBuffer.c_str();
+                    cData.message = g_messageBuffer.c_str();
+                    cData.current = logData.data.current;
+                    cData.total = logData.data.total;
+                    cData.speed = logData.data.speed;
+                    cData.elapsed = logData.data.elapsed;
+                    cData.active = logData.data.active;
+                    cData.pending = logData.data.pending;
+                    cData.contextLen = logData.data.contextLen;
+                    cData.device = g_deviceBuffer.c_str();
+                    
+                    g_pyLogCallback(&cData);
+                }
+            });
+        } else {
+            // 清除日志回调
+            fastllm::SetLogCallback(nullptr);
+        }
+    }
+
+    DLL_EXPORT void clear_log_callback() {
+        g_pyLogCallback = nullptr;
+        fastllm::SetLogCallback(nullptr);
     }
 };

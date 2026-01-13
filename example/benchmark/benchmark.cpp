@@ -4,7 +4,10 @@
 
 #include "model.h"
 #include "utils.h"
+#include "utils/console.h"
+#include "utils/log_handler.h"
 #include "fstream"
+#include <iomanip>
 
 #if defined(_WIN32) || defined(_WIN64)
 #include <codecvt>
@@ -104,13 +107,18 @@ void ParseArgs(int argc, char **argv, BenchmarkConfig &config) {
     }
 }
 
+namespace log_handler = fastllm::log_handler;
+
 int main(int argc, char **argv) {
+    fastllm::console::init();
+    log_handler::EnablePrettyLogging();
+    
     BenchmarkConfig config;
     ParseArgs(argc, argv, config);
     fastllm::SetThreads(config.threads);
 
      if (!fastllm::FileExists(config.path)) {
-        printf("模型文件 %s 不存在！\n", config.path.c_str());
+        fastllm::console::printError("模型文件 " + config.path + " 不存在！");
         exit(0);
     }
     bool isHFDir = fastllm::FileExists(config.path + "/config.json") || fastllm::FileExists(config.path + "config.json");
@@ -194,10 +202,16 @@ int main(int argc, char **argv) {
         }
     }
 
-    printf("batch: %d\n", (int)inputs.size());
-    printf("prompt token number = %d\n", promptTokenNum);
-    printf("prompt use %f s\n", promptSpend);
-    printf("prompt speed = %f tokens / s\n", (float)promptTokenNum / promptSpend);
-    printf("output %d tokens\nuse %f s\nspeed = %f tokens / s\n", tokens, spend, tokens / spend);
+    namespace console = fastllm::console;
+    console::printHeader("Benchmark 结果");
+    console::printConfig("Batch 大小", std::to_string((int)inputs.size()));
+    console::printConfig("Prompt Tokens", std::to_string(promptTokenNum));
+    std::ostringstream promptOss;
+    promptOss << std::fixed << std::setprecision(2) << promptSpend << " s (" << (float)promptTokenNum / promptSpend << " tokens/s)";
+    console::printConfig("Prompt 耗时", promptOss.str());
+    console::printConfig("输出 Tokens", std::to_string(tokens));
+    std::ostringstream outputOss;
+    outputOss << std::fixed << std::setprecision(2) << spend << " s (" << tokens / spend << " tokens/s)";
+    console::printConfig("输出耗时", outputOss.str());
     return 0;
 }

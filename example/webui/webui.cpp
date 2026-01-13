@@ -3,6 +3,8 @@
 
 #include "httplib.h"
 #include "model.h"
+#include "utils/console.h"
+#include "utils/log_handler.h"
 
 #include <cstdio>
 #include <cstring>
@@ -92,15 +94,19 @@ struct ChatSession {
 
 std::map <std::string, ChatSession*> sessions;
 std::mutex locker;
+namespace log_handler = fastllm::log_handler;
 
 int main(int argc, char** argv) {
+    fastllm::console::init();
+    log_handler::EnablePrettyLogging();
+    
     WebConfig config;
     ParseArgs(argc, argv, config);
 
     fastllm::SetThreads(config.threads);
     fastllm::SetLowMemMode(config.lowMemMode);
     if (!fastllm::FileExists(config.path)) {
-        printf("模型文件 %s 不存在！\n", config.path.c_str());
+        fastllm::console::printError("模型文件 " + config.path + " 不存在！");
         exit(0);
     }
     bool isHFDir = fastllm::FileExists(config.path + "/config.json") || fastllm::FileExists(config.path + "config.json");

@@ -7,12 +7,53 @@
 #include <algorithm>
 #include <sstream>
 #include <cstring>
+#include <iomanip>
 
 #ifdef USE_CUDA
 #include "fastllm-cuda.cuh"
 #endif
 
 namespace fastllm {
+    // ============================================================================
+    // 日志回调系统实现
+    // ============================================================================
+    static LogCallback g_logCallback = nullptr;
+
+    void SetLogCallback(LogCallback callback) {
+        g_logCallback = callback;
+    }
+
+    LogCallback GetLogCallback() {
+        return g_logCallback;
+    }
+
+    void EmitLog(const LogData& logData) {
+        if (g_logCallback) {
+            g_logCallback(logData);
+        }
+    }
+
+    void EmitWarmUpLog() {
+        LogData log;
+        log.event = LogEvent::General;
+        log.level = LogLevel::Info;
+        log.tag = "model";
+        log.message = "Warmup...";
+        EmitLog(log);
+    }
+
+    void EmitErrorLog(const std::string& tag, const std::string& message) {
+        LogData log;
+        log.event = LogEvent::General;
+        log.level = LogLevel::Error;
+        log.tag = tag;
+        log.message = message;
+        EmitLog(log);
+    }
+
+    // ============================================================================
+    // ResponseContextDict 实现
+    // ============================================================================
     int ResponseContextDict::CreateHandle() {
         locker.lock();
         int newId = 0;
@@ -56,6 +97,29 @@ namespace fastllm {
         }
         isEnding = false;
         preTokens = 0;
+        
+        // 初始化统计信息
+        startTime = std::chrono::high_resolution_clock::now();
+        firstTokenReceived = false;
+        outputTokenCount = 0;
+    }
+
+    InferenceStatsInfo ResponseContext::GetStats() const {
+        InferenceStatsInfo stats;
+        stats.promptTokens = generationConfig.input_token_length;
+        stats.outputTokens = outputTokenCount;
+        
+        auto now = std::chrono::high_resolution_clock::now();
+        stats.totalTime = std::chrono::duration<double>(now - startTime).count();
+        
+        if (firstTokenReceived) {
+            stats.firstTokenTime = std::chrono::duration<double>(firstTokenTimePoint - startTime).count();
+            double genTime = stats.totalTime - stats.firstTokenTime;
+            if (genTime > 0 && stats.outputTokens > 0) {
+                stats.speed = stats.outputTokens / genTime;
+            }
+        }
+        return stats;
     }
 
     void ResponseContext::TryRecord(basellm *model) {
@@ -545,7 +609,12 @@ namespace fastllm {
                                            const fastllm::GenerationConfig &generationConfig,
                                            const fastllm::LastTokensManager &lastTokens,
                                            std::vector <std::vector <float>*> *retLogits) {
-        printf("Unsupport forward batch.\n");
+        LogData log;
+        log.event = LogEvent::General;
+        log.level = LogLevel::Error;
+        log.tag = "basellm";
+        log.message = "Unsupport forward batch.";
+        EmitLog(log);
         exit(0);
     }
 
@@ -587,7 +656,12 @@ namespace fastllm {
                 const GenerationConfig &generationConfigs,
                 const LastTokensManager &lastTokens,
                 std::vector <std::vector <float>*> *logits) {
-        printf("Unsupport multi modal forward.\n");
+        LogData log;
+        log.event = LogEvent::General;
+        log.level = LogLevel::Error;
+        log.tag = "basellm";
+        log.message = "Unsupport multi modal forward.";
+        EmitLog(log);
         exit(0);
     }
 
@@ -651,10 +725,18 @@ namespace fastllm {
                     model->promptLimit = limit * 3 / 4;
 
                     if (model->verbose) {
-                        printf("KV 缓存限制: %.2f MB\n", (double)kvCacheLimit / 1e6);
-                        printf("KV 缓存 Token 上限: %d tokens\n", maxTotalLens);
-                        printf("提示词 Token 上限: %d tokens\n", std::min(model->max_positions, model->promptLimit));
-                        printf("批处理上限: %d\n", maxBatch);
+                        LogData log;
+                        log.event = LogEvent::KVCacheConfig;
+                        log.level = LogLevel::Info;
+                        log.tag = "KVCache";
+                        log.data.total = maxTotalLens;
+                        std::ostringstream oss;
+                        oss << "KV缓存: " << std::fixed << std::setprecision(2) << (double)kvCacheLimit / 1e6 << " MB, "
+                            << "Token上限: " << maxTotalLens << ", "
+                            << "Prompt上限: " << std::min(model->max_positions, model->promptLimit) << ", "
+                            << "Batch上限: " << maxBatch;
+                        log.message = oss.str();
+                        EmitLog(log);
                     }
 
                     auto lastRecordTime = std::chrono::system_clock::now();
@@ -900,6 +982,20 @@ auto st = std::chrono::system_clock::now();
                                 if (seqLens[0] > firstChunkSize) {
                                     int len = seqLens[0];
                                     auto lastProgressTime = prefillStart;
+                                    
+                                    // 开始时立即显示进度
+                                    if (showPrefillLog) {
+                                        LogData log;
+                                        log.event = LogEvent::PrefillProgress;
+                                        log.level = LogLevel::Info;
+                                        log.tag = "预填充";
+                                        log.data.current = 0;
+                                        log.data.total = len;
+                                        log.data.speed = 0;
+                                        log.data.elapsed = 0;
+                                        EmitLog(log);
+                                    }
+                                    
                                     for (int st = 0; st < len; ) {
                                         int curLen = std::min(st == 0 ? firstChunkSize : chunkSize, len - st);
                                         Data curInput, curPositionIds;
@@ -916,17 +1012,29 @@ auto st = std::chrono::system_clock::now();
                                             if (GetSpan(lastProgressTime, now) > 0.3 || st >= len) {
                                                 float elapsed = GetSpan(prefillStart, now);
                                                 float speed = st / elapsed;
-                                                printf("\r预填充: %d/%d tokens (%d%%), %.0f tokens/s   ", 
-                                                       st, len, st * 100 / len, speed);
-                                                fflush(stdout);
+                                                LogData log;
+                                                log.event = LogEvent::PrefillProgress;
+                                                log.level = LogLevel::Info;
+                                                log.tag = "预填充";
+                                                log.data.current = st;
+                                                log.data.total = len;
+                                                log.data.speed = speed;
+                                                log.data.elapsed = elapsed;
+                                                EmitLog(log);
                                                 lastProgressTime = now;
                                             }
                                         }
                                     }
-                                    // 完成后换行
+                                    // 完成后通知
                                     if (showPrefillLog) {
-                                        printf("\n");
-                                        fflush(stdout);
+                                        LogData log;
+                                        log.event = LogEvent::PrefillComplete;
+                                        log.level = LogLevel::Info;
+                                        log.tag = "预填充";
+                                        log.data.total = len;
+                                        log.data.elapsed = GetSpan(prefillStart, std::chrono::system_clock::now());
+                                        log.data.speed = len / log.data.elapsed;
+                                        EmitLog(log);
                                     }
                                 } else {
                                     if (model->responseContextDict.dicts.begin()->second->multimodalInput.size() > 0) {
@@ -944,9 +1052,14 @@ auto st = std::chrono::system_clock::now();
                                     // 短文本预填充（>10 tokens才显示，过滤decode阶段的单token）
                                     if (showPrefillLog) {
                                         float prefillTime = GetSpan(prefillStart, std::chrono::system_clock::now());
-                                        printf("预填充: %d tokens, %.2f s, %.0f tokens/s\n", 
-                                               seqLens[0], prefillTime, seqLens[0] / prefillTime);
-                                        fflush(stdout);
+                                        LogData log;
+                                        log.event = LogEvent::PrefillComplete;
+                                        log.level = LogLevel::Info;
+                                        log.tag = "预填充";
+                                        log.data.total = seqLens[0];
+                                        log.data.elapsed = prefillTime;
+                                        log.data.speed = seqLens[0] / prefillTime;
+                                        EmitLog(log);
                                     }
                                 }
                             }
@@ -976,7 +1089,15 @@ printf("len = %d, spend = %f s. tokens / s = %f\n", (int)total, spend, (float)to
                                             pending++;
                                         }
                                     }
-                                    printf("活跃: %d, 等待: %d, 上下文长度: %d, 速度: %.2f tokens/s\n", alive, pending, aliveLen, (float)genTokens / spend);
+                                    LogData log;
+                                    log.event = LogEvent::BatchStatus;
+                                    log.level = LogLevel::Debug;
+                                    log.tag = "状态";
+                                    log.data.active = alive;
+                                    log.data.pending = pending;
+                                    log.data.contextLen = aliveLen;
+                                    log.data.speed = (float)genTokens / spend;
+                                    EmitLog(log);
                                     lastRecordTime = nowTime;
                                     genTokens = 0;
                                 }
@@ -1001,6 +1122,14 @@ printf("len = %d, spend = %f s. tokens / s = %f\n", (int)total, spend, (float)to
                                     it.second->allTokens.push_back(curRet);
                                     it.second->tokens.Push(curRet);
                                     it.second->curTokens++;
+                                    
+                                    // 记录推理统计
+                                    it.second->outputTokenCount++;
+                                    if (!it.second->firstTokenReceived) {
+                                        it.second->firstTokenReceived = true;
+                                        it.second->firstTokenTimePoint = std::chrono::high_resolution_clock::now();
+                                    }
+                                    
                                     if (it.second->curTokens == it.second->generationConfig.output_token_limit
                                         || it.second->allTokens.size() >= model->max_positions) {
                                         it.second->isEnding = true;
@@ -1059,9 +1188,17 @@ printf("len = %d, spend = %f s. tokens / s = %f\n", (int)total, spend, (float)to
             int len = cache.second;
             if (this->verbose) {
                 const char* deviceName = (cache.first->kv[0].first.dataDevice == DataDevice::CUDA) ? "GPU" : "CPU";
-                printf("[KVCache] 命中前缀缓存: %d tokens (输入 %d tokens, 跳过 %.1f%%, 缓存位置: %s)\n", 
-                       len, (int)inputTokens.size(), len * 100.0 / inputTokens.size(), deviceName);
-                fflush(stdout);
+                LogData log;
+                log.event = LogEvent::KVCacheHit;
+                log.level = LogLevel::Info;
+                log.tag = "KVCache";
+                log.data.current = len;
+                log.data.total = (int)inputTokens.size();
+                log.data.device = deviceName;
+                std::ostringstream oss;
+                oss << "命中前缀缓存: " << len << " tokens (输入 " << (int)inputTokens.size() << " tokens, 跳过 " << std::fixed << std::setprecision(1) << len * 100.0 / inputTokens.size() << "%, 位置: " << deviceName << ")";
+                log.message = oss.str();
+                EmitLog(log);
             }
             forwardLocker.lock();
             for (int i = 0; i < this->block_cnt; i++) {
@@ -1080,16 +1217,28 @@ printf("len = %d, spend = %f s. tokens / s = %f\n", (int)total, spend, (float)to
             }
             if (this->verbose && this->block_cnt > 0) {
                 const char* outDevice = (context->pastKeyValues[0].first.dataDevice == DataDevice::CUDA) ? "GPU" : "CPU";
-                printf("[KVCache] 恢复后数据位置: %s\n", outDevice);
-                fflush(stdout);
+                LogData log;
+                log.event = LogEvent::General;
+                log.level = LogLevel::Debug;
+                log.tag = "KVCache";
+                log.data.device = outDevice;
+                log.message = std::string("恢复后数据位置: ") + outDevice;
+                EmitLog(log);
             }
             forwardLocker.unlock();
             context->currentTokens.erase(context->currentTokens.begin(), context->currentTokens.begin() + len);
             context->cacheLen = len;
         } else {
             if (this->verbose) {
-                printf("[KVCache] 未命中缓存, 需预填充 %d tokens (缓存条目数: %d)\n", 
-                       (int)inputTokens.size(), (int)pastKVCacheManager.memorys.size());
+                LogData log;
+                log.event = LogEvent::KVCacheMiss;
+                log.level = LogLevel::Debug;
+                log.tag = "KVCache";
+                log.data.total = (int)inputTokens.size();
+                std::ostringstream oss;
+                oss << "未命中缓存, 需预填充 " << (int)inputTokens.size() << " tokens (缓存条目数: " << (int)pastKVCacheManager.memorys.size() << ")";
+                log.message = oss.str();
+                EmitLog(log);
             }
         }
 

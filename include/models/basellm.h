@@ -4,10 +4,12 @@
 
 #include "fastllm.h"
 #include "template.h"
+#include "utils/inference_stats.h"
 
 #include <thread>
 #include <mutex>
 #include <condition_variable>
+#include <functional>
 
 #ifdef PY_API
 #include "Python.h"
@@ -20,6 +22,51 @@ using RuntimeResultBatch = std::function<void(int index, std::vector <std::strin
 #endif
 
 namespace fastllm {
+    // ============================================================================
+    // 日志回调接口 - 客户端可注册回调来处理日志输出
+    // ============================================================================
+    enum class LogLevel { Debug, Info, Warn, Error };
+    enum class LogEvent {
+        KVCacheConfig,      // KV缓存配置信息
+        KVCacheHit,         // KV缓存命中
+        KVCacheMiss,        // KV缓存未命中
+        PrefillProgress,    // 预填充进度
+        PrefillComplete,    // 预填充完成
+        BatchStatus,        // 批处理状态
+        General             // 通用日志
+    };
+
+    struct LogData {
+        LogEvent event;
+        LogLevel level;
+        std::string tag;
+        std::string message;
+        // 可选的结构化数据
+        struct {
+            int current = 0;
+            int total = 0;
+            float speed = 0;
+            float elapsed = 0;
+            int active = 0;
+            int pending = 0;
+            int contextLen = 0;
+            std::string device;
+        } data;
+    };
+
+    using LogCallback = std::function<void(const LogData&)>;
+
+    // 全局日志回调注册
+    void SetLogCallback(LogCallback callback);
+    LogCallback GetLogCallback();
+    
+    // 便捷日志函数（内部使用）
+    void EmitLog(const LogData& logData);
+    
+    // 便捷日志辅助函数
+    void EmitWarmUpLog();
+    void EmitErrorLog(const std::string& tag, const std::string& message);
+
     using ChatMessages = std::vector <std::pair <std::string, std::string> >;
 
     enum ResponseContextError {
@@ -48,8 +95,17 @@ namespace fastllm {
 
         int cacheLen = 0;
 
+        // 推理统计相关
+        std::chrono::high_resolution_clock::time_point startTime;
+        std::chrono::high_resolution_clock::time_point firstTokenTimePoint;
+        bool firstTokenReceived = false;
+        int outputTokenCount = 0;
+
         void Init(int blocks, DataType dataType);
         void TryRecord(basellm *model);
+        
+        // 获取推理统计信息
+        InferenceStatsInfo GetStats() const;
     };
 
     struct ResponseContextDict {

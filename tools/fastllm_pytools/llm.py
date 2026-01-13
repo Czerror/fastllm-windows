@@ -6,7 +6,10 @@ import asyncio
 import copy
 import json
 import math
-from typing import Optional, Tuple, Union, List, Callable, Dict, Any;
+from typing import Optional, Tuple, Union, List, Callable, Dict, Any, Generator, TYPE_CHECKING;
+
+if TYPE_CHECKING:
+    from transformers.tokenization_utils_base import Conversation
 
 try:
     import sentencepiece # 先加载sentencepiece，防止libc冲突
@@ -108,6 +111,14 @@ fastllm_lib.can_fetch_response_llm_model.restype = ctypes.c_bool
 
 fastllm_lib.abort_response_llm_model.argtypes = [ctypes.c_int, ctypes.c_int]
 
+# 推理统计信息接口
+fastllm_lib.get_response_stats_llm_model.argtypes = [
+    ctypes.c_int, ctypes.c_int,  # modelId, handleId
+    ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int),  # promptTokens, outputTokens
+    ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_double)  # totalTime, firstTokenTime, speed
+]
+fastllm_lib.get_response_stats_llm_model.restype = ctypes.c_bool
+
 fastllm_lib.make_history_llm_model.argtype = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_char_p]
 fastllm_lib.make_history_llm_model.restype = ctypes.c_char_p
 
@@ -154,6 +165,241 @@ fastllm_lib.t2s_decode.argtypes = [ctypes.c_char_p,
     ctypes.POINTER(ctypes.c_int64), 
     ctypes.POINTER(ctypes.c_float)]
 fastllm_lib.t2s_decode.restype = ctypes.POINTER(ctypes.c_int64)
+
+# ============================================================================
+# 日志回调接口 - 与C++端basellm日志系统对接
+# ============================================================================
+
+class LogLevel:
+    """日志级别枚举"""
+    Debug = 0
+    Info = 1
+    Warn = 2
+    Error = 3
+
+class LogEvent:
+    """日志事件类型枚举"""
+    KVCacheConfig = 0       # KV缓存配置信息
+    KVCacheHit = 1          # KV缓存命中
+    KVCacheMiss = 2         # KV缓存未命中
+    PrefillProgress = 3     # 预填充进度
+    PrefillComplete = 4     # 预填充完成
+    BatchStatus = 5         # 批处理状态
+    General = 6             # 通用日志
+
+class LogData(ctypes.Structure):
+    """C风格的日志数据结构，用于接收来自C++的日志"""
+    _fields_ = [
+        ("event", ctypes.c_int),
+        ("level", ctypes.c_int),
+        ("tag", ctypes.c_char_p),
+        ("message", ctypes.c_char_p),
+        ("current", ctypes.c_int),
+        ("total", ctypes.c_int),
+        ("speed", ctypes.c_float),
+        ("elapsed", ctypes.c_float),
+        ("active", ctypes.c_int),
+        ("pending", ctypes.c_int),
+        ("contextLen", ctypes.c_int),
+        ("device", ctypes.c_char_p),
+    ]
+
+# C回调函数类型
+LOG_CALLBACK_TYPE = ctypes.CFUNCTYPE(None, ctypes.POINTER(LogData))
+
+# 存储当前Python回调，防止被垃圾回收
+_current_log_callback = None
+_current_c_callback = None
+
+def _create_log_callback_wrapper(py_callback):
+    """将Python回调包装为C回调"""
+    def c_callback(log_data_ptr):
+        if py_callback is not None and log_data_ptr:
+            data = log_data_ptr.contents
+            # 将C数据转换为Python友好的字典
+            py_data = {
+                'event': data.event,
+                'level': data.level,
+                'tag': data.tag.decode('utf-8') if data.tag else '',
+                'message': data.message.decode('utf-8') if data.message else '',
+                'current': data.current,
+                'total': data.total,
+                'speed': data.speed,
+                'elapsed': data.elapsed,
+                'active': data.active,
+                'pending': data.pending,
+                'contextLen': data.contextLen,
+                'device': data.device.decode('utf-8') if data.device else '',
+            }
+            py_callback(py_data)
+    return LOG_CALLBACK_TYPE(c_callback)
+
+def set_log_callback(callback):
+    """
+    设置日志回调函数
+    
+    Args:
+        callback: Python回调函数，接收一个字典参数，包含以下字段：
+            - event: int, LogEvent枚举值
+            - level: int, LogLevel枚举值  
+            - tag: str, 日志标签
+            - message: str, 日志消息
+            - current, total: int, 进度信息
+            - speed, elapsed: float, 速度和耗时
+            - active, pending: int, 批处理状态
+            - contextLen: int, 上下文长度
+            - device: str, 设备信息
+    
+    Example:
+        def my_log_handler(data):
+            if data['event'] == LogEvent.PrefillProgress:
+                print(f"Prefill: {data['current']}/{data['total']}")
+            elif data['event'] == LogEvent.KVCacheHit:
+                print(f"KVCache hit! Context: {data['contextLen']}")
+        
+        set_log_callback(my_log_handler)
+    """
+    global _current_log_callback, _current_c_callback
+    
+    if callback is not None:
+        _current_log_callback = callback
+        _current_c_callback = _create_log_callback_wrapper(callback)
+        fastllm_lib.set_log_callback(_current_c_callback)
+    else:
+        _current_log_callback = None
+        _current_c_callback = None
+        fastllm_lib.clear_log_callback()
+
+def clear_log_callback():
+    """清除日志回调"""
+    set_log_callback(None)
+
+# 预定义的日志处理器
+class LogHandlers:
+    """预定义的日志处理器集合"""
+    
+    # 用于节流日志更新的状态
+    _last_prefill_percent = -1
+    _last_batch_active = 0
+    
+    @staticmethod
+    def pretty_handler(data):
+        """美化输出日志处理器，带进度条和节流"""
+        import sys
+        from . import console
+        
+        event = data['event']
+        message = data.get('message', '')
+        
+        if event == LogEvent.KVCacheConfig:
+            console.info(message)
+        
+        elif event == LogEvent.KVCacheHit:
+            console.info(message)
+        
+        elif event == LogEvent.KVCacheMiss:
+            console.info(message)
+        
+        elif event == LogEvent.PrefillProgress:
+            # Prefill 进度（节流：只在百分比变化 >= 1% 时更新，但首次一定显示）
+            current, total = data['current'], data['total']
+            speed = data['speed']
+            if total > 0:
+                percent = int(current * 100 / total)
+                # 首次一定显示，之后按百分比变化更新
+                if LogHandlers._last_prefill_percent == -1 or percent != LogHandlers._last_prefill_percent:
+                    LogHandlers._last_prefill_percent = percent
+                    progress = current / total
+                    bar_width = 30
+                    filled = int(bar_width * progress)
+                    bar = '█' * filled + '░' * (bar_width - filled)
+                    sys.stdout.write(f"\r  预填充: [{bar}] {current}/{total} ({speed:.1f} tok/s)  ")
+                    sys.stdout.flush()
+        
+        elif event == LogEvent.PrefillComplete:
+            # Prefill 完成，重置状态
+            LogHandlers._last_prefill_percent = -1
+            speed, elapsed = data['speed'], data['elapsed']
+            sys.stdout.write(f"\r  预填充: 完成 ({speed:.1f} tok/s, {elapsed:.2f}s)               \n")
+            sys.stdout.flush()
+        
+        elif event == LogEvent.BatchStatus:
+            # 批处理状态（包含速度和上下文长度）
+            active, pending = data['active'], data['pending']
+            speed = data.get('speed', 0)
+            context_len = data.get('contextLen', 0)
+            
+            # 检测生成结束：active 从 >0 变成 0
+            if LogHandlers._last_batch_active > 0 and active == 0 and pending == 0:
+                sys.stdout.write("\r" + " " * 70 + "\r")
+                sys.stdout.flush()
+            
+            LogHandlers._last_batch_active = active
+            
+            if active > 0 or pending > 0:
+                status_parts = [f"活跃 {active}", f"等待 {pending}"]
+                if context_len > 0:
+                    status_parts.append(f"上下文 {context_len}")
+                if speed > 0:
+                    status_parts.append(f"{speed:.1f} tok/s")
+                line = f"\r  生成中: {', '.join(status_parts)}"
+                sys.stdout.write(line.ljust(70))
+                sys.stdout.flush()
+        
+        elif event == LogEvent.General:
+            if message:
+                console.info(message)
+    
+    @staticmethod
+    def simple_handler(data):
+        """简单输出日志处理器"""
+        event = data['event']
+        
+        if event == LogEvent.PrefillProgress:
+            return  # 跳过进度输出
+        
+        if event == LogEvent.PrefillComplete:
+            print(f"Prefill complete: {data['elapsed']:.2f}s, {data['speed']:.1f} tok/s")
+        elif event == LogEvent.KVCacheHit:
+            print(f"KVCache hit, context: {data['contextLen']}")
+        elif event == LogEvent.KVCacheMiss:
+            print(f"KVCache miss, context: {data['contextLen']}")
+        elif event == LogEvent.BatchStatus:
+            print(f"Batch: active={data['active']}, pending={data['pending']}")
+        elif data['message']:
+            print(data['message'])
+    
+    @staticmethod  
+    def silent_handler(data):
+        """静默处理器，不输出任何内容"""
+        pass
+
+def enable_pretty_logging():
+    """启用美化日志输出"""
+    set_log_callback(LogHandlers.pretty_handler)
+
+def enable_simple_logging():
+    """启用简单日志输出"""
+    set_log_callback(LogHandlers.simple_handler)
+
+def disable_logging():
+    """禁用日志输出"""
+    set_log_callback(LogHandlers.silent_handler)
+
+# 设置日志回调接口
+try:
+    fastllm_lib.set_log_callback.argtypes = [LOG_CALLBACK_TYPE]
+    fastllm_lib.set_log_callback.restype = None
+    fastllm_lib.clear_log_callback.argtypes = []
+    fastllm_lib.clear_log_callback.restype = None
+except:
+    # 如果库不支持日志回调，提供空实现
+    def set_log_callback(callback):
+        pass
+    def clear_log_callback():
+        pass
+
+# ============================================================================
 
 fastllm_data_type_dict = {
     "": 0,
@@ -240,6 +486,48 @@ def set_cpu_kvcache(cpu_kvcache):
 
 def get_cpu_kvcache():
     return fastllm_lib.get_kvcache_in_cpu();
+
+# 推理统计信息数据类
+class InferenceStats:
+    """推理统计信息"""
+    def __init__(self, prompt_tokens: int = 0, output_tokens: int = 0,
+                 total_time: float = 0.0, first_token_time: float = 0.0, speed: float = 0.0):
+        self.prompt_tokens = prompt_tokens
+        self.output_tokens = output_tokens
+        self.total_time = total_time
+        self.first_token_time = first_token_time
+        self.speed = speed
+    
+    def __repr__(self):
+        return (f"InferenceStats(prompt_tokens={self.prompt_tokens}, "
+                f"output_tokens={self.output_tokens}, "
+                f"total_time={self.total_time:.2f}s, "
+                f"first_token_time={self.first_token_time:.2f}s, "
+                f"speed={self.speed:.1f} t/s)")
+
+def get_response_stats(model_id: int, handle_id: int) -> Optional[InferenceStats]:
+    """获取指定请求的推理统计信息"""
+    prompt_tokens = ctypes.c_int()
+    output_tokens = ctypes.c_int()
+    total_time = ctypes.c_double()
+    first_token_time = ctypes.c_double()
+    speed = ctypes.c_double()
+    
+    success = fastllm_lib.get_response_stats_llm_model(
+        model_id, handle_id,
+        ctypes.byref(prompt_tokens), ctypes.byref(output_tokens),
+        ctypes.byref(total_time), ctypes.byref(first_token_time), ctypes.byref(speed)
+    )
+    
+    if success:
+        return InferenceStats(
+            prompt_tokens=prompt_tokens.value,
+            output_tokens=output_tokens.value,
+            total_time=total_time.value,
+            first_token_time=first_token_time.value,
+            speed=speed.value
+        )
+    return None
 
 def set_cpu_historycache(cpu_historycache):
     fastllm_lib.set_historycache_in_cpu(ctypes.c_bool(cpu_historycache));
@@ -1238,6 +1526,10 @@ class model:
                 pass
         fastllm_lib.abort_response_llm_model(self.model, handle)
     
+    def get_handle_stats(self, handle: int) -> Optional[InferenceStats]:
+        """获取指定请求句柄的推理统计信息"""
+        return get_response_stats(self.model, handle)
+    
     def stream_response_handle(self, handle):
         if (self.hf_tokenizer != None and hasattr(self.hf_tokenizer, "chat_template") and self.hf_tokenizer.chat_template != ""):
             tokenizer = self.hf_tokenizer
@@ -1411,7 +1703,7 @@ class model:
     
     def stream_chat(self, tokenizer, query: str, history: List[Tuple[str, str]] = None, past_key_values = None,
                     max_length: int = 8192, do_sample = True, top_p = 0.8, top_k = 1, temperature = 1.0, repeat_penalty = 1.0,
-                    return_past_key_values = False, stop_token_ids: List[int] = None, **kwargs) -> str:
+                    return_past_key_values = False, stop_token_ids: List[int] = None, **kwargs) -> Generator:
         type = None
         if (hasattr(tokenizer, "name") 
             and tokenizer.name == "GLMTokenizer" 

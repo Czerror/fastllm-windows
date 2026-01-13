@@ -230,7 +230,12 @@ namespace fastllm {
             if (this->moeDeviceMap.empty()) {
                 this->moeDeviceMap["cpu"] = 1;
             }
-            printf("[自动配置] 检测到 MoE 模型，启用 CUDA+CPU 混合推理 (device=cuda, moe_device=cpu)\n");
+            LogData logData;
+            logData.event = LogEvent::General;
+            logData.level = LogLevel::Info;
+            logData.tag = "AutoConfig";
+            logData.message = "[自动配置] 检测到 MoE 模型，启用 CUDA+CPU 混合推理 (device=cuda, moe_device=cpu)";
+            EmitLog(logData);
         }
 #endif
     }

@@ -1234,7 +1234,7 @@ namespace fastllm {
     }
 
     void MinimaxModel::WarmUp() {
-        printf("Warmup...\n");
+        EmitWarmUpLog();
         int oldTopk = this->num_experts_per_tok;
         this->num_experts_per_tok = this->num_experts;
 

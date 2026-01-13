@@ -975,7 +975,7 @@ namespace fastllm {
     }
 
     void LlamaModel::WarmUp() {
-        printf("Warmup...\n");
+        EmitWarmUpLog();
         Data inputIds = Data(DataType::FLOAT32, {1, 1}, {1});
         Data attentionMask = Data(DataType::FLOAT32, {1, 1}, {0});
         Data positionIds = Data(DataType::FLOAT32, {1, 1}, {0, 0});

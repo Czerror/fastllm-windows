@@ -17,6 +17,8 @@
 #include <vector>
 #include <deque>
 #include <array>
+#include <sstream>
+#include <iomanip>
 #ifndef __CUDACC__
 #if defined(__GNUC__) && __GNUC__ < 8 && !defined(__clang__)
 #include <experimental/filesystem>
@@ -232,19 +234,32 @@ namespace fastllm {
                 }
             }
 #endif             
-            std::string x[2] = {"OFF", "ON"};
-            printf("CPU Instruction Info: ");
-            printf("[AVX2: %s] ", x[hasAVX2].c_str());
-            printf("[AVX512F: %s] ", x[hasAVX512F].c_str());
-            printf("[AVX512_VNNI: %s] ", x[hasAVX512VNNI].c_str());
-            printf("[AVX512_BF16: %s] ", x[hasAVX512BF16].c_str());
-            printf("[AMX: %s] ", x[hasAMX].c_str()); // Print AMX status
-            printf("\n");
+            // 不在构造函数中打印，由调用方决定是否输出
 #endif 
+        }
+
+        // 获取 CPU 指令集信息字符串（供外部模块使用）
+        std::string getInfoString() const {
+            std::ostringstream oss;
+            auto flag = [](bool v) { return v ? "ON" : "OFF"; };
+            oss << "[AVX2: " << flag(hasAVX2) << "] "
+                << "[AVX512F: " << flag(hasAVX512F) << "] "
+                << "[AVX512_VNNI: " << flag(hasAVX512VNNI) << "] "
+                << "[AVX512_BF16: " << flag(hasAVX512BF16) << "] "
+                << "[AMX: " << flag(hasAMX) << "]";
+            return oss.str();
+        }
+
+        // 获取各指令集支持状态（供外部模块格式化输出）
+        struct Flags {
+            bool avx2, avx512f, avx512vnni, avx512bf16, amx;
+        };
+        Flags getFlags() const {
+            return {hasAVX2, hasAVX512F, hasAVX512VNNI, hasAVX512BF16, hasAMX};
         }
     };
 
-    // static CPUInstructInfo cpuInstructInfo;
+    extern CPUInstructInfo cpuInstructInfo;
 
     struct FP16ToFP32Manager {
         float dict[65536];
@@ -365,6 +380,30 @@ namespace fastllm {
                 s += it.second;
             }
             printf("Total: %f s.\n", s);
+        }
+
+        // 获取耗时记录（供外部模块格式化输出）
+        const std::map<std::string, float>& getRecords() const {
+            return v;
+        }
+
+        // 获取总耗时
+        float getTotal() const {
+            float s = 0;
+            for (auto &it: v) s += it.second;
+            return s;
+        }
+
+        // 获取格式化字符串（供外部模块使用）
+        std::string getInfoString() const {
+            std::ostringstream oss;
+            float s = 0;
+            for (auto &it: v) {
+                oss << it.first << ": " << std::fixed << std::setprecision(4) << it.second << " s\n";
+                s += it.second;
+            }
+            oss << "Total: " << std::fixed << std::setprecision(4) << s << " s";
+            return oss.str();
         }
     };
 

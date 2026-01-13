@@ -100,6 +100,10 @@ class Spinner:
             elapsed = time.time() - self.start_time
             frame = self.frames[self.frame_idx % len(self.frames)]
             
+            # 再次检查 running 状态，避免在 stop 后继续输出
+            if not self.running:
+                break
+                
             if _ansi_enabled:
                 # 清除当前行并显示 spinner
                 sys.stdout.write(f"\x1b[2K\r{Style.CYAN}{frame}{Style.RESET} {self.message} ({elapsed:.1f}s)")
@@ -121,15 +125,19 @@ class Spinner:
         """停止 spinner"""
         self.running = False
         if self.thread:
-            self.thread.join(timeout=0.2)
+            self.thread.join(timeout=0.5)  # 等待线程完全退出
         
         elapsed = time.time() - self.start_time if self.start_time else 0
+        
+        # 短暂延迟确保线程完全停止
+        time.sleep(0.05)
         
         # 清除 spinner 行
         if _ansi_enabled:
             sys.stdout.write("\x1b[2K\r")
         else:
             sys.stdout.write("\r" + " " * 60 + "\r")
+        sys.stdout.flush()
         
         # 显示最终消息
         if final_message:
@@ -184,6 +192,24 @@ def success(msg: str) -> None:
         print(f"{Style.GREEN}{Icon.CHECK}{Style.RESET} {msg}")
     else:
         print(f"[OK] {msg}")
+
+
+def print_inference_stats(prompt_tokens: int, output_tokens: int, 
+                          total_time: float, first_token_time: float, speed: float) -> None:
+    """打印推理统计信息（与 C++ apiserver 格式一致）"""
+    if _ansi_enabled:
+        print(f"{Style.GREEN}{Icon.CHECK}{Style.RESET} "
+              f"提示词: {Style.BRIGHT_CYAN}{prompt_tokens}{Style.RESET}, "
+              f"输出: {Style.BRIGHT_CYAN}{output_tokens}{Style.RESET}, "
+              f"耗时: {Style.YELLOW}{total_time:.2f}s{Style.RESET}, "
+              f"首字: {Style.YELLOW}{first_token_time:.2f}s{Style.RESET}, "
+              f"速度: {Style.BRIGHT_GREEN}{speed:.1f} t/s{Style.RESET}")
+    else:
+        print(f"[完成] 提示词: {prompt_tokens}, "
+              f"输出: {output_tokens}, "
+              f"耗时: {total_time:.2f}s, "
+              f"首字: {first_token_time:.2f}s, "
+              f"速度: {speed:.1f} t/s")
 
 
 def error(msg: str) -> None:

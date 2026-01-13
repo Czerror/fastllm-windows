@@ -607,7 +607,7 @@ namespace fastllm {
     }
 
     void CogvlmModel::WarmUp() {
-        printf("Warmup...\n");
+        EmitWarmUpLog();
         std::vector <std::vector <float> > fInputTokens = {{1, 1}};
         Data inputIds;
         Data attentionMask;
