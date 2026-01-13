@@ -2306,13 +2306,28 @@ void ParseArgs(int argc, char **argv, APIConfig &config) {
             config.atype = dataTypeDict[atypeStr];
         } else if (sargv[i] == "--model_name") {
             config.modelName = sargv[++i];
-        } else if (sargv[i] == "--device") {
-            config.devices[sargv[++i]] = 1;
-        } else if (sargv[i] == "--device_map") {
-            // 解析格式: cuda:28,cpu:8 或 cuda:0:28,cuda:1:8,cpu:4
+        } else if (sargv[i] == "--device" || sargv[i] == "--device_map") {
+            // 支持多种格式:
+            // 1. 简单设备名: cpu, cuda
+            // 2. 逗号分隔格式: cuda:28,cpu:8 或 cuda:0:28,cuda:1:8,cpu:4
+            // 3. Python 字典格式: {'cuda':1,'cpu':4} 或 {"cuda":1,"cpu":4}
             std::string mapStr = sargv[++i];
+            
+            // 检查是否是 Python 字典格式
+            if (mapStr.front() == '{' && mapStr.back() == '}') {
+                mapStr = mapStr.substr(1, mapStr.length() - 2);
+                std::string cleanStr;
+                for (char c : mapStr) {
+                    if (c != '\'' && c != '"') {
+                        cleanStr += c;
+                    }
+                }
+                mapStr = cleanStr;
+            }
+            
             std::stringstream ss(mapStr);
             std::string item;
+            bool hasMapping = false;
             while (std::getline(ss, item, ',')) {
                 size_t pos = item.rfind(':');
                 if (pos != std::string::npos && pos > 0) {
@@ -2320,16 +2335,38 @@ void ParseArgs(int argc, char **argv, APIConfig &config) {
                     int layers = atoi(item.substr(pos + 1).c_str());
                     if (layers > 0) {
                         config.devices[dev] = layers;
+                        hasMapping = true;
                     }
                 }
             }
-        } else if (sargv[i] == "--moe_device") {
-            config.moeDevices[sargv[++i]] = 1;
-        } else if (sargv[i] == "--moe_device_map") {
-            // 解析格式同 --device_map
+            if (!hasMapping && !mapStr.empty()) {
+                config.devices[mapStr] = 1;
+            }
+        } else if (sargv[i] == "--moe_device" || sargv[i] == "--moe_device_map") {
+            // 支持多种格式:
+            // 1. 简单设备名: cpu, cuda
+            // 2. 逗号分隔格式: cuda:1,cpu:4
+            // 3. Python 字典格式: {'cuda':1,'cpu':4} 或 {"cuda":1,"cpu":4}
             std::string mapStr = sargv[++i];
+            
+            // 检查是否是 Python 字典格式
+            if (mapStr.front() == '{' && mapStr.back() == '}') {
+                // 去掉花括号
+                mapStr = mapStr.substr(1, mapStr.length() - 2);
+                // 替换单引号为空，处理 'cuda' -> cuda
+                std::string cleanStr;
+                for (char c : mapStr) {
+                    if (c != '\'' && c != '"') {
+                        cleanStr += c;
+                    }
+                }
+                mapStr = cleanStr;
+            }
+            
+            // 解析格式: cuda:1,cpu:4
             std::stringstream ss(mapStr);
             std::string item;
+            bool hasMapping = false;
             while (std::getline(ss, item, ',')) {
                 size_t pos = item.rfind(':');
                 if (pos != std::string::npos && pos > 0) {
@@ -2337,8 +2374,13 @@ void ParseArgs(int argc, char **argv, APIConfig &config) {
                     int layers = atoi(item.substr(pos + 1).c_str());
                     if (layers > 0) {
                         config.moeDevices[dev] = layers;
+                        hasMapping = true;
                     }
                 }
+            }
+            // 如果没有解析出任何映射，当作简单设备名处理
+            if (!hasMapping && !mapStr.empty()) {
+                config.moeDevices[mapStr] = 1;
             }
         } else if (sargv[i] == "--api_key") {
             if (i + 1 >= argc) {

@@ -247,9 +247,15 @@ def fastllm_server(args):
     init_logging()
     logging.info(args)
     
-    from .util import make_normal_llm_model
+    from .util import make_normal_llm_model, format_device_map
     model = make_normal_llm_model(args)
     model.set_verbose(True)
+    
+    # 显示设备映射信息
+    if hasattr(args, '_parsed_device_map') and args._parsed_device_map:
+        console.config("设备映射", format_device_map(args._parsed_device_map))
+    if hasattr(args, '_parsed_moe_device_map') and args._parsed_moe_device_map:
+        console.config("MoE 设备映射", format_device_map(args._parsed_moe_device_map))
     
     if (args.model_name is None or args.model_name == ''):
         args.model_name = args.path

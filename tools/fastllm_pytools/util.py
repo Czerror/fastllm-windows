@@ -3,6 +3,18 @@ import os
 import sys
 from . import console
 
+def format_device_map(device_map):
+    """格式化设备映射为可读字符串，如 'cuda:1, cpu:4'"""
+    if device_map is None:
+        return None
+    if isinstance(device_map, str):
+        return f"{device_map}:1"
+    elif isinstance(device_map, list):
+        return ", ".join(f"{dev}:1" for dev in device_map)
+    elif isinstance(device_map, dict):
+        return ", ".join(f"{dev}:{cnt}" for dev, cnt in device_map.items())
+    return str(device_map)
+
 def make_normal_parser(des: str, add_help = True) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description = des, add_help = add_help)
     parser.add_argument('model', nargs='?', help = '模型路径，fastllm模型文件或HF模型文件夹或配置文件')
@@ -151,26 +163,37 @@ def make_normal_llm_model(args):
     # 注意: moe_device 的默认值已移至 C++ 底层 (basellm::ApplyAutoDeviceMap)
     # 只有用户显式指定时才传递给底层
     from ftllm import llm
+    
+    # 用于存储解析后的设备映射（供显示用）
+    args._parsed_device_map = None
+    args._parsed_moe_device_map = None
+    
     if (args.device and args.device != ""):
         try:
             import ast
             device_map = ast.literal_eval(args.device)
             if (isinstance(device_map, list) or isinstance(device_map, dict)):
                 llm.set_device_map(device_map)
+                args._parsed_device_map = device_map
             else:
                 llm.set_device_map(args.device)
+                args._parsed_device_map = args.device
         except:
             llm.set_device_map(args.device)
+            args._parsed_device_map = args.device
     if (args.moe_device and args.moe_device != ""):
         try:
             import ast
             moe_device_map = ast.literal_eval(args.moe_device)
             if (isinstance(moe_device_map, list) or isinstance(moe_device_map, dict)):
                 llm.set_device_map(moe_device_map, True)
+                args._parsed_moe_device_map = moe_device_map
             else:
                 llm.set_device_map(args.moe_device, True)
+                args._parsed_moe_device_map = args.moe_device
         except:
             llm.set_device_map(args.moe_device, True)
+            args._parsed_moe_device_map = args.moe_device
     llm.set_cpu_threads(args.threads)
     llm.set_cpu_low_mem(args.low)
     if (args.cuda_embedding):
