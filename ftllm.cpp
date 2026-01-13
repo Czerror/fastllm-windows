@@ -243,8 +243,21 @@ static int getDisplayWidth(const std::string& text) {
                 width += 1;
                 p += 2;
             } else if ((*p & 0xF0) == 0xE0) {
-                // 3字节 UTF-8 (中日韩字符，宽度2)
-                width += 2;
+                // 3字节 UTF-8
+                // 检查是否是 CJK 字符 (中日韩字符，宽度2)
+                // CJK 范围: U+4E00-U+9FFF, U+3400-U+4DBF, U+F900-U+FAFF 等
+                unsigned int codepoint = ((p[0] & 0x0F) << 12) | ((p[1] & 0x3F) << 6) | (p[2] & 0x3F);
+                if ((codepoint >= 0x4E00 && codepoint <= 0x9FFF) ||   // CJK Unified Ideographs
+                    (codepoint >= 0x3400 && codepoint <= 0x4DBF) ||   // CJK Extension A
+                    (codepoint >= 0xF900 && codepoint <= 0xFAFF) ||   // CJK Compatibility Ideographs
+                    (codepoint >= 0x3000 && codepoint <= 0x303F) ||   // CJK Symbols and Punctuation
+                    (codepoint >= 0xFF00 && codepoint <= 0xFFEF) ||   // Halfwidth and Fullwidth Forms
+                    (codepoint >= 0xAC00 && codepoint <= 0xD7AF)) {   // Hangul Syllables
+                    width += 2;
+                } else {
+                    // 其他 3 字节字符（如 ⚙ ▶ ✓ ℹ 等符号）宽度通常为 1
+                    width += 1;
+                }
                 p += 3;
             } else if ((*p & 0xF8) == 0xF0) {
                 // 4字节 UTF-8 (emoji 等，宽度2)
