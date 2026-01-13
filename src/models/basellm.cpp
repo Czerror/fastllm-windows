@@ -192,27 +192,16 @@ namespace fastllm {
                 // 例如: 缓存=[A,B,C], 输入=[A,B,C,D,E] → match=3, 不可复用(输入更长)
                 if (match == inputToken.size() && match <= cached.size()) {
                     // 输入是缓存的前缀，可以复用
-                    printf("[KVCache] Linear Attention 命中: 输入 %d tokens 是缓存 %d tokens 的前缀\n", 
-                           (int)inputToken.size(), (int)cached.size());
-                    fflush(stdout);
                     if (match > maxPrefixToken) {
                         maxPrefixToken = match;
                         ret = it.second;
                     }
                 } else if (match == cached.size() && cached.size() < inputToken.size()) {
                     // 缓存是输入的前缀 - 对于 Linear Attention 也可以复用
-                    // 因为我们可以从缓存的 SSM state 继续计算
-                    printf("[KVCache] Linear Attention 部分命中: 缓存 %d tokens 是输入 %d tokens 的前缀\n", 
-                           (int)cached.size(), (int)inputToken.size());
-                    fflush(stdout);
                     if (match > maxPrefixToken) {
                         maxPrefixToken = match;
                         ret = it.second;
                     }
-                } else {
-                    printf("[KVCache] Linear Attention 未命中: 缓存 %d, 输入 %d, 匹配 %d\n", 
-                           (int)cached.size(), (int)inputToken.size(), match);
-                    fflush(stdout);
                 }
             } else {
                 // 标准 Attention: 只要有公共前缀就可以复用
@@ -897,7 +886,7 @@ auto st = std::chrono::system_clock::now();
                             } else {
                                 // Chunked Prefill: 将大的 prompt 分块处理
                                 int chunkSize = 2048;      // 默认分块大小
-                                int firstChunkSize = 8192; // 第一块稍大
+                                int firstChunkSize = 4096; // 第一块稍大
                                 
                                 // 用户配置优先
                                 if (model->chunkedPrefillSize > 0) {
@@ -905,18 +894,13 @@ auto st = std::chrono::system_clock::now();
                                     firstChunkSize = model->chunkedPrefillSize;
                                 }
                                 
+                                auto prefillStart = std::chrono::system_clock::now();
+                                bool showPrefillLog = model->verbose && seqLens[0] > 10; // 过滤decode阶段
+                                
                                 if (seqLens[0] > firstChunkSize) {
                                     int len = seqLens[0];
+                                    auto lastProgressTime = prefillStart;
                                     for (int st = 0; st < len; ) {
-                                        if (model->verbose) {
-                                            genTokens += seqLens.size();
-                                            auto nowTime = std::chrono::system_clock::now();
-                                            float spend = GetSpan(lastRecordTime, nowTime);
-                                            if (spend > 1) {
-                                                printf("长文本预填充中... (%d%%, chunk=%d)\n", st * 100 / len, chunkSize);
-                                                lastRecordTime = nowTime;
-                                            }
-                                        }
                                         int curLen = std::min(st == 0 ? firstChunkSize : chunkSize, len - st);
                                         Data curInput, curPositionIds;
                                         Split(inputIds, 1, st, st + curLen, curInput);
@@ -925,6 +909,24 @@ auto st = std::chrono::system_clock::now();
                                         ret = std::vector <int> {model->Forward(curInput, Data(), curPositionIds,
                                             *pastKeyValue1, generationConfigs[0], tokensManager, logits[0])};
                                         st += curLen;
+                                        
+                                        // 实时显示预填充进度（每块完成后更新）
+                                        if (showPrefillLog) {
+                                            auto now = std::chrono::system_clock::now();
+                                            if (GetSpan(lastProgressTime, now) > 0.3 || st >= len) {
+                                                float elapsed = GetSpan(prefillStart, now);
+                                                float speed = st / elapsed;
+                                                printf("\r预填充: %d/%d tokens (%d%%), %.0f tokens/s   ", 
+                                                       st, len, st * 100 / len, speed);
+                                                fflush(stdout);
+                                                lastProgressTime = now;
+                                            }
+                                        }
+                                    }
+                                    // 完成后换行
+                                    if (showPrefillLog) {
+                                        printf("\n");
+                                        fflush(stdout);
                                     }
                                 } else {
                                     if (model->responseContextDict.dicts.begin()->second->multimodalInput.size() > 0) {
@@ -938,6 +940,13 @@ auto st = std::chrono::system_clock::now();
                                                                         attentionMasks[0] == nullptr ? Data() : *attentionMasks[0],
                                                                         *positionIds[0],
                                                                         *pastKeyValue1, generationConfigs[0], tokensManager, logits[0])};
+                                    }
+                                    // 短文本预填充（>10 tokens才显示，过滤decode阶段的单token）
+                                    if (showPrefillLog) {
+                                        float prefillTime = GetSpan(prefillStart, std::chrono::system_clock::now());
+                                        printf("预填充: %d tokens, %.2f s, %.0f tokens/s\n", 
+                                               seqLens[0], prefillTime, seqLens[0] / prefillTime);
+                                        fflush(stdout);
                                     }
                                 }
                             }
