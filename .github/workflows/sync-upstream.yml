@@ -29,76 +29,48 @@ jobs:
         git remote add upstream https://github.com/ztxz16/fastllm.git || true
         git fetch upstream
     
-    - name: Sync upstream changes
-      id: sync
+    - name: Sync upstream to dev branch
+      id: sync_dev
       run: |
-        # 获取上游 master 分支的最新提交
-        UPSTREAM_COMMIT=$(git rev-parse upstream/master)
-        LOCAL_UPSTREAM=$(git merge-base HEAD upstream/master 2>/dev/null || echo "none")
-
-        # 记录合并前的本地 HEAD，用于在合并后恢复本地 Windows 定制文件
-        LOCAL_HEAD=$(git rev-parse HEAD)
-
-        # ===== Patch Replay 模式 =====
-        # 思路：
-        # 1) 计算本地相对 upstream/master 的“自定义提交列表”
-        # 2) reset 到 upstream/master
-        # 3) 按顺序 cherry-pick 这些提交
-        # 这样不会出现“先合并再强制覆盖保护文件”导致的隐性丢改动；
-        # 如果上游改动与本地定制冲突，会明确失败并要求人工处理。
-        BASE_COMMIT=$(git merge-base HEAD upstream/master 2>/dev/null || echo "")
-        if [ -z "$BASE_COMMIT" ]; then
-          echo "[ERROR] Cannot find merge-base between HEAD and upstream/master."
-          exit 1
-        fi
-
-        UPSTREAM_AHEAD_COUNT=$(git rev-list --count HEAD..upstream/master 2>/dev/null || echo "0")
-        LOCAL_COMMITS_FILE="$(mktemp)"
-        # 只重放非 merge 的本地提交，避免把历史 merge upstream 的 merge commit 再重放一遍
-        git rev-list --reverse --no-merges "$BASE_COMMIT..$LOCAL_HEAD" > "$LOCAL_COMMITS_FILE" || true
-        LOCAL_COMMIT_COUNT=$(wc -l < "$LOCAL_COMMITS_FILE" | tr -d ' ')
+        # 同步纯净的上游代码到 dev 分支
+        echo "=== Syncing upstream to dev branch ==="
         
-        echo "Upstream latest: $UPSTREAM_COMMIT"
-        echo "Local base: $LOCAL_UPSTREAM"
-        
-        if [ "$UPSTREAM_AHEAD_COUNT" -gt 0 ]; then
-          echo "New changes detected from upstream (ahead by: $UPSTREAM_AHEAD_COUNT commits)"
-          echo "Local customization commits to replay: $LOCAL_COMMIT_COUNT"
-
-          # 先对齐到上游最新
-          git reset --hard upstream/master
-
-          # 再逐个重放本地提交
-          if [ "$LOCAL_COMMIT_COUNT" -gt 0 ]; then
-            while IFS= read -r sha; do
-              [ -z "$sha" ] && continue
-              echo "Cherry-pick: $sha"
-              if ! git cherry-pick "$sha"; then
-                echo "[ERROR] Cherry-pick failed at $sha. Manual resolution required."
-                git status --porcelain || true
-                git cherry-pick --abort || true
-                exit 1
-              fi
-            done < "$LOCAL_COMMITS_FILE"
-          fi
-
-          echo "SYNCED=true" >> $GITHUB_ENV
-          echo "synced=true" >> $GITHUB_OUTPUT
+        # 检查 dev 分支是否存在
+        git fetch origin dev || true
+        if git show-ref --verify --quiet refs/remotes/origin/dev; then
+          git checkout dev
+          git pull origin dev
         else
-          echo "Already up to date with upstream"
-          echo "SYNCED=false" >> $GITHUB_ENV
-          echo "synced=false" >> $GITHUB_OUTPUT
+          # 从上游 master 创建 dev 分支
+          git checkout -b dev upstream/master
+          git push -u origin dev
+          echo "dev_synced=true" >> $GITHUB_OUTPUT
+          echo "✅ Created dev branch from upstream/master"
+          exit 0
+        fi
+        
+        # 检查是否有上游更新
+        UPSTREAM_COMMIT=$(git rev-parse upstream/master)
+        DEV_COMMIT=$(git rev-parse HEAD)
+        
+        if [ "$UPSTREAM_COMMIT" != "$DEV_COMMIT" ]; then
+          echo "Updating dev branch to upstream/master"
+          git reset --hard upstream/master
+          git push origin dev --force-with-lease
+          echo "dev_synced=true" >> $GITHUB_OUTPUT
+          echo "✅ dev branch updated to upstream/master"
+        else
+          echo "dev_synced=false" >> $GITHUB_OUTPUT
+          echo "ℹ️ dev branch already up to date with upstream"
         fi
     
-    - name: Push upstream sync
-      if: steps.sync.outputs.synced == 'true'
-      run: |
-        git push origin master
-    
-    - name: Update submodules
+    - name: Update submodules on master
       id: submodules
       run: |
-        echo "=== Checking submodule updates ==="
+        echo "=== Checking submodule updates on master ==="
+        
+        git checkout master
+        git pull origin master
         
         # 更新子模块到远程最新版本
         git submodule update --remote --merge
@@ -106,40 +78,30 @@ jobs:
         # 检查是否有变更
         if git diff --quiet; then
           echo "Submodules are up to date"
-          echo "SUBMODULES_UPDATED=false" >> $GITHUB_ENV
           echo "updated=false" >> $GITHUB_OUTPUT
         else
           echo "Submodules updated"
           git add .
           git commit -m "chore: Auto-update submodules (pybind11, sentencepiece)"
-          echo "SUBMODULES_UPDATED=true" >> $GITHUB_ENV
-          echo "updated=true" >> $GITHUB_OUTPUT
           git push origin master
+          echo "updated=true" >> $GITHUB_OUTPUT
         fi
     
     - name: Create sync summary
       run: |
-        if [ "$SYNCED" == "true" ]; then
-          echo "✅ Successfully synced with upstream ztxz16/fastllm"
-        else
-          echo "ℹ️ No new changes from upstream"
-        fi
-        
-        if [ "$SUBMODULES_UPDATED" == "true" ]; then
-          echo "✅ Submodules updated to latest versions"
-        else
-          echo "ℹ️ Submodules are already up to date"
-        fi
+        echo "=== Sync Summary ==="
+        echo "• dev branch: upstream code (for review/testing)"
+        echo "• master branch: production code (submodules only)"
     
     outputs:
-      synced: ${{ steps.sync.outputs.synced }}
+      dev_synced: ${{ steps.sync_dev.outputs.dev_synced }}
       submodules_updated: ${{ steps.submodules.outputs.updated }}
 
-  # 当有上游更新时触发构建
+  # 子模块更新时触发构建（仅构建，不发布）
   trigger-build:
-    name: Trigger Build
+    name: Trigger Build (no release)
     needs: sync
-    if: needs.sync.outputs.synced == 'true' || needs.sync.outputs.submodules_updated == 'true'
+    if: needs.sync.outputs.submodules_updated == 'true'
     uses: ./.github/workflows/build-windows.yml
     with:
       build_cpu: true
