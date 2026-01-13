@@ -1371,8 +1371,7 @@ if (false) {
 
                         if (tensors.size() != 0) {
                             locker.lock();
-                            printf("Loading %d \r", (++cnt) * 100 / (int)tensors.size());
-                            fflush(stdout);
+                            cnt++;
                             locker.unlock();
                         }
                     }
@@ -1690,8 +1689,7 @@ if (false) {
                         if (StringEndWith(tensorName, "_scale_inv") ||
                             (isAwqModel && (StringEndWith(tensorName, ".scales") || StringEndWith(tensorName, ".qzeros")))) {
                             locker.lock();
-                            printf("Loading %d \r", (++cnt) * 100 / (int)tensorMap.size());
-                            fflush(stdout);
+                            cnt++;
                             locker.unlock();
                             continue;
                         }
@@ -2027,8 +2025,7 @@ if (false) {
                         }
 
                         locker.lock();
-                        printf("Loading %d \r", (++cnt) * 100 / (int)tensorMap.size());
-                        fflush(stdout);
+                        cnt++;
                         locker.unlock();
                     }
                 }, parts[i].first, parts[i].second)

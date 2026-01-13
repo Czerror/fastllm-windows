@@ -1953,7 +1953,7 @@ int main(int argc, char **argv) {
                 "--dev_mode",           // Python server 支持
 
                 // ===== MOE / 设备配置 =====
-                "--moe_device",
+                // "--moe_device",      // C++ apiserver 已支持
                 "--moe_dtype",
                 "--moe_experts",
 
@@ -1991,7 +1991,7 @@ int main(int argc, char **argv) {
                 "--max_token",          // Python webui 子命令参数
                 "--think",              // Python webui 子命令参数
 
-                "--moe_device",
+                // "--moe_device",      // C++ webui 已支持
                 "--moe_dtype",
                 "--moe_experts",
                 "--cache_history",

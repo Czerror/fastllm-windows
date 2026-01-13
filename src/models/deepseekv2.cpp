@@ -1561,7 +1561,6 @@ namespace fastllm {
         elementsInKVCachePerToken = (long long)block_cnt * 
             (pastKeyValues[0].first.dims[0] * pastKeyValues[0].first.dims[2] + 
              pastKeyValues[0].second.dims[0] * pastKeyValues[0].second.dims[2]);
-        printf("finish.\n");
         this->num_experts_per_tok = oldTopk;
     }
 }

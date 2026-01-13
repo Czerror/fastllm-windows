@@ -231,7 +231,6 @@ namespace fastllm {
         fastllm::Data tokenTypeIds = fastllm::Data(fastllm::DataType::FLOAT32, {batch, len}, token_type_ids);
         fastllm::Data positionIds = fastllm::Data(fastllm::DataType::FLOAT32, {batch, len}, position_ids);
         ForwardAll(inputIds, attentionMask, tokenTypeIds, positionIds, true);
-	    printf("finish.\n");
     }
 
     int BertModel::Forward(const fastllm::Data &inputIds, const fastllm::Data &attentionMask,

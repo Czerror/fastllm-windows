@@ -32,7 +32,7 @@ class ModelPermission(BaseModel):
     allow_fine_tuning: bool = False
     organization: str = "*"
     group: Optional[str] = None
-    is_blocking: str = False
+    is_blocking: bool = False  # 修复: pydantic v2 类型不匹配
 
 
 class ModelCard(BaseModel):
