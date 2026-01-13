@@ -1,5 +1,6 @@
 import argparse
 from .util import make_normal_parser
+from . import console
 import readline
 
 def args_parser():
@@ -9,6 +10,8 @@ def args_parser():
 
 def fastllm_chat(args):
     from .util import make_normal_llm_model
+    
+    console.header("加载模型")
     model = make_normal_llm_model(args)
 
     generation_config = {
@@ -27,19 +30,19 @@ def fastllm_chat(args):
                     if (it in config):
                         generation_config[it] = config[it];
 
-    hint = "输入内容开始对话\n'clear'清空记录\n'stop'终止程序."
+    console.header("开始对话")
+    console.info("输入 'clear' 清空记录, 'stop' 退出程序")
     history = []
 
-    print(hint)
     while True:
-        query = input("\nUser：")
+        query = input(console.user_prompt())
         if query.strip() == "stop":
             break
         if query.strip() == "clear":
             history = []
-            print(hint)
+            console.success("对话历史已清空")
             continue
-        print("AI:", end = "");
+        console.ai_response_start()
         curResponse = "";
         for response in model.stream_response(query, history = history, 
                                               repeat_penalty = generation_config["repetition_penalty"],
@@ -48,8 +51,12 @@ def fastllm_chat(args):
                                               temperature = generation_config["temperature"]):
             curResponse += response;
             print(response, flush = True, end = "")
+        print()  # 换行
         history.append((query, curResponse))
+    
+    console.info("正在释放资源...")
     model.release_memory()
+    console.success("已退出")
 
 if __name__ == "__main__":
     args = args_parser()

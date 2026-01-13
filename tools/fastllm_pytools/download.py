@@ -11,6 +11,7 @@ from typing import List, Tuple
 import requests
 from .util import get_fastllm_cache_path
 from .util import make_download_parser
+from . import console
 
 def find_metadata(repo_id) -> bool:
     hf_endpoint = os.environ.get("HF_ENDPOINT", "https://hf-mirror.com")
@@ -32,16 +33,17 @@ def search_model(repo_id):
         return response.json()
     except requests.HTTPError as e:
         return []
-# ANSI颜色代码
-COLORS = {
-    "RED": "\033[0;31m",
-    "GREEN": "\033[0;32m",
-    "YELLOW": "\033[1;33m",
-    "NC": "\033[0m"
-}
 
+# 兼容旧代码的颜色打印
 def color_print(text: str, color: str) -> None:
-    print(f"{COLORS[color]}{text}{COLORS['NC']}", flush=True)
+    if color == "GREEN":
+        console.success(text)
+    elif color == "YELLOW":
+        console.info(text)
+    elif color == "RED":
+        console.error(text)
+    else:
+        print(text)
 
 class HFDArgs:
     def __init__(self):
@@ -90,9 +92,14 @@ class HFDDownloader:
         try:
             finish_flag = os.path.join(self.local_dir, "FASTLLM_FINISH_FLAG")
             if (os.path.exists(finish_flag)):
+                console.success(f"模型已缓存: {self.local_dir}")
                 return
+            
+            console.header(f"下载模型: {self.args.repo_id}")
+            
             # 获取并处理元数据
-            metadata = self.fetch_metadata()
+            with console.spinner("获取仓库元数据", "元数据获取完成"):
+                metadata = self.fetch_metadata()
             self.check_authentication(metadata)
             
             # 生成下载列表
@@ -102,19 +109,17 @@ class HFDDownloader:
             # 执行下载
             self.execute_download()
             
-            color_print("Download completed successfully.", "GREEN")
+            console.success(f"下载完成: {self.local_dir}")
             with open(finish_flag, 'w') as file:
                 file.write('finish')
         except KeyboardInterrupt:
-            color_print("\nDownload interrupted. You can resume by re-running the command.", "YELLOW")
+            console.warning("下载已中断，可重新运行命令继续下载")
             sys.exit(1)
         except Exception as e:
-            color_print(f"Error: {str(e)}", "RED")
+            console.error(f"下载失败: {str(e)}")
             sys.exit(1)
 
     def fetch_metadata(self) -> dict:
-        color_print("Fetching repository metadata...", "YELLOW")
-        
         api_path = "datasets" if self.args.dataset else "models"
         url = f"{self.hf_endpoint}/api/{api_path}/{self.args.repo_id}"
         if self.args.revision != "main":
@@ -133,12 +138,12 @@ class HFDDownloader:
                 
             return metadata
         except requests.HTTPError as e:
-            color_print(f"Failed to fetch metadata: {e}", "RED")
+            console.error(f"获取元数据失败: {e}")
             sys.exit(1)
 
     def check_authentication(self, metadata: dict):
         if metadata.get("gated", False) and not (self.args.hf_username and self.args.hf_token):
-            color_print("This repository requires authentication. Please provide --hf_username and --hf_token.", "RED")
+            console.error("此仓库需要认证，请提供 --hf_username 和 --hf_token")
             sys.exit(1)
 
     def should_regenerate_filelist(self) -> bool:
@@ -148,7 +153,7 @@ class HFDDownloader:
             with open(self.command_file) as f:
                 previous_command = f.read()
             if current_command == previous_command and self.fileslist_file.exists():
-                color_print("Using cached file list.", "GREEN")
+                console.info("使用缓存的文件列表")
                 return False
         except FileNotFoundError:
             pass
@@ -162,7 +167,7 @@ class HFDDownloader:
         return " ".join(sys.argv[1:])
 
     def generate_filelist(self, metadata: dict):
-        color_print("Generating download file list...", "YELLOW")
+        console.info("生成下载文件列表...")
         
         include_regex = self.patterns_to_regex(self.args.include)
         exclude_regex = self.patterns_to_regex(self.args.exclude)

@@ -1,6 +1,7 @@
 import argparse
 import os
 import sys
+from . import console
 
 def make_normal_parser(des: str, add_help = True) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description = des, add_help = add_help)
@@ -40,7 +41,6 @@ def add_server_args(parser):
     parser.add_argument("--port", type = int, default = 8080, help = "API 服务器端口号 (默认: 8080)")
     parser.add_argument("--api_key", type = str, default = "", help = "API Key 认证 (为空则不校验)")
     parser.add_argument("--think", type = str, default = "false", help = "是否输出 <think> 标签 (true/false)")
-    parser.add_argument("--nt", type = str, default = None, help = "输入 <think> 归一化为特殊 token，以稳定 KV 缓存命中 (true/false)")
     parser.add_argument("--hide_input", action = 'store_true', help = "不显示请求信息")
     parser.add_argument("--dev_mode", action = 'store_true', help = "开发模式, 启用后能够获取对话列表并主动停止")
 
@@ -97,6 +97,8 @@ def make_normal_llm_model(args):
                 config["architectures"][0] == 'Glm4MoeForCausalLM'):
                 if (args.enable_thinking == ""):
                     args.enable_thinking = "true"
+            # MoE 模型自动配置 cache_history
+            # 注意: device/moe_device 的自动配置已移至 C++ 底层 (basellm::ApplyAutoDeviceMap)
             if (config["architectures"][0] == 'DeepseekV3ForCausalLM' or 
                 config["architectures"][0] == 'DeepseekV2ForCausalLM' or 
                 config["architectures"][0] == 'Qwen3MoeForCausalLM' or 
@@ -109,11 +111,6 @@ def make_normal_llm_model(args):
                 config["architectures"][0] == 'Qwen3NextForCausalLM'):
                 if (args.cache_history == ""):
                     args.cache_history = "true"
-                if ((not(args.device and args.device != ""))):
-                    args.device = "cuda"
-                    args.moe_device = "cpu"
-                    if (usenuma):
-                        args.moe_device = "numa"
             if ("quantization_config" in config):
                 quantization_config = config["quantization_config"]
                 try:
@@ -151,8 +148,8 @@ def make_normal_llm_model(args):
             args.atype = "float32"
     if (args.dtype == "auto"):
         args.dtype = "float16"
-    if (args.moe_device == ""):
-        args.moe_device = args.device
+    # 注意: moe_device 的默认值已移至 C++ 底层 (basellm::ApplyAutoDeviceMap)
+    # 只有用户显式指定时才传递给底层
     from ftllm import llm
     if (args.device and args.device != ""):
         try:
@@ -164,7 +161,7 @@ def make_normal_llm_model(args):
                 llm.set_device_map(args.device)
         except:
             llm.set_device_map(args.device)
-    if (args.moe_device and args.device != ""):
+    if (args.moe_device and args.moe_device != ""):
         try:
             import ast
             moe_device_map = ast.literal_eval(args.moe_device)
@@ -198,8 +195,12 @@ def make_normal_llm_model(args):
     if (args.chat_template != "" and os.path.exists(args.chat_template)):
         with open(args.chat_template, "r", encoding="utf-8") as file:
             args.chat_template = file.read()
-    model = llm.model(args.path, dtype = args.dtype, moe_dtype = args.moe_dtype, graph = graph, tokenizer_type = "auto", lora = args.lora, 
-                        dtype_config = args.dtype_config, ori_model_path = args.ori, chat_template = args.chat_template, tool_call_parser = args.tool_call_parser)
+    
+    # 使用 Spinner 显示模型加载进度
+    with console.spinner("加载模型", "模型加载完成"):
+        model = llm.model(args.path, dtype = args.dtype, moe_dtype = args.moe_dtype, graph = graph, tokenizer_type = "auto", lora = args.lora, 
+                            dtype_config = args.dtype_config, ori_model_path = args.ori, chat_template = args.chat_template, tool_call_parser = args.tool_call_parser)
+    
     if (args.enable_thinking.lower() in ["", "false", "0", "off"]):
         model.enable_thinking = False
     model.set_atype(args.atype)

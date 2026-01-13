@@ -1,6 +1,8 @@
 # Adapted from
 # https://github.com/lm-sys/FastChat/blob/v0.2.36/fastchat/protocol/openai_api_protocol.py
-from typing import Literal, Optional, List, Dict, Any, Union
+from __future__ import annotations
+
+from typing import Literal, Optional, List, Dict, Any, Union, TYPE_CHECKING
 
 import time
 import uuid
@@ -10,8 +12,11 @@ from pydantic import BaseModel, Field
 
 
 class ErrorResponse(BaseModel):
+    """OpenAI 标准错误响应格式"""
     object: str = "error"
     message: str
+    type: str = "invalid_request_error"
+    param: Optional[str] = None
     code: int
 
 
@@ -77,6 +82,31 @@ class ChatCompletionNamedToolChoiceParam(BaseModel):
     function: ChatCompletionNamedFunction
     type: Literal["function"] = "function"
 
+
+class StreamOptions(BaseModel):
+    """Options for streaming responses."""
+    include_usage: Optional[bool] = True  # Include usage info in final chunk
+    continuous_usage_stats: Optional[bool] = False  # Include usage in every chunk
+
+
+class JsonSchemaResponseFormat(BaseModel):
+    """JSON Schema for structured output."""
+    name: str
+    description: Optional[str] = None
+    schema_: Optional[Dict[str, Any]] = Field(default=None, alias="schema")
+    strict: Optional[bool] = False
+
+    class Config:
+        populate_by_name = True
+
+
+class ResponseFormat(BaseModel):
+    """Response format configuration for structured outputs."""
+    # type must be "text", "json_object", or "json_schema"
+    type: Literal["text", "json_object", "json_schema"] = "text"
+    json_schema: Optional[JsonSchemaResponseFormat] = None
+
+
 class ChatCompletionRequest(BaseModel):
     model: str
     messages: Optional[Union[
@@ -90,11 +120,18 @@ class ChatCompletionRequest(BaseModel):
     top_k: Optional[int] = -1
     n: Optional[int] = 1
     max_tokens: Optional[int] = None
+    max_completion_tokens: Optional[int] = None  # OpenAI recommended replacement for max_tokens
     min_tokens: Optional[int] = 0
+    logprobs: Optional[bool] = False  # Whether to return log probabilities
+    top_logprobs: Optional[int] = None  # Number of most likely tokens to return (0-20)
     stop: Optional[Union[str, List[str]]] = None
     stream: Optional[bool] = False
+    stream_options: Optional[StreamOptions] = None  # Options for streaming
+    response_format: Optional[ResponseFormat] = None  # Structured output format
     presence_penalty: Optional[float] = 0.0
     frequency_penalty: Optional[float] = 0.0
+    logit_bias: Optional[Dict[str, float]] = None  # Bias for specific tokens
+    seed: Optional[int] = None  # Random seed for reproducibility
     user: Optional[str] = None
     tools: Optional[list[ChatCompletionToolsParam]] = None
     tool_choice: Optional[Union[
@@ -103,17 +140,24 @@ class ChatCompletionRequest(BaseModel):
         Literal["required"],
         ChatCompletionNamedToolChoiceParam,
     ]] = "none"
+    parallel_tool_calls: Optional[bool] = True  # Allow parallel tool calls
 
 
 class ChatMessage(BaseModel):
+    """Chat message with optional tool_calls and reasoning support."""
     role: str
-    content: str
+    content: Optional[str] = None
+    tool_calls: Optional[List[ToolCall]] = None  # Tool calls made by assistant
+    tool_call_id: Optional[str] = None  # For tool role messages
+    name: Optional[str] = None  # Function name for tool messages
+    reasoning: Optional[str] = None  # Reasoning/thinking content
 
 
 class ChatCompletionResponseChoice(BaseModel):
     index: int
     message: ChatMessage
-    finish_reason: Optional[Literal["stop", "length"]] = None
+    logprobs: Optional[ChatCompletionLogProbs] = None  # Token logprobs
+    finish_reason: Optional[Literal["stop", "length", "tool_calls", "content_filter"]] = None
 
 
 class ChatCompletionResponse(BaseModel):
@@ -123,6 +167,7 @@ class ChatCompletionResponse(BaseModel):
     model: str
     choices: List[ChatCompletionResponseChoice]
     usage: UsageInfo
+    system_fingerprint: Optional[str] = None  # System fingerprint
 
 
 class DeltaFunctionCall(BaseModel):
@@ -162,11 +207,36 @@ class ExtractedToolCallInformation(BaseModel):
     content: Optional[str] = None
 
 
+# Logprobs for Chat Completion API
+class Logprob(BaseModel):
+    """Log probability for a single token."""
+    logprob: float
+    rank: Optional[int] = None
+    decoded_token: Optional[str] = None
+
+
+class ChatCompletionLogProb(BaseModel):
+    """Log probability information for a token in chat completion."""
+    token: str
+    logprob: float
+    bytes: Optional[List[int]] = None
+
+
+class ChatCompletionLogProbsContent(ChatCompletionLogProb):
+    """Log probability with top alternatives."""
+    top_logprobs: List[ChatCompletionLogProb] = Field(default_factory=list)
+
+
+class ChatCompletionLogProbs(BaseModel):
+    """Log probabilities for chat completion response."""
+    content: Optional[List[ChatCompletionLogProbsContent]] = None
+
 
 class ChatCompletionResponseStreamChoice(BaseModel):
     index: int
     delta: DeltaMessage
-    finish_reason: Optional[Literal["stop", "length"]] = None
+    logprobs: Optional[ChatCompletionLogProbs] = None  # Token logprobs
+    finish_reason: Optional[Literal["stop", "length", "tool_calls"]] = None  # Added tool_calls
 
 
 class ChatCompletionStreamResponse(BaseModel):
@@ -175,6 +245,7 @@ class ChatCompletionStreamResponse(BaseModel):
     created: int = Field(default_factory=lambda: int(time.time()))
     model: str
     choices: List[ChatCompletionResponseStreamChoice]
+    usage: Optional[UsageInfo] = None  # Usage info (when stream_options.include_usage=True)
 
 
 class TokenCheckRequestItem(BaseModel):

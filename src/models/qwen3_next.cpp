@@ -25,11 +25,12 @@ namespace fastllm {
         this->model_type = "qwen3_next";
         this->model_struct = "qwen3_next";
 
-        // 默认使用alpaca的提示词和instruction
-        this->pre_prompt = "Below is an instruction that describes a task. Write a response that appropriately completes the request.\n\n";
-        this->user_role = "### Instruction:\n";
-        this->bot_role = "\n\n### Response:";
-        this->history_sep = "</s>";
+        // 使用Qwen/ChatML格式的提示词模板
+        // <|im_start|>system\n{system}<|im_end|>\n<|im_start|>user\n{user}<|im_end|>\n<|im_start|>assistant\n{assistant}<|im_end|>
+        this->pre_prompt = "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n";
+        this->user_role = "<|im_start|>user\n";
+        this->bot_role = "<|im_end|>\n<|im_start|>assistant\n";
+        this->history_sep = "<|im_end|>\n";
 
         block_cnt = 32;
         rotary_dim = 128;
@@ -277,7 +278,7 @@ namespace fastllm {
             if (GetKVCacheInCPU()) {
                 pastKey.lockInCPU = true;
                 pastValue.lockInCPU = true;
-            } 
+            }
 
             if (weight.weight.find("model.layers." + std::to_string(i) + ".self_attn.o_proj.weight") != weight.weight.end()) {
                 std::string qWeightName = "model.layers." + std::to_string(i) + ".self_attn.q_proj.weight";
@@ -1334,7 +1335,7 @@ namespace fastllm {
     }
 
     void Qwen3NextModel::WarmUp() {
-        printf("Warmup...\n");
+        printf("Warmup...\n");        
         int oldTopk = this->num_experts_per_tok;
         this->num_experts_per_tok = this->num_experts;
 

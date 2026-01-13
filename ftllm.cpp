@@ -8,6 +8,7 @@
 
 #include <iostream>
 #include <string>
+#include <sstream>
 #include <vector>
 #include <algorithm>
 #include <cstdlib>
@@ -28,6 +29,7 @@ static constexpr const char* FTLLM_VERSION = "1.0";
 static constexpr int DEFAULT_SERVE_PORT = 8080;
 static constexpr const char* REPL_PROMPT = "ftllm> ";
 
+// ===== UI 边框和分隔线 =====
 static constexpr const char* UI_LINE = "════════════════════════════════════════════════════════════";
 static constexpr const char* UI_THIN_LINE = "────────────────────────────────────────────────────────────";
 static constexpr const char* UI_STATUS_OK = "[√]";
@@ -37,15 +39,87 @@ static constexpr const char* UI_STATUS_ERR = "[×]";
 static bool g_hasAnsi = false;
 
 namespace ui {
+// ===== ANSI 样式代码 =====
 static constexpr const char* RESET = "\x1b[0m";
 static constexpr const char* BOLD = "\x1b[1m";
 static constexpr const char* DIM = "\x1b[2m";
+static constexpr const char* UNDERLINE = "\x1b[4m";
+static constexpr const char* BLINK = "\x1b[5m";
+static constexpr const char* REVERSE = "\x1b[7m";
+
+// ===== 前景色 =====
+static constexpr const char* BLACK = "\x1b[30m";
+static constexpr const char* RED = "\x1b[31m";
 static constexpr const char* GREEN = "\x1b[32m";
 static constexpr const char* YELLOW = "\x1b[33m";
-static constexpr const char* RED = "\x1b[31m";
-static constexpr const char* CYAN = "\x1b[36m";
+static constexpr const char* BLUE = "\x1b[34m";
 static constexpr const char* MAGENTA = "\x1b[35m";
-static constexpr const char* WHITE = "\x1b[97m";
+static constexpr const char* CYAN = "\x1b[36m";
+static constexpr const char* WHITE = "\x1b[37m";
+
+// ===== 亮色前景 =====
+static constexpr const char* BRIGHT_BLACK = "\x1b[90m";   // 灰色
+static constexpr const char* BRIGHT_RED = "\x1b[91m";
+static constexpr const char* BRIGHT_GREEN = "\x1b[92m";
+static constexpr const char* BRIGHT_YELLOW = "\x1b[93m";
+static constexpr const char* BRIGHT_BLUE = "\x1b[94m";
+static constexpr const char* BRIGHT_MAGENTA = "\x1b[95m";
+static constexpr const char* BRIGHT_CYAN = "\x1b[96m";
+static constexpr const char* BRIGHT_WHITE = "\x1b[97m";
+
+// ===== 背景色 =====
+static constexpr const char* BG_BLACK = "\x1b[40m";
+static constexpr const char* BG_RED = "\x1b[41m";
+static constexpr const char* BG_GREEN = "\x1b[42m";
+static constexpr const char* BG_YELLOW = "\x1b[43m";
+static constexpr const char* BG_BLUE = "\x1b[44m";
+static constexpr const char* BG_MAGENTA = "\x1b[45m";
+static constexpr const char* BG_CYAN = "\x1b[46m";
+static constexpr const char* BG_WHITE = "\x1b[47m";
+
+// ===== 状态图标 (Unicode) =====
+static constexpr const char* ICON_CHECK = "\xe2\x9c\x93";      // ✓
+static constexpr const char* ICON_CROSS = "\xe2\x9c\x97";      // ✗
+static constexpr const char* ICON_ARROW = "\xe2\x86\x92";      // →
+static constexpr const char* ICON_BULLET = "\xe2\x97\x8f";     // ●
+static constexpr const char* ICON_CIRCLE = "\xe2\x97\x8b";     // ○
+static constexpr const char* ICON_PLAY = "\xe2\x96\xb6";       // ▶
+static constexpr const char* ICON_STOP = "\xe2\x96\xa0";       // ■
+static constexpr const char* ICON_STAR = "\xe2\x98\x85";       // ★
+static constexpr const char* ICON_INFO = "\xe2\x84\xb9";       // ℹ
+static constexpr const char* ICON_WARN = "\xe2\x9a\xa0";       // ⚠
+static constexpr const char* ICON_GEAR = "\xe2\x9a\x99";       // ⚙
+
+// ===== Box Drawing 边框字符 =====
+static constexpr const char* BOX_H = "\xe2\x94\x80";           // ─
+static constexpr const char* BOX_V = "\xe2\x94\x82";           // │
+static constexpr const char* BOX_TL = "\xe2\x94\x8c";          // ┌
+static constexpr const char* BOX_TR = "\xe2\x94\x90";          // ┐
+static constexpr const char* BOX_BL = "\xe2\x94\x94";          // └
+static constexpr const char* BOX_BR = "\xe2\x94\x98";          // ┘
+static constexpr const char* BOX_T = "\xe2\x94\xac";           // ┬
+static constexpr const char* BOX_B = "\xe2\x94\xb4";           // ┴
+static constexpr const char* BOX_L = "\xe2\x94\x9c";           // ├
+static constexpr const char* BOX_R = "\xe2\x94\xa4";           // ┤
+static constexpr const char* BOX_X = "\xe2\x94\xbc";           // ┼
+
+// 双线边框
+static constexpr const char* BOX2_H = "\xe2\x95\x90";          // ═
+static constexpr const char* BOX2_V = "\xe2\x95\x91";          // ║
+static constexpr const char* BOX2_TL = "\xe2\x95\x94";         // ╔
+static constexpr const char* BOX2_TR = "\xe2\x95\x97";         // ╗
+static constexpr const char* BOX2_BL = "\xe2\x95\x9a";         // ╚
+static constexpr const char* BOX2_BR = "\xe2\x95\x9d";         // ╝
+
+// ===== 光标控制 =====
+static constexpr const char* CURSOR_HIDE = "\x1b[?25l";
+static constexpr const char* CURSOR_SHOW = "\x1b[?25h";
+static constexpr const char* CLEAR_LINE = "\x1b[2K\r";
+static constexpr const char* CLEAR_SCREEN = "\x1b[2J\x1b[H";
+static constexpr const char* CURSOR_UP = "\x1b[A";
+static constexpr const char* CURSOR_DOWN = "\x1b[B";
+static constexpr const char* CURSOR_SAVE = "\x1b[s";
+static constexpr const char* CURSOR_RESTORE = "\x1b[u";
 
 // 便捷格式化输出：自动处理 ANSI 开关
 inline std::ostream& ansi(std::ostream& os, const char* code) {
@@ -107,22 +181,196 @@ static void printKV(const std::string& key, const std::string& value) {
     ui::reset(std::cout) << ": " << value << std::endl;
 }
 
+// ===== 进度显示 (简易 Spinner 动画帧) =====
+static constexpr const char* SPINNER_FRAMES[] = {
+    "\xe2\xa0\x8b", // ⠋
+    "\xe2\xa0\x99", // ⠙
+    "\xe2\xa0\xb9", // ⠹
+    "\xe2\xa0\xb8", // ⠸
+    "\xe2\xa0\xbc", // ⠼
+    "\xe2\xa0\xb4", // ⠴
+    "\xe2\xa0\xa6", // ⠦
+    "\xe2\xa0\xa7", // ⠧
+    "\xe2\xa0\x87", // ⠇
+    "\xe2\xa0\x8f"  // ⠏
+};
+static constexpr int SPINNER_FRAME_COUNT = 10;
+
+// 打印带图标的状态消息
+static void printStatusIcon(const char* icon, const char* color, const std::string& msg) {
+    ui::ansi(std::cout, color) << icon << " ";
+    ui::reset(std::cout) << msg << std::endl;
+}
+
+// 简便函数：各种状态图标消息
+static inline void printSuccess(const std::string& msg) {
+    printStatusIcon(ui::ICON_CHECK, ui::GREEN, msg);
+}
+static inline void printError(const std::string& msg) {
+    printStatusIcon(ui::ICON_CROSS, ui::RED, msg);
+}
+static inline void printInfo(const std::string& msg) {
+    printStatusIcon(ui::ICON_INFO, ui::CYAN, msg);
+}
+static inline void printWarning(const std::string& msg) {
+    printStatusIcon(ui::ICON_WARN, ui::YELLOW, msg);
+}
+static inline void printArrow(const std::string& msg) {
+    printStatusIcon(ui::ICON_ARROW, ui::BRIGHT_BLUE, msg);
+}
+static inline void printBullet(const std::string& msg) {
+    printStatusIcon(ui::ICON_BULLET, ui::DIM, msg);
+}
+
+// 计算字符串的显示宽度（正确处理中文和 ANSI 转义序列）
+static int getDisplayWidth(const std::string& text) {
+    int width = 0;
+    bool inEscape = false;
+    const unsigned char* p = reinterpret_cast<const unsigned char*>(text.c_str());
+    while (*p) {
+        if (inEscape) {
+            // ANSI 转义序列以 'm' 结束
+            if (*p == 'm') inEscape = false;
+            ++p;
+        } else if (*p == '\x1b') {
+            // ANSI 转义序列开始
+            inEscape = true;
+            ++p;
+        } else if (*p >= 0x80) {
+            // UTF-8 多字节字符
+            if ((*p & 0xE0) == 0xC0) {
+                // 2字节 UTF-8 (大部分拉丁扩展，宽度1)
+                width += 1;
+                p += 2;
+            } else if ((*p & 0xF0) == 0xE0) {
+                // 3字节 UTF-8 (中日韩字符，宽度2)
+                width += 2;
+                p += 3;
+            } else if ((*p & 0xF8) == 0xF0) {
+                // 4字节 UTF-8 (emoji 等，宽度2)
+                width += 2;
+                p += 4;
+            } else {
+                // 无效 UTF-8，跳过
+                ++p;
+            }
+        } else {
+            // ASCII 字符
+            width += 1;
+            ++p;
+        }
+    }
+    return width;
+}
+
+// 绘制带边框的框（Box Drawing）
+static void printBoxTop(int width = 60) {
+    std::cout << ui::BOX_TL;
+    for (int i = 0; i < width - 2; ++i) std::cout << ui::BOX_H;
+    std::cout << ui::BOX_TR << std::endl;
+}
+static void printBoxBottom(int width = 60) {
+    std::cout << ui::BOX_BL;
+    for (int i = 0; i < width - 2; ++i) std::cout << ui::BOX_H;
+    std::cout << ui::BOX_BR << std::endl;
+}
+static void printBoxLine(const std::string& text, int width = 60) {
+    std::cout << ui::BOX_V << " " << text;
+    int displayWidth = getDisplayWidth(text);
+    int pad = width - 4 - displayWidth;
+    for (int i = 0; i < pad; ++i) std::cout << " ";
+    std::cout << " " << ui::BOX_V << std::endl;
+}
+static void printBoxSeparator(int width = 60) {
+    std::cout << ui::BOX_L;
+    for (int i = 0; i < width - 2; ++i) std::cout << ui::BOX_H;
+    std::cout << ui::BOX_R << std::endl;
+}
+
+// 双线边框版本
+static void printBox2Top(int width = 60) {
+    std::cout << ui::BOX2_TL;
+    for (int i = 0; i < width - 2; ++i) std::cout << ui::BOX2_H;
+    std::cout << ui::BOX2_TR << std::endl;
+}
+static void printBox2Bottom(int width = 60) {
+    std::cout << ui::BOX2_BL;
+    for (int i = 0; i < width - 2; ++i) std::cout << ui::BOX2_H;
+    std::cout << ui::BOX2_BR << std::endl;
+}
+
+static void printBox2Line(const std::string& text, int width = 60) {
+    std::cout << ui::BOX2_V << " " << text;
+    int displayWidth = getDisplayWidth(text);
+    int pad = width - 4 - displayWidth;
+    for (int i = 0; i < pad; ++i) std::cout << " ";
+    std::cout << " " << ui::BOX2_V << std::endl;
+}
+
+// 进度条
+static void printProgressBar(double progress, int width = 40, const char* label = nullptr) {
+    if (label) {
+        ui::ansi(std::cout, ui::DIM) << label << " ";
+        ui::reset(std::cout);
+    }
+    int filled = static_cast<int>(progress * width);
+    std::cout << "[";
+    ui::ansi(std::cout, ui::GREEN);
+    for (int i = 0; i < filled; ++i) std::cout << "█";
+    ui::reset(std::cout);
+    ui::ansi(std::cout, ui::DIM);
+    for (int i = filled; i < width; ++i) std::cout << "░";
+    ui::reset(std::cout);
+    std::cout << "] " << static_cast<int>(progress * 100) << "%" << std::endl;
+}
+
+// 单行进度更新 (覆盖当前行)
+static void updateProgressInline(double progress, int width = 40, const char* label = nullptr) {
+    if (g_hasAnsi) std::cout << ui::CLEAR_LINE;
+    if (label) {
+        ui::ansi(std::cout, ui::DIM) << label << " ";
+        ui::reset(std::cout);
+    }
+    int filled = static_cast<int>(progress * width);
+    std::cout << "[";
+    ui::ansi(std::cout, ui::GREEN);
+    for (int i = 0; i < filled; ++i) std::cout << "█";
+    ui::reset(std::cout);
+    ui::ansi(std::cout, ui::DIM);
+    for (int i = filled; i < width; ++i) std::cout << "░";
+    ui::reset(std::cout);
+    std::cout << "] " << static_cast<int>(progress * 100) << "%" << std::flush;
+}
+
+// 标题区域显示
+static void printSectionTitle(const std::string& title) {
+    std::cout << std::endl;
+    ui::ansi(std::cout, ui::BOLD);
+    ui::ansi(std::cout, ui::CYAN) << ui::ICON_PLAY << " " << title;
+    ui::reset(std::cout) << std::endl;
+    std::cout << UI_THIN_LINE << std::endl;
+}
+
 static void printLaunchConfig(const std::string& program, const std::string& backend, const std::string& modelPath, const std::vector<std::string>& /*args*/, bool background) {
-    // 紧凑格式：一行显示核心信息
-    std::cout << UI_LINE << std::endl;
-    ui::ansi(std::cout, ui::BOLD) << "  启动";
-    ui::reset(std::cout) << ": ";
-    ui::ansi(std::cout, ui::CYAN) << program;
-    ui::reset(std::cout) << " (" << backend;
-    if (background) std::cout << ", 后台";
-    std::cout << ")" << std::endl;
+    // 使用精美边框显示启动配置
+    printBox2Top(60);
+    
+    std::ostringstream oss;
+    ui::ansi(oss, ui::BOLD);
+    ui::ansi(oss, ui::CYAN) << ui::ICON_PLAY << " 启动";
+    ui::reset(oss);
+    oss << ": " << program << " (" << backend;
+    if (background) oss << ", 后台";
+    oss << ")";
+    printBox2Line(oss.str(), 60);
     
     if (!modelPath.empty()) {
-        std::cout << "  ";
-        ui::ansi(std::cout, ui::DIM) << "模型";
-        ui::reset(std::cout) << ": " << modelPath << std::endl;
+        std::ostringstream mss;
+        mss << ui::ICON_GEAR << " 模型: " << modelPath;
+        printBox2Line(mss.str(), 60);
     }
-    std::cout << UI_LINE << std::endl;
+    
+    printBox2Bottom(60);
 }
 
 static void printChildOutputHeader(const std::string& program) {
@@ -135,11 +383,11 @@ static void printChildOutputFooter(int exitCode, bool background) {
     std::cout << std::endl;
     std::cout << UI_THIN_LINE << std::endl;
     if (background) {
-        printStatusOk("后台服务已启动", "输入 stop 可停止");
+        printSuccess("后台服务已启动 (输入 stop 可停止)");
     } else if (exitCode == 0) {
-        printStatusOk("执行完成");
+        printSuccess("执行完成");
     } else {
-        printStatusWarn("进程已退出");
+        printWarning("进程已退出 (code: " + std::to_string(exitCode) + ")");
     }
 }
 
@@ -198,6 +446,88 @@ static std::string buildWindowsCommandLine(const std::string& program, const std
 static HANDLE g_activeChildProcess = nullptr;
 static HANDLE g_activeChildJob = nullptr;
 static bool g_consoleHandlerInstalled = false;
+
+// ============================================================================
+// 进程优先级与功耗管理
+// ============================================================================
+
+// Power Throttling 结构体（Windows 10 1709+ / SDK 可能未包含）
+struct FTLLM_PROCESS_POWER_THROTTLING_STATE {
+    DWORD Version;
+    DWORD ControlMask;
+    DWORD StateMask;
+};
+static const DWORD FTLLM_POWER_THROTTLING_VERSION = 1;
+static const DWORD FTLLM_POWER_THROTTLING_EXECUTION_SPEED = 0x1;
+static const int FTLLM_ProcessPowerThrottling = 4; // PROCESS_INFORMATION_CLASS 枚举值
+
+// SetProcessInformation 函数指针类型（动态加载）
+typedef BOOL (WINAPI *PFN_SetProcessInformation)(
+    HANDLE hProcess,
+    int ProcessInformationClass,
+    LPVOID ProcessInformation,
+    DWORD ProcessInformationSize
+);
+
+/**
+ * 禁用指定进程的 Power Throttling（后台/最小化节能限频）。
+ * 使用动态加载以兼容旧版 Windows。
+ */
+static void disablePowerThrottling(HANDLE hProcess) {
+    static PFN_SetProcessInformation pfnSetProcessInformation = nullptr;
+    static bool pfnChecked = false;
+
+    if (!pfnChecked) {
+        pfnChecked = true;
+        HMODULE hKernel32 = GetModuleHandleW(L"kernel32.dll");
+        if (hKernel32) {
+            pfnSetProcessInformation = reinterpret_cast<PFN_SetProcessInformation>(
+                GetProcAddress(hKernel32, "SetProcessInformation")
+            );
+        }
+    }
+
+    if (pfnSetProcessInformation) {
+        FTLLM_PROCESS_POWER_THROTTLING_STATE throttleState = {};
+        throttleState.Version = FTLLM_POWER_THROTTLING_VERSION;
+        throttleState.ControlMask = FTLLM_POWER_THROTTLING_EXECUTION_SPEED;
+        throttleState.StateMask = 0; // 0 = 禁用节流
+        pfnSetProcessInformation(hProcess, FTLLM_ProcessPowerThrottling,
+                                 &throttleState, sizeof(throttleState));
+    }
+}
+
+/**
+ * 提升当前进程优先级并禁用 Power Throttling（后台/最小化节能）。
+ * 效果：即使窗口最小化，推理性能也不会因系统节能策略而下降。
+ */
+static void boostProcessPriority() {
+    // 1) 设置进程为高优先级（HIGH_PRIORITY_CLASS）
+    //    - 比默认 NORMAL 高，但低于 REALTIME，不影响系统稳定性
+    const HANDLE hProcess = GetCurrentProcess();
+    if (!SetPriorityClass(hProcess, HIGH_PRIORITY_CLASS)) {
+        // 降级：尝试 ABOVE_NORMAL
+        SetPriorityClass(hProcess, ABOVE_NORMAL_PRIORITY_CLASS);
+    }
+
+    // 2) 禁用 Power Throttling（Windows 10 1709+ / Windows 11）
+    disablePowerThrottling(hProcess);
+}
+
+/**
+ * 提升子进程优先级。在 CreateProcessW 成功后调用。
+ */
+static void boostChildProcessPriority(HANDLE hChildProcess) {
+    if (hChildProcess == nullptr || hChildProcess == INVALID_HANDLE_VALUE) return;
+
+    // 设置子进程为高优先级
+    if (!SetPriorityClass(hChildProcess, HIGH_PRIORITY_CLASS)) {
+        SetPriorityClass(hChildProcess, ABOVE_NORMAL_PRIORITY_CLASS);
+    }
+
+    // 禁用 Power Throttling
+    disablePowerThrottling(hChildProcess);
+}
 static bool g_exitHandlerInstalled = false;
 
 static constexpr DWORD CHILD_PROCESS_KILL_EXIT_CODE = 1;
@@ -442,6 +772,9 @@ static int runChildProcessWindows(const std::string& program, const std::vector<
         return 1;
     }
 
+    // 提升子进程优先级，防止最小化时性能下降
+    boostChildProcessPriority(pi.hProcess);
+
     HANDLE job = createKillOnCloseJobObject();
     if (job != nullptr) {
         // 将子进程加入 job：确保 ftllm 退出时子进程被系统自动杀掉
@@ -505,6 +838,8 @@ void initWindowsConsole() {
             const DWORD desired = mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING;
             if (SetConsoleMode(hOut, desired)) {
                 g_hasAnsi = true;
+                // 设置环境变量，供子进程检测 ANSI 支持
+                _putenv_s("FTLLM_ANSI", "1");
             }
         }
     }
@@ -570,6 +905,205 @@ static const CommandDef ALL_COMMANDS[] = {
     {"export",   {nullptr, nullptr, nullptr},     nullptr,          "导出模型",            Backend::Python},
 };
 static constexpr size_t NUM_COMMANDS = sizeof(ALL_COMMANDS) / sizeof(ALL_COMMANDS[0]);
+
+// ============================================================================
+// 统一帮助系统 - 参数/示例定义
+// ============================================================================
+
+// 参数定义
+struct ParamDef {
+    const char* param;      // 参数名 (如 "-p, --path <路径>")
+    const char* desc;       // 描述
+};
+
+// 参数组定义
+struct ParamGroup {
+    const char* title;                      // 组标题
+    std::initializer_list<ParamDef> params; // 参数列表
+};
+
+// 示例定义
+struct ExampleDef {
+    const char* cmd;        // 命令
+    const char* model;      // 模型
+    const char* args;       // 参数 (可为 nullptr)
+};
+
+// ===== 所有参数组定义 =====
+static const ParamGroup PARAM_GROUPS[] = {
+    {"基础参数", {
+        {"-p, --path <路径>", "模型路径"},
+        {"--device <设备>", "cuda, cpu, numa"},
+        {"--dtype <类型>", "float16, int8, int4, int4g"},
+        {"-t, --threads <数量>", "CPU 线程数"},
+        {"--model_name <名称>", "模型显示名称 (用于 API 返回)"},
+    }},
+    {"服务器参数 (serve/webui)", {
+        {"--host <地址>", "监听地址 (默认: 127.0.0.1)"},
+        {"--port <端口>", "监听端口 (默认: 8080)"},
+        {"--api_key <密钥>", "API 密钥认证 (Bearer Token)"},
+        {"--embedding_path <路径>", "Embedding 模型路径 (/v1/embeddings)"},
+        {"--dev_mode", "开发模式 (启用调试接口)"},
+    }},
+    {"Batch / 并发参数", {
+        {"--batch <数量>", "批处理大小"},
+        {"--max_batch <数量>", "最大批处理数量"},
+        {"--max_token <数量>", "最大生成 Token 数 (webui)"},
+        {"--chunk_size <数量>", "Chunked Prefill 分块大小 (默认: 自动)"},
+    }},
+    {"CUDA / 加速参数", {
+        {"--cuda_embedding", "在 CUDA 上运行 Embedding 层"},
+        {"--cuda_shared_expert", "CUDA 共享专家优化 (MOE)"},
+        {"--cuda_se", "--cuda_shared_expert 简写"},
+        {"--enable_amx, --amx", "启用 Intel AMX 加速"},
+    }},
+    {"MOE (混合专家) 参数", {
+        {"--moe_device <设备>", "MOE 专家层设备 (cuda, cpu)"},
+        {"--moe_dtype <类型>", "MOE 专家层数据类型"},
+        {"--moe_experts <数量>", "启用的 MOE 专家数量"},
+    }},
+    {"缓存参数", {
+        {"--kv_cache_limit <大小>", "KV 缓存限制 (如 8G, 4096M)"},
+        {"--cache_history", "启用历史缓存"},
+        {"--cache_fast", "启用快速缓存模式"},
+        {"--cache_dir <路径>", "缓存目录路径"},
+    }},
+    {"LoRA 参数 (自动切换 Python)", {
+        {"--lora <路径>", "LoRA 适配器路径"},
+        {"--custom <配置>", "自定义模型配置"},
+        {"--dtype_config <配置>", "数据类型配置文件"},
+        {"--ori", "使用原始权重 (禁用量化)"},
+    }},
+    {"模板 / 工具调用", {
+        {"--chat_template <模板>", "对话模板 (覆盖自动检测)"},
+        {"--tool_call_parser <类型>", "工具调用解析器类型"},
+        {"--enable_thinking", "启用思考模式 (<think>标签)"},
+        {"--think", "Python 后端思考模式"},
+        {"--hide_input", "隐藏输入内容 (隐私保护)"},
+    }},
+    {"开发 / 调试", {
+        {"-v, --version", "显示版本信息"},
+        {"-h, --help", "显示帮助信息"},
+    }},
+};
+
+// ===== 示例定义 =====
+static const ExampleDef EXAMPLES[] = {
+    {"run", "D:\\Models\\Qwen2.5-7B", "--device cuda"},
+    {"run", "D:\\Models\\Qwen2.5-7B", "--lora ./lora"},
+    {"serve", "D:\\Models\\Qwen2.5-7B", "--port 8080 --batch 4"},
+    {"serve", "D:\\Models\\Qwen2.5-7B", "--api_key sk-xxx --dev_mode"},
+    {"webui", "D:\\Models\\Qwen2.5-7B", "--port 1616"},
+    {"download", "Qwen/Qwen2.5-7B-Instruct", nullptr},
+};
+
+// ===== 模型格式定义 =====
+static const ParamDef MODEL_FORMATS[] = {
+    {".flm", "FastLLM 原生格式"},
+    {".gguf", "GGUF 格式"},
+    {"HuggingFace 目录", "本地目录 (含 config.json)"},
+    {"HuggingFace Repo ID", "如 Qwen/Qwen2.5-7B (自动下载, 需 -py)"},
+};
+
+// ============================================================================
+// 统一帮助输出函数
+// ============================================================================
+
+// 打印命令列表（带颜色）
+static void printCommandList(Backend filter, const char* title) {
+    ui::ansi(std::cout, ui::BOLD);
+    ui::ansi(std::cout, ui::CYAN) << title;
+    ui::reset(std::cout) << std::endl;
+    
+    for (const auto& cmd : ALL_COMMANDS) {
+        if (cmd.defaultBackend != filter) continue;
+        
+        // 格式化命令名和别名
+        std::string names = cmd.name;
+        for (int i = 0; cmd.aliases[i]; i++) {
+            names += ", ";
+            names += cmd.aliases[i];
+        }
+        
+        // 输出：左对齐命令名（30字符），右边描述
+        std::cout << "  ";
+        ui::ansi(std::cout, ui::GREEN) << names;
+        ui::reset(std::cout);
+        // 填充空格到固定宽度
+        for (size_t i = names.size(); i < 28; i++) std::cout << ' ';
+        std::cout << cmd.description << std::endl;
+    }
+    std::cout << std::endl;
+}
+
+// 打印参数帮助行
+static void printParamLine(const char* param, const char* desc) {
+    std::cout << "  ";
+    ui::ansi(std::cout, ui::RED) << param;
+    ui::reset(std::cout);
+    for (size_t i = strlen(param); i < 28; i++) std::cout << ' ';
+    std::cout << desc << std::endl;
+}
+
+// 打印示例行
+static void printExampleLine(const char* cmd, const char* model, const char* args = nullptr) {
+    std::cout << "  ";
+    ui::ansi(std::cout, ui::GREEN) << cmd;
+    ui::reset(std::cout) << " ";
+    ui::ansi(std::cout, ui::YELLOW) << model;
+    ui::reset(std::cout);
+    if (args) {
+        std::cout << " ";
+        ui::ansi(std::cout, ui::RED) << args;
+        ui::reset(std::cout);
+    }
+    std::cout << std::endl;
+}
+
+// 打印组标题
+static void printGroupTitle(const char* title) {
+    ui::ansi(std::cout, ui::BOLD);
+    ui::ansi(std::cout, ui::CYAN) << title;
+    ui::reset(std::cout) << std::endl;
+}
+
+// 打印单个参数组
+static void printParamGroup(const ParamGroup& group) {
+    printGroupTitle(group.title);
+    for (const auto& param : group.params) {
+        printParamLine(param.param, param.desc);
+    }
+    std::cout << std::endl;
+}
+
+// 打印所有参数组
+static void printAllParamGroups() {
+    for (const auto& group : PARAM_GROUPS) {
+        printParamGroup(group);
+    }
+}
+
+// 打印模型格式
+static void printModelFormats() {
+    printGroupTitle("模型格式 (自动识别)");
+    for (const auto& fmt : MODEL_FORMATS) {
+        std::cout << "  ";
+        ui::ansi(std::cout, ui::YELLOW) << fmt.param;
+        ui::reset(std::cout);
+        for (size_t i = strlen(fmt.param); i < 28; i++) std::cout << ' ';
+        std::cout << fmt.desc << std::endl;
+    }
+    std::cout << std::endl;
+}
+
+// 打印所有示例
+static void printAllExamples() {
+    printGroupTitle("示例");
+    for (const auto& ex : EXAMPLES) {
+        printExampleLine(ex.cmd, ex.model, ex.args);
+    }
+    std::cout << std::endl;
+}
 
 // 查找命令定义
 inline const CommandDef* findCommandDef(const std::string& cmd);
@@ -732,7 +1266,7 @@ static int executeNativeServeWithArgs(const std::string& modelPath, const std::v
     argv2.reserve(storage.size());
     for (auto& s : storage) argv2.push_back(const_cast<char*>(s.c_str()));
 
-    // 复用既有逻辑（含 Qwen3 --nt 自动透传、参数补 -p 等）
+    // 复用既有逻辑（参数补 -p 等）
     return executeNativeProgram("apiserver.exe", static_cast<int>(argv2.size()), argv2.data(), 2);
 }
 
@@ -952,7 +1486,7 @@ static void keepConsoleOpenUntilClose() {
                 std::cout << "  " << ui::YELLOW << "<模型>" << ui::RESET << " [选项]           → 选择操作(run/serve/export)" << std::endl;
                 std::cout << "  " << ui::GREEN << "<命令>" << ui::RESET << " " << ui::YELLOW << "<模型>" << ui::RESET << " [选项]   → 直接执行" << std::endl;
             } else {
-                std::cout << "  <模型> [选项]           → 选择操作(run/serve/export)" << std::endl;
+                std::cout << "  <模型> [选项]          → 选择操作(run/serve/export)" << std::endl;
                 std::cout << "  <命令> <模型> [选项]   → 直接执行" << std::endl;
             }
             
@@ -965,245 +1499,35 @@ static void keepConsoleOpenUntilClose() {
         }
         // 详细帮助 (help)
         if (lower == "help") {
-            // 命令 (C++ 原生程序)
-            if (g_hasAnsi) std::cout << ui::BOLD << ui::CYAN;
-            std::cout << "命令 (C++ 原生程序)";
-            if (g_hasAnsi) std::cout << ui::RESET;
-            std::cout << std::endl;
-            if (g_hasAnsi) {
-                std::cout << "  " << ui::GREEN << "serve" << ui::RESET << ", " << ui::GREEN << "server" << ui::RESET << "                 启动 OpenAI API 服务器 (apiserver)" << std::endl;
-                std::cout << "  " << ui::GREEN << "webui" << ui::RESET << "                         启动 Web UI (webui)" << std::endl;
-                std::cout << "  " << ui::GREEN << "bench" << ui::RESET << ", " << ui::GREEN << "benchmark" << ui::RESET << "              性能测试 (benchmark)" << std::endl;
-                std::cout << "  " << ui::GREEN << "quant" << ui::RESET << ", " << ui::GREEN << "quantize" << ui::RESET << "               模型量化 (quant)" << std::endl;
-            } else {
-                std::cout << "  serve, server                 启动 OpenAI API 服务器 (apiserver)" << std::endl;
-                std::cout << "  webui                         启动 Web UI (webui)" << std::endl;
-                std::cout << "  bench, benchmark              性能测试 (benchmark)" << std::endl;
-                std::cout << "  quant, quantize               模型量化 (quant)" << std::endl;
-            }
-            std::cout << std::endl;
-            
-            // 命令 (Python 后端)
-            if (g_hasAnsi) std::cout << ui::BOLD << ui::CYAN;
-            std::cout << "命令 (Python 后端)";
-            if (g_hasAnsi) std::cout << ui::RESET;
-            std::cout << std::endl;
-            if (g_hasAnsi) {
-                std::cout << "  " << ui::GREEN << "run" << ui::RESET << ", " << ui::GREEN << "chat" << ui::RESET << "                     交互式聊天" << std::endl;
-                std::cout << "  " << ui::GREEN << "download" << ui::RESET << " <model>              下载 HuggingFace 模型" << std::endl;
-                std::cout << "  " << ui::GREEN << "ui" << ui::RESET << "                            启动图形界面" << std::endl;
-                std::cout << "  " << ui::GREEN << "config" << ui::RESET << " [file]                 生成配置文件模板" << std::endl;
-                std::cout << "  " << ui::GREEN << "export" << ui::RESET << " -o <path>              导出模型" << std::endl;
-            } else {
-                std::cout << "  run, chat                     交互式聊天" << std::endl;
-                std::cout << "  download <model>              下载 HuggingFace 模型" << std::endl;
-                std::cout << "  ui                            启动图形界面" << std::endl;
-                std::cout << "  config [file]                 生成配置文件模板" << std::endl;
-                std::cout << "  export -o <path>              导出模型" << std::endl;
-            }
-            std::cout << std::endl;
+            // 使用统一帮助系统
+            printCommandList(Backend::Native, "命令 (C++ 原生程序):");
+            printCommandList(Backend::Python, "命令 (Python 后端):");
             
             // 模式切换
-            if (g_hasAnsi) std::cout << ui::BOLD << ui::CYAN;
-            std::cout << "模式切换";
-            if (g_hasAnsi) std::cout << ui::RESET;
-            std::cout << std::endl;
-            if (g_hasAnsi) {
-                std::cout << "  " << ui::RED << "-py" << ui::RESET << "                           使用 Python 后端 (支持 LoRA 动态加载等)" << std::endl;
-            } else {
-                std::cout << "  -py                           使用 Python 后端 (支持 LoRA 动态加载等)" << std::endl;
-            }
+            printGroupTitle("模式切换");
+            printParamLine("-py", "使用 Python 后端 (支持 LoRA 动态加载等)");
             std::cout << "  (自动)                        检测到 --lora / lora/ 目录时自动切换" << std::endl;
             std::cout << std::endl;
             
             // 模型格式
-            if (g_hasAnsi) std::cout << ui::BOLD << ui::CYAN;
-            std::cout << "模型格式 (自动识别)";
-            if (g_hasAnsi) std::cout << ui::RESET;
-            std::cout << std::endl;
-            if (g_hasAnsi) {
-                std::cout << "  " << ui::YELLOW << ".flm" << ui::RESET << "                          FastLLM 原生格式" << std::endl;
-                std::cout << "  " << ui::YELLOW << ".gguf" << ui::RESET << "                         GGUF 格式" << std::endl;
-                std::cout << "  " << ui::YELLOW << "HuggingFace 目录" << ui::RESET << "              本地目录 (含 config.json)" << std::endl;
-                std::cout << "  " << ui::YELLOW << "HuggingFace Repo ID" << ui::RESET << "           如 Qwen/Qwen2.5-7B (自动下载, 需 -py)" << std::endl;
-            } else {
-                std::cout << "  .flm                          FastLLM 原生格式" << std::endl;
-                std::cout << "  .gguf                         GGUF 格式" << std::endl;
-                std::cout << "  HuggingFace 目录              本地目录 (含 config.json)" << std::endl;
-                std::cout << "  HuggingFace Repo ID           如 Qwen/Qwen2.5-7B (自动下载, 需 -py)" << std::endl;
-            }
-            std::cout << std::endl;
+            printModelFormats();
             
-            // 基础参数
-            if (g_hasAnsi) std::cout << ui::BOLD << ui::CYAN;
-            std::cout << "基础参数";
-            if (g_hasAnsi) std::cout << ui::RESET;
-            std::cout << std::endl;
-            if (g_hasAnsi) {
-                std::cout << "  " << ui::RED << "-p" << ui::RESET << ", " << ui::RED << "--path" << ui::RESET << " <路径>             模型路径" << std::endl;
-                std::cout << "  " << ui::RED << "--device" << ui::RESET << " <设备>               cuda, cpu, numa" << std::endl;
-                std::cout << "  " << ui::RED << "--dtype" << ui::RESET << " <类型>                float16, int8, int4, int4g" << std::endl;
-                std::cout << "  " << ui::RED << "-t" << ui::RESET << ", " << ui::RED << "--threads" << ui::RESET << " <数量>          CPU 线程数" << std::endl;
-                std::cout << "  " << ui::RED << "--model_name" << ui::RESET << " <名称>            模型显示名称 (用于 API 返回)" << std::endl;
-            } else {
-                std::cout << "  -p, --path <路径>             模型路径" << std::endl;
-                std::cout << "  --device <设备>               cuda, cpu, numa" << std::endl;
-                std::cout << "  --dtype <类型>                float16, int8, int4, int4g" << std::endl;
-                std::cout << "  -t, --threads <数量>          CPU 线程数" << std::endl;
-                std::cout << "  --model_name <名称>           模型显示名称 (用于 API 返回)" << std::endl;
-            }
-            std::cout << std::endl;
-            
-            // 服务器参数
-            if (g_hasAnsi) std::cout << ui::BOLD << ui::CYAN;
-            std::cout << "服务器参数 (serve/webui)";
-            if (g_hasAnsi) std::cout << ui::RESET;
-            std::cout << std::endl;
-            if (g_hasAnsi) {
-                std::cout << "  " << ui::RED << "--host" << ui::RESET << " <地址>                 监听地址 (默认: 127.0.0.1)" << std::endl;
-                std::cout << "  " << ui::RED << "--port" << ui::RESET << " <端口>                 监听端口 (默认: 8080)" << std::endl;
-                std::cout << "  " << ui::RED << "--api_key" << ui::RESET << " <密钥>              API 密钥认证" << std::endl;
-                std::cout << "  " << ui::RED << "--nt" << ui::RESET << " <true|false>             输入<think>归一化 (稳定 KV 缓存)" << std::endl;
-            } else {
-                std::cout << "  --host <地址>                 监听地址 (默认: 127.0.0.1)" << std::endl;
-                std::cout << "  --port <端口>                 监听端口 (默认: 8080)" << std::endl;
-                std::cout << "  --api_key <密钥>              API 密钥认证" << std::endl;
-                std::cout << "  --nt <true|false>             输入<think>归一化 (稳定 KV 缓存)" << std::endl;
-            }
-            std::cout << std::endl;
-            
-            // Batch 参数
-            if (g_hasAnsi) std::cout << ui::BOLD << ui::CYAN;
-            std::cout << "Batch / 并发参数";
-            if (g_hasAnsi) std::cout << ui::RESET;
-            std::cout << std::endl;
-            if (g_hasAnsi) {
-                std::cout << "  " << ui::RED << "--batch" << ui::RESET << " <数量>                批处理大小" << std::endl;
-                std::cout << "  " << ui::RED << "--max_batch" << ui::RESET << " <数量>            最大批处理数量" << std::endl;
-                std::cout << "  " << ui::RED << "--max_token" << ui::RESET << " <数量>            最大生成 Token 数 (webui)" << std::endl;
-            } else {
-                std::cout << "  --batch <数量>                批处理大小" << std::endl;
-                std::cout << "  --max_batch <数量>            最大批处理数量" << std::endl;
-                std::cout << "  --max_token <数量>            最大生成 Token 数 (webui)" << std::endl;
-            }
-            std::cout << std::endl;
-            
-            // CUDA / 加速参数
-            if (g_hasAnsi) std::cout << ui::BOLD << ui::CYAN;
-            std::cout << "CUDA / 加速参数";
-            if (g_hasAnsi) std::cout << ui::RESET;
-            std::cout << std::endl;
-            if (g_hasAnsi) {
-                std::cout << "  " << ui::RED << "--cuda_embedding" << ui::RESET << "              CUDA 运行 Embedding 层" << std::endl;
-                std::cout << "  " << ui::RED << "--cuda_shared_expert" << ui::RESET << "          CUDA 共享专家优化 (MOE)" << std::endl;
-                std::cout << "  " << ui::RED << "--cuda_se" << ui::RESET << "                     --cuda_shared_expert 简写" << std::endl;
-                std::cout << "  " << ui::RED << "--enable_amx" << ui::RESET << ", " << ui::RED << "--amx" << ui::RESET << "           启用 Intel AMX 加速" << std::endl;
-            } else {
-                std::cout << "  --cuda_embedding              CUDA 运行 Embedding 层" << std::endl;
-                std::cout << "  --cuda_shared_expert          CUDA 共享专家优化 (MOE)" << std::endl;
-                std::cout << "  --cuda_se                     --cuda_shared_expert 简写" << std::endl;
-                std::cout << "  --enable_amx, --amx           启用 Intel AMX 加速" << std::endl;
-            }
-            std::cout << std::endl;
-            
-            // MOE 参数
-            if (g_hasAnsi) std::cout << ui::BOLD << ui::CYAN;
-            std::cout << "MOE (混合专家) 参数";
-            if (g_hasAnsi) std::cout << ui::RESET;
-            std::cout << std::endl;
-            if (g_hasAnsi) {
-                std::cout << "  " << ui::RED << "--moe_device" << ui::RESET << " <设备>            MOE 专家层设备 (cuda, cpu)" << std::endl;
-                std::cout << "  " << ui::RED << "--moe_dtype" << ui::RESET << " <类型>             MOE 专家层数据类型" << std::endl;
-                std::cout << "  " << ui::RED << "--moe_experts" << ui::RESET << " <数量>           启用的 MOE 专家数量" << std::endl;
-            } else {
-                std::cout << "  --moe_device <设备>           MOE 专家层设备 (cuda, cpu)" << std::endl;
-                std::cout << "  --moe_dtype <类型>            MOE 专家层数据类型" << std::endl;
-                std::cout << "  --moe_experts <数量>          启用的 MOE 专家数量" << std::endl;
-            }
-            std::cout << std::endl;
-            
-            // 缓存参数
-            if (g_hasAnsi) std::cout << ui::BOLD << ui::CYAN;
-            std::cout << "缓存参数";
-            if (g_hasAnsi) std::cout << ui::RESET;
-            std::cout << std::endl;
-            if (g_hasAnsi) {
-                std::cout << "  " << ui::RED << "--kv_cache_limit" << ui::RESET << " <大小>        KV 缓存限制 (如 8G, 4096M)" << std::endl;
-                std::cout << "  " << ui::RED << "--cache_history" << ui::RESET << "               启用历史缓存" << std::endl;
-                std::cout << "  " << ui::RED << "--cache_fast" << ui::RESET << "                  启用快速缓存模式" << std::endl;
-                std::cout << "  " << ui::RED << "--cache_dir" << ui::RESET << " <路径>            缓存目录路径" << std::endl;
-            } else {
-                std::cout << "  --kv_cache_limit <大小>       KV 缓存限制 (如 8G, 4096M)" << std::endl;
-                std::cout << "  --cache_history               启用历史缓存" << std::endl;
-                std::cout << "  --cache_fast                  启用快速缓存模式" << std::endl;
-                std::cout << "  --cache_dir <路径>            缓存目录路径" << std::endl;
-            }
-            std::cout << std::endl;
-            
-            // LoRA 参数
-            if (g_hasAnsi) std::cout << ui::BOLD << ui::CYAN;
-            std::cout << "LoRA 参数 (自动切换 Python)";
-            if (g_hasAnsi) std::cout << ui::RESET;
-            std::cout << std::endl;
-            if (g_hasAnsi) {
-                std::cout << "  " << ui::RED << "--lora" << ui::RESET << " <路径>                 LoRA 适配器路径" << std::endl;
-                std::cout << "  " << ui::RED << "--custom" << ui::RESET << " <配置>               自定义模型配置" << std::endl;
-                std::cout << "  " << ui::RED << "--dtype_config" << ui::RESET << " <配置>         数据类型配置文件" << std::endl;
-                std::cout << "  " << ui::RED << "--ori" << ui::RESET << "                         使用原始权重 (禁用量化)" << std::endl;
-            } else {
-                std::cout << "  --lora <路径>                 LoRA 适配器路径" << std::endl;
-                std::cout << "  --custom <配置>               自定义模型配置" << std::endl;
-                std::cout << "  --dtype_config <配置>         数据类型配置文件" << std::endl;
-                std::cout << "  --ori                         使用原始权重 (禁用量化)" << std::endl;
-            }
-            std::cout << std::endl;
-            
-            // 模板 / 工具调用
-            if (g_hasAnsi) std::cout << ui::BOLD << ui::CYAN;
-            std::cout << "模板 / 工具调用";
-            if (g_hasAnsi) std::cout << ui::RESET;
-            std::cout << std::endl;
-            if (g_hasAnsi) {
-                std::cout << "  " << ui::RED << "--chat_template" << ui::RESET << " <模板>        对话模板 (覆盖自动检测)" << std::endl;
-                std::cout << "  " << ui::RED << "--tool_call_parser" << ui::RESET << " <类型>     工具调用解析器类型" << std::endl;
-                std::cout << "  " << ui::RED << "--enable_thinking" << ui::RESET << "             启用思考模式 (<think>标签)" << std::endl;
-                std::cout << "  " << ui::RED << "--think" << ui::RESET << "                       Python 后端思考模式" << std::endl;
-                std::cout << "  " << ui::RED << "--hide_input" << ui::RESET << "                  隐藏输入内容 (隐私保护)" << std::endl;
-            } else {
-                std::cout << "  --chat_template <模板>        对话模板 (覆盖自动检测)" << std::endl;
-                std::cout << "  --tool_call_parser <类型>     工具调用解析器类型" << std::endl;
-                std::cout << "  --enable_thinking             启用思考模式 (<think>标签)" << std::endl;
-                std::cout << "  --think                       Python 后端思考模式" << std::endl;
-                std::cout << "  --hide_input                  隐藏输入内容 (隐私保护)" << std::endl;
-            }
-            std::cout << std::endl;
+            // 所有参数组
+            printAllParamGroups();
             
             // 示例
-            if (g_hasAnsi) std::cout << ui::BOLD << ui::CYAN;
-            std::cout << "示例";
-            if (g_hasAnsi) std::cout << ui::RESET;
-            std::cout << std::endl;
-            if (g_hasAnsi) {
-                std::cout << "  " << ui::GREEN << "run" << ui::RESET << " " << ui::YELLOW << "D:\\Models\\Qwen2.5-7B" << ui::RESET << " " << ui::RED << "--device" << ui::RESET << " cuda" << std::endl;
-                std::cout << "  " << ui::GREEN << "run" << ui::RESET << " " << ui::YELLOW << "D:\\Models\\Qwen2.5-7B" << ui::RESET << " " << ui::RED << "--lora" << ui::RESET << " ./lora" << std::endl;
-                std::cout << "  " << ui::GREEN << "serve" << ui::RESET << " " << ui::YELLOW << "D:\\Models\\Qwen2.5-7B" << ui::RESET << " " << ui::RED << "--port" << ui::RESET << " 8080 " << ui::RED << "--batch" << ui::RESET << " 4" << std::endl;
-                std::cout << "  " << ui::GREEN << "serve" << ui::RESET << " " << ui::YELLOW << "D:\\Models\\Qwen2.5-7B" << ui::RESET << " " << ui::RED << "--cuda_embedding" << ui::RESET << " " << ui::RED << "--kv_cache_limit" << ui::RESET << " 8G" << std::endl;
-                std::cout << "  " << ui::GREEN << "webui" << ui::RESET << " " << ui::YELLOW << "D:\\Models\\Qwen2.5-7B" << ui::RESET << " " << ui::RED << "--port" << ui::RESET << " 1616" << std::endl;
-                std::cout << "  " << ui::GREEN << "download" << ui::RESET << " " << ui::YELLOW << "Qwen/Qwen2.5-7B-Instruct" << ui::RESET << std::endl;
-            } else {
-                std::cout << "  run D:\\Models\\Qwen2.5-7B --device cuda" << std::endl;
-                std::cout << "  run D:\\Models\\Qwen2.5-7B --lora ./lora" << std::endl;
-                std::cout << "  serve D:\\Models\\Qwen2.5-7B --port 8080 --batch 4" << std::endl;
-                std::cout << "  serve D:\\Models\\Qwen2.5-7B --cuda_embedding --kv_cache_limit 8G" << std::endl;
-                std::cout << "  webui D:\\Models\\Qwen2.5-7B --port 1616" << std::endl;
-                std::cout << "  download Qwen/Qwen2.5-7B-Instruct" << std::endl;
-            }
-            std::cout << std::endl;
+            printAllExamples();
+            
             std::cout << UI_THIN_LINE << std::endl;
-            if (g_hasAnsi) std::cout << ui::DIM;
-            std::cout << "  输入 " << ui::CYAN << "h" << ui::RESET << ui::DIM << " 或 " << ui::CYAN << "?" << ui::RESET << ui::DIM << " 查看简要帮助";
-            if (g_hasAnsi) std::cout << ui::RESET;
-            std::cout << std::endl;
+            ui::ansi(std::cout, ui::DIM);
+            std::cout << "  输入 ";
+            ui::ansi(std::cout, ui::CYAN) << "h";
+            ui::reset(std::cout);
+            ui::ansi(std::cout, ui::DIM) << " 或 ";
+            ui::ansi(std::cout, ui::CYAN) << "?";
+            ui::reset(std::cout);
+            ui::ansi(std::cout, ui::DIM) << " 查看简要帮助";
+            ui::reset(std::cout) << std::endl;
             continue;
         }
 
@@ -1251,33 +1575,6 @@ std::string toLowerCopy(std::string s) {
         return static_cast<char>(std::tolower(c));
     });
     return s;
-}
-
-bool containsQwen3Hint(const std::string& s) {
-    const std::string lower = toLowerCopy(s);
-    return (lower.find("qwen3") != std::string::npos) || (lower.find("qwen-3") != std::string::npos);
-}
-
-std::string readAllTextFile(const std::string& path) {
-    std::ifstream ifs(path, std::ios::in | std::ios::binary);
-    if (!ifs.is_open()) return "";
-    return std::string(std::istreambuf_iterator<char>(ifs), std::istreambuf_iterator<char>());
-}
-
-bool shouldEnableThinkNormalizeForModelPath(const std::string& modelPath) {
-    if (modelPath.empty()) return false;
-    if (!isDirectory(modelPath)) return false;
-
-    const std::string configPathWin = modelPath + "\\config.json";
-    const std::string configPathPosix = modelPath + "/config.json";
-    std::string configPath;
-    if (fileExists(configPathWin)) configPath = configPathWin;
-    else if (fileExists(configPathPosix)) configPath = configPathPosix;
-    else return false;
-
-    const std::string raw = readAllTextFile(configPath);
-    if (raw.empty()) return false;
-    return containsQwen3Hint(raw);
 }
 
 // ============================================================================
@@ -1410,7 +1707,6 @@ int executeNativeProgram(const std::string& exeName, int argc, char** argv, int 
     bool hasPathArg = false;
     std::string positionalModelPath;
     std::string pathArgValue;
-    bool hasNtArg = false;
     
     for (int i = startArg; i < argc; i++) {
         std::string arg = argv[i];
@@ -1423,11 +1719,6 @@ int executeNativeProgram(const std::string& exeName, int argc, char** argv, int 
         }
     }
 
-    for (int i = startArg; i < argc; i++) {
-        std::string arg = argv[i];
-        if (arg == "--nt") hasNtArg = true;
-    }
-    
     // 处理参数
     for (int i = startArg; i < argc; i++) {
         std::string arg = argv[i];
@@ -1452,14 +1743,8 @@ int executeNativeProgram(const std::string& exeName, int argc, char** argv, int 
         childArgs.push_back(arg);
     }
 
-    // 仅对 apiserver.exe：主程序根据 config.json 判断是否为 Qwen3，并透传归一化开关。
+    // 获取模型路径用于显示
     const std::string modelPath = !pathArgValue.empty() ? pathArgValue : positionalModelPath;
-    if (exeName == "apiserver.exe" && !hasNtArg) {
-        if (shouldEnableThinkNormalizeForModelPath(modelPath)) {
-            childArgs.push_back("--nt");
-            childArgs.push_back("true");
-        }
-    }
 
     // 显示启动配置块
     printLaunchConfig(exeName, "C++ 原生", modelPath, childArgs, !shouldWaitForExit);
@@ -1519,61 +1804,6 @@ int executePythonBackend(int argc, char** argv, int startArg = 1) {
     return runChildProcessWindows("python", args, cwd, shouldWaitForExit);
 }
 
-// ============================================================================
-// 帮助信息（基于统一命令表）
-// ============================================================================
-
-// 打印命令列表（带颜色）
-static void printCommandList(Backend filter, const char* title) {
-    ui::ansi(std::cout, ui::BOLD);
-    ui::ansi(std::cout, ui::CYAN) << title;
-    ui::reset(std::cout) << std::endl;
-    
-    for (const auto& cmd : ALL_COMMANDS) {
-        if (cmd.defaultBackend != filter) continue;
-        
-        // 格式化命令名和别名
-        std::string names = cmd.name;
-        for (int i = 0; cmd.aliases[i]; i++) {
-            names += ", ";
-            names += cmd.aliases[i];
-        }
-        
-        // 输出：左对齐命令名（30字符），右边描述
-        std::cout << "  ";
-        ui::ansi(std::cout, ui::GREEN) << names;
-        ui::reset(std::cout);
-        // 填充空格到固定宽度
-        for (size_t i = names.size(); i < 28; i++) std::cout << ' ';
-        std::cout << cmd.description << std::endl;
-    }
-    std::cout << std::endl;
-}
-
-// 打印参数帮助行
-static void printParamLine(const char* param, const char* desc) {
-    std::cout << "  ";
-    ui::ansi(std::cout, ui::RED) << param;
-    ui::reset(std::cout);
-    for (size_t i = strlen(param); i < 28; i++) std::cout << ' ';
-    std::cout << desc << std::endl;
-}
-
-// 打印示例行
-static void printExampleLine(const char* cmd, const char* model, const char* args = nullptr) {
-    std::cout << "  ";
-    ui::ansi(std::cout, ui::GREEN) << cmd;
-    ui::reset(std::cout) << " ";
-    ui::ansi(std::cout, ui::YELLOW) << model;
-    ui::reset(std::cout);
-    if (args) {
-        std::cout << " ";
-        ui::ansi(std::cout, ui::RED) << args;
-        ui::reset(std::cout);
-    }
-    std::cout << std::endl;
-}
-
 void Usage() {
     std::cout << "Usage: ftllm <command> [options] [model_path]" << std::endl;
     std::cout << std::endl;
@@ -1585,122 +1815,20 @@ void Usage() {
     printCommandList(Backend::Native, "命令 (C++ 原生程序):");
     printCommandList(Backend::Python, "命令 (Python 后端):");
     
-    ui::ansi(std::cout, ui::BOLD);
-    ui::ansi(std::cout, ui::CYAN) << "模式切换:";
-    ui::reset(std::cout) << std::endl;
+    // 模式切换
+    printGroupTitle("模式切换:");
     printParamLine("-py", "使用 Python 后端 (支持 LoRA 动态加载等)");
     std::cout << "  (自动)                        检测到 --lora / lora/ 目录时自动切换" << std::endl;
     std::cout << std::endl;
     
-    ui::ansi(std::cout, ui::BOLD);
-    ui::ansi(std::cout, ui::CYAN) << "模型格式 (自动识别):";
-    ui::reset(std::cout) << std::endl;
-    std::cout << "  .flm                          FastLLM 原生格式" << std::endl;
-    std::cout << "  .gguf                         GGUF 格式" << std::endl;
-    std::cout << "  HuggingFace 目录              本地目录 (含 config.json)" << std::endl;
-    std::cout << "  HuggingFace Repo ID           如 Qwen/Qwen2.5-7B (自动下载, 需 -py)" << std::endl;
-    std::cout << std::endl;
+    // 模型格式
+    printModelFormats();
     
-    // ===== 基础参数 =====
-    ui::ansi(std::cout, ui::BOLD);
-    ui::ansi(std::cout, ui::CYAN) << "基础参数:";
-    ui::reset(std::cout) << std::endl;
-    printParamLine("-p, --path <路径>", "模型路径");
-    printParamLine("--device <设备>", "cuda, cpu, numa");
-    printParamLine("--dtype <类型>", "float16, int8, int4, int4g");
-    printParamLine("-t, --threads <数量>", "CPU 线程数");
-    printParamLine("--model_name <名称>", "模型显示名称 (用于 API 返回)");
-    std::cout << std::endl;
+    // 所有参数组
+    printAllParamGroups();
     
-    // ===== 服务器参数 =====
-    ui::ansi(std::cout, ui::BOLD);
-    ui::ansi(std::cout, ui::CYAN) << "服务器参数 (serve/webui):";
-    ui::reset(std::cout) << std::endl;
-    printParamLine("--host <地址>", "监听地址 (默认: 127.0.0.1)");
-    printParamLine("--port <端口>", "监听端口 (默认: 8080)");
-    printParamLine("--api_key <密钥>", "API 密钥认证");
-    printParamLine("--nt <true|false>", "输入<think>归一化 (稳定 KV 缓存命中)");
-    std::cout << std::endl;
-    
-    // ===== Batch 参数 =====
-    ui::ansi(std::cout, ui::BOLD);
-    ui::ansi(std::cout, ui::CYAN) << "Batch / 并发参数:";
-    ui::reset(std::cout) << std::endl;
-    printParamLine("--batch <数量>", "批处理大小");
-    printParamLine("--max_batch <数量>", "最大批处理数量");
-    printParamLine("--max_token <数量>", "最大生成 Token 数 (webui)");
-    std::cout << std::endl;
-    
-    // ===== CUDA / 加速参数 =====
-    ui::ansi(std::cout, ui::BOLD);
-    ui::ansi(std::cout, ui::CYAN) << "CUDA / 加速参数:";
-    ui::reset(std::cout) << std::endl;
-    printParamLine("--cuda_embedding", "在 CUDA 上运行 Embedding 层");
-    printParamLine("--cuda_shared_expert", "CUDA 共享专家优化 (MOE)");
-    printParamLine("--cuda_se", "--cuda_shared_expert 简写");
-    printParamLine("--enable_amx, --amx", "启用 Intel AMX 加速");
-    std::cout << std::endl;
-    
-    // ===== MOE 参数 =====
-    ui::ansi(std::cout, ui::BOLD);
-    ui::ansi(std::cout, ui::CYAN) << "MOE (混合专家) 参数:";
-    ui::reset(std::cout) << std::endl;
-    printParamLine("--moe_device <设备>", "MOE 专家层设备 (cuda, cpu)");
-    printParamLine("--moe_dtype <类型>", "MOE 专家层数据类型");
-    printParamLine("--moe_experts <数量>", "启用的 MOE 专家数量");
-    std::cout << std::endl;
-    
-    // ===== 缓存参数 =====
-    ui::ansi(std::cout, ui::BOLD);
-    ui::ansi(std::cout, ui::CYAN) << "缓存参数:";
-    ui::reset(std::cout) << std::endl;
-    printParamLine("--kv_cache_limit <大小>", "KV 缓存限制 (如 8G, 4096M)");
-    printParamLine("--cache_history", "启用历史缓存");
-    printParamLine("--cache_fast", "启用快速缓存模式");
-    printParamLine("--cache_dir <路径>", "缓存目录路径");
-    std::cout << std::endl;
-    
-    // ===== LoRA 参数 =====
-    ui::ansi(std::cout, ui::BOLD);
-    ui::ansi(std::cout, ui::CYAN) << "LoRA 参数 (自动切换 Python):";
-    ui::reset(std::cout) << std::endl;
-    printParamLine("--lora <路径>", "LoRA 适配器路径");
-    printParamLine("--custom <配置>", "自定义模型配置");
-    printParamLine("--dtype_config <配置>", "数据类型配置文件");
-    printParamLine("--ori", "使用原始权重 (禁用量化)");
-    std::cout << std::endl;
-    
-    // ===== 模板 / 工具调用 =====
-    ui::ansi(std::cout, ui::BOLD);
-    ui::ansi(std::cout, ui::CYAN) << "模板 / 工具调用:";
-    ui::reset(std::cout) << std::endl;
-    printParamLine("--chat_template <模板>", "对话模板 (覆盖自动检测)");
-    printParamLine("--tool_call_parser <类型>", "工具调用解析器类型");
-    printParamLine("--enable_thinking", "启用思考模式 (<think>标签)");
-    printParamLine("--think", "Python 后端思考模式");
-    printParamLine("--hide_input", "隐藏输入内容 (隐私保护)");
-    std::cout << std::endl;
-    
-    // ===== 开发 / 调试 =====
-    ui::ansi(std::cout, ui::BOLD);
-    ui::ansi(std::cout, ui::CYAN) << "开发 / 调试:";
-    ui::reset(std::cout) << std::endl;
-    printParamLine("--dev_mode", "开发模式 (详细日志)");
-    printParamLine("-v, --version", "显示版本信息");
-    printParamLine("-h, --help", "显示帮助信息");
-    std::cout << std::endl;
-    
-    // ===== 示例 =====
-    ui::ansi(std::cout, ui::BOLD);
-    ui::ansi(std::cout, ui::CYAN) << "示例:";
-    ui::reset(std::cout) << std::endl;
-    printExampleLine("run", "D:\\Models\\Qwen2.5-7B", "--device cuda");
-    printExampleLine("run", "D:\\Models\\Qwen2.5-7B", "--lora ./lora");
-    printExampleLine("serve", "D:\\Models\\Qwen2.5-7B", "--port 8080 --batch 4");
-    printExampleLine("serve", "D:\\Models\\Qwen2.5-7B", "--cuda_embedding --kv_cache_limit 8G");
-    printExampleLine("webui", "D:\\Models\\Qwen2.5-7B", "--port 1616");
-    printExampleLine("download", "Qwen/Qwen2.5-7B-Instruct");
-    std::cout << std::endl;
+    // 示例
+    printAllExamples();
     
     ui::ansi(std::cout, ui::DIM);
     std::cout << "子命令帮助: ftllm <command> --help | 简要帮助: h 或 ?";
@@ -1713,6 +1841,7 @@ void Usage() {
 
 int main(int argc, char **argv) {
     initWindowsConsole();
+    boostProcessPriority(); // 提升主进程优先级，防止最小化时推理性能下降
 
     // 内部参数：强制进入 REPL（用于 PowerShell 宿主重启、自定义快捷方式等）
     for (int i = 1; i < argc; i++) {
@@ -1816,7 +1945,7 @@ int main(int argc, char **argv) {
         if (canFallbackToPython) {
             const char* const* pythonOnlyArgs = nullptr;
 
-            // serve/server/api: C++ apiserver 已支持 --host / --port / --batch/--max_batch / --cuda_embedding / --model_name / --device / --nt 等
+            // serve/server/api: C++ apiserver 已支持 --host / --port / --batch/--max_batch / --cuda_embedding / --model_name / --device 等
             static const char* pythonOnlyArgsServe[] = {
                 "--api_key",            // Python server 支持
                 "--think",              // Python server 支持

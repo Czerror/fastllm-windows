@@ -167,27 +167,66 @@ namespace fastllm {
         std::lock_guard <std::mutex> lock(this->locker);
         int maxPrefixToken = 0;
         PastKVCacheMemory *ret = nullptr;
+        
         for (auto &it : this->memorys) {
-            const std::vector <int> &cur = it.first;
+            const std::vector <int> &cached = it.first;
             int match = 0;
-            for (int i = 0; i < cur.size() && i < inputToken.size(); i++) {
-                if (inputToken[i] == cur[i]) {
+            
+            // 计算公共前缀长度
+            int minLen = std::min(cached.size(), inputToken.size());
+            for (int i = 0; i < minLen; i++) {
+                if (inputToken[i] == cached[i]) {
                     match = i + 1;
                 } else {
                     break;
                 }
             }
-            if (isLinear && match != cur.size()) {
-                continue;
-            }
-            if (match > maxPrefixToken) {
-                maxPrefixToken = match;
-                ret = it.second;
+            
+            // llama.cpp 风格的匹配策略:
+            // 1. 标准 Attention: 只要有公共前缀就可以复用 (cached ⊇ input 或 cached ⊆ input)
+            // 2. Linear Attention: 输入必须是缓存的前缀 (input ⊆ cached)，因为 SSM state 是累积的
+            
+            if (isLinear) {
+                // Linear Attention: 要求输入 <= 缓存，且完全匹配输入部分
+                // 例如: 缓存=[A,B,C,D,E], 输入=[A,B,C] → match=3, 可复用
+                // 例如: 缓存=[A,B,C], 输入=[A,B,C,D,E] → match=3, 不可复用(输入更长)
+                if (match == inputToken.size() && match <= cached.size()) {
+                    // 输入是缓存的前缀，可以复用
+                    printf("[KVCache] Linear Attention 命中: 输入 %d tokens 是缓存 %d tokens 的前缀\n", 
+                           (int)inputToken.size(), (int)cached.size());
+                    fflush(stdout);
+                    if (match > maxPrefixToken) {
+                        maxPrefixToken = match;
+                        ret = it.second;
+                    }
+                } else if (match == cached.size() && cached.size() < inputToken.size()) {
+                    // 缓存是输入的前缀 - 对于 Linear Attention 也可以复用
+                    // 因为我们可以从缓存的 SSM state 继续计算
+                    printf("[KVCache] Linear Attention 部分命中: 缓存 %d tokens 是输入 %d tokens 的前缀\n", 
+                           (int)cached.size(), (int)inputToken.size());
+                    fflush(stdout);
+                    if (match > maxPrefixToken) {
+                        maxPrefixToken = match;
+                        ret = it.second;
+                    }
+                } else {
+                    printf("[KVCache] Linear Attention 未命中: 缓存 %d, 输入 %d, 匹配 %d\n", 
+                           (int)cached.size(), (int)inputToken.size(), match);
+                    fflush(stdout);
+                }
+            } else {
+                // 标准 Attention: 只要有公共前缀就可以复用
+                if (match > maxPrefixToken) {
+                    maxPrefixToken = match;
+                    ret = it.second;
+                }
             }
         }
+        
         if (ret != nullptr) {
             ret->flushTime = ++this->flushTime;
         }
+        // 返回的 maxPrefixToken 不能超过输入长度-1（至少需要计算最后一个 token）
         maxPrefixToken = std::min(maxPrefixToken, (int)inputToken.size() - 1);
         return std::make_pair(ret, maxPrefixToken);
     }
@@ -601,9 +640,13 @@ namespace fastllm {
                     }
 
                     int unitSize = (model->dataType == DataType::FLOAT32 ? 4 : 2);
-                    int maxTotalLens = kvCacheLimit / (model->elementsInKVCachePerToken * unitSize);
+                    int maxTotalLens;
                     if (model->elementsInKVCachePerToken <= 0) {
+                        // 对于大型 MoE 模型，warmup 被跳过，elementsInKVCachePerToken 为 0
+                        // 使用备用计算方式避免除零
                         maxTotalLens = kvCacheLimit / 1024 / 1024;
+                    } else {
+                        maxTotalLens = kvCacheLimit / (model->elementsInKVCachePerToken * unitSize);
                     }
                     if (model->tokensLimit > 0) {
                         maxTotalLens = model->tokensLimit;
@@ -619,10 +662,10 @@ namespace fastllm {
                     model->promptLimit = limit * 3 / 4;
 
                     if (model->verbose) {
-                        printf("Fastllm KV Cache Limit: %f MB.\n", (double)kvCacheLimit / 1e6);
-                        printf("Fastllm KV Cache Token limit: %d tokens.\n", maxTotalLens);
-                        printf("Fastllm Prompt Token limit: %d tokens.\n", std::min(model->max_positions, model->promptLimit));
-                        printf("Fastllm Batch limit: %d.\n", maxBatch);
+                        printf("KV 缓存限制: %.2f MB\n", (double)kvCacheLimit / 1e6);
+                        printf("KV 缓存 Token 上限: %d tokens\n", maxTotalLens);
+                        printf("提示词 Token 上限: %d tokens\n", std::min(model->max_positions, model->promptLimit));
+                        printf("批处理上限: %d\n", maxBatch);
                     }
 
                     auto lastRecordTime = std::chrono::system_clock::now();
@@ -852,22 +895,17 @@ auto st = std::chrono::system_clock::now();
                                                             tokensManager, &logits);
                                 }
                             } else {
-                                int first = 8192, part = 2048;
-                                if (model->model_struct == "deepseek_v2") {
-                                    // TODO: ds_v2支持更长的切片
-                                    first = 1024;
-                                    part = 1024;
-                                    if (GetEnableAMX()) {
-                                        first = 2048;
-                                        part = 2048;
-                                    }
+                                // Chunked Prefill: 将大的 prompt 分块处理
+                                int chunkSize = 2048;      // 默认分块大小
+                                int firstChunkSize = 8192; // 第一块稍大
+                                
+                                // 用户配置优先
+                                if (model->chunkedPrefillSize > 0) {
+                                    chunkSize = model->chunkedPrefillSize;
+                                    firstChunkSize = model->chunkedPrefillSize;
                                 }
-                                if (model->model_struct == "qwen3_next") {
-                                    // TODO: qwen3_next支持更长的切片
-                                    first = 2048;
-                                    part = 1024;
-                                }
-                                if (seqLens[0] > first) {
+                                
+                                if (seqLens[0] > firstChunkSize) {
                                     int len = seqLens[0];
                                     for (int st = 0; st < len; ) {
                                         if (model->verbose) {
@@ -875,11 +913,11 @@ auto st = std::chrono::system_clock::now();
                                             auto nowTime = std::chrono::system_clock::now();
                                             float spend = GetSpan(lastRecordTime, nowTime);
                                             if (spend > 1) {
-                                                printf("Long Prefill ... (%d%%)\n", st * 100 / len);
+                                                printf("长文本预填充中... (%d%%, chunk=%d)\n", st * 100 / len, chunkSize);
                                                 lastRecordTime = nowTime;
                                             }
                                         }
-                                        int curLen = std::min(st == 0 ? first : part, len - st);
+                                        int curLen = std::min(st == 0 ? firstChunkSize : chunkSize, len - st);
                                         Data curInput, curPositionIds;
                                         Split(inputIds, 1, st, st + curLen, curInput);
                                         Split(*positionIds[0], 1, st, st + curLen, curPositionIds);
@@ -929,7 +967,7 @@ printf("len = %d, spend = %f s. tokens / s = %f\n", (int)total, spend, (float)to
                                             pending++;
                                         }
                                     }
-                                    printf("alive = %d, pending = %d, contextLen = %d, Speed: %f tokens / s.\n", alive, pending, aliveLen, (float)genTokens / spend);
+                                    printf("活跃: %d, 等待: %d, 上下文长度: %d, 速度: %.2f tokens/s\n", alive, pending, aliveLen, (float)genTokens / spend);
                                     lastRecordTime = nowTime;
                                     genTokens = 0;
                                 }
@@ -1010,7 +1048,12 @@ printf("len = %d, spend = %f s. tokens / s = %f\n", (int)total, spend, (float)to
         auto cache = pastKVCacheManager.Get(inputTokens);
         if (cache.first != nullptr && cache.second > 0) {
             int len = cache.second;
-            
+            if (this->verbose) {
+                const char* deviceName = (cache.first->kv[0].first.dataDevice == DataDevice::CUDA) ? "GPU" : "CPU";
+                printf("[KVCache] 命中前缀缓存: %d tokens (输入 %d tokens, 跳过 %.1f%%, 缓存位置: %s)\n", 
+                       len, (int)inputTokens.size(), len * 100.0 / inputTokens.size(), deviceName);
+                fflush(stdout);
+            }
             forwardLocker.lock();
             for (int i = 0; i < this->block_cnt; i++) {
                 if (cache.first->kv[i].first.isLinearAttention) {
@@ -1024,13 +1067,21 @@ printf("len = %d, spend = %f s. tokens / s = %f\n", (int)total, spend, (float)to
                     vdims[1] = ((vdims[1] - 1) / 128 + 1) * 128;
                     context->pastKeyValues[i].first.Expansion(kdims);
                     context->pastKeyValues[i].second.Expansion(vdims);
-                    // context->pastKeyValues[i].first.CopyFrom(cache.first->kv[i].first);
-                    // context->pastKeyValues[i].second.CopyFrom(cache.first->kv[i].second);
                 }
+            }
+            if (this->verbose && this->block_cnt > 0) {
+                const char* outDevice = (context->pastKeyValues[0].first.dataDevice == DataDevice::CUDA) ? "GPU" : "CPU";
+                printf("[KVCache] 恢复后数据位置: %s\n", outDevice);
+                fflush(stdout);
             }
             forwardLocker.unlock();
             context->currentTokens.erase(context->currentTokens.begin(), context->currentTokens.begin() + len);
             context->cacheLen = len;
+        } else {
+            if (this->verbose) {
+                printf("[KVCache] 未命中缓存, 需预填充 %d tokens (缓存条目数: %d)\n", 
+                       (int)inputTokens.size(), (int)pastKVCacheManager.memorys.size());
+            }
         }
 
         dictLocker.unlock();

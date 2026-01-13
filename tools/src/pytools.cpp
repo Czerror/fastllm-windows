@@ -338,6 +338,7 @@ extern "C" {
 
     DLL_EXPORT void warmup_llm_model(int modelId) {
         auto model = models.GetModel(modelId);
+        model->ApplyAutoDeviceMap();
         model->WarmUp();
         return;
     }

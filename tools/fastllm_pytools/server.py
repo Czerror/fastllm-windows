@@ -16,6 +16,8 @@ from .openai_server.fastllm_reranker import FastLLmReranker
 from .openai_server.fastllm_model import FastLLmModel
 from .util import make_normal_parser
 from .util import add_server_args
+from . import console
+
 global fastllm_completion
 global fastllm_embed
 global fastllm_reranker
@@ -58,11 +60,72 @@ async def create_chat_completion(request: ChatCompletionRequest,
         assert isinstance(generator, ChatCompletionResponse)
         return JSONResponse(content = generator.model_dump())
 
+
+@app.post("/v1/completions")
+async def create_completion(request: CompletionRequest,
+                            raw_request: Request):
+    """OpenAI 兼容的文本补全接口（非 chat 风格）"""
+    generator = await fastllm_completion.create_completion(request, raw_request)
+    if isinstance(generator, ErrorResponse):
+        return JSONResponse(content = generator.model_dump(),
+                            status_code = generator.code)
+    if request.stream:
+        return StreamingResponse(content = generator[0],
+                                 background = generator[1],
+                                 media_type = "text/event-stream")
+    else:
+        assert isinstance(generator, CompletionResponse)
+        return JSONResponse(content = generator.model_dump())
+
+
 @app.post("/v1/embed")
 async def create_embed(request: EmbedRequest,
                        raw_request: Request):
     embedding = fastllm_embed.embedding_sentence(request, raw_request)
     return JSONResponse(embedding)
+
+
+@app.post("/v1/embeddings")
+async def create_embeddings(request: EmbeddingsRequest,
+                            raw_request: Request):
+    """OpenAI 标准的 embeddings 接口"""
+    try:
+        # 转换请求格式
+        if isinstance(request.input, str):
+            inputs = request.input
+        elif isinstance(request.input, list) and len(request.input) > 0:
+            inputs = request.input[0] if isinstance(request.input[0], str) else str(request.input[0])
+        else:
+            return JSONResponse(
+                content={"error": {"message": "Input cannot be empty", "type": "invalid_request_error"}},
+                status_code=400
+            )
+        
+        # 使用现有的 embed 功能
+        embed_req = EmbedRequest(inputs=inputs, normalize=True)
+        result = fastllm_embed.embedding_sentence(embed_req, raw_request)
+        
+        # 转换为 OpenAI 格式
+        embedding_data = result.get("data", [result]) if isinstance(result, dict) else [{"embedding": result}]
+        
+        response = EmbeddingsResponse(
+            object="list",
+            data=[{
+                "object": "embedding",
+                "embedding": item.get("embedding", item) if isinstance(item, dict) else item,
+                "index": idx
+            } for idx, item in enumerate(embedding_data)],
+            model=request.model or fastllm_model.model_name,
+            usage=UsageInfo(prompt_tokens=len(inputs.split()), total_tokens=len(inputs.split()))
+        )
+        return JSONResponse(content=response.model_dump())
+    except Exception as e:
+        logging.error(f"Embeddings error: {e}")
+        return JSONResponse(
+            content={"error": {"message": str(e), "type": "internal_error"}},
+            status_code=500
+        )
+
 
 @app.post("/v1/rerank")
 async def create_rerank(request: RerankRequest,
@@ -76,6 +139,28 @@ async def create_rerank(request: RerankRequest,
 async def list_models():
     model_response = fastllm_model.response
     return JSONResponse(content = model_response)
+
+
+@app.get("/health")
+async def health_check():
+    """健康检查接口"""
+    return JSONResponse(content={"status": "healthy"})
+
+
+@app.get("/v1/health")
+async def v1_health_check():
+    """v1 健康检查接口"""
+    return JSONResponse(content={"status": "healthy"})
+
+
+@app.get("/version")
+async def get_version():
+    """获取服务版本信息"""
+    return JSONResponse(content={
+        "version": "1.0.0",
+        "engine": "fastllm"
+    })
+
 
 @app.post("/v1/cancel")
 async def cancel_generation(request: Request):
@@ -152,55 +237,40 @@ def fastllm_server(args):
     global fastllm_model
     global dev_mode_enabled
     
+    console.header("API Server 配置")
+    
     # Set development mode from args
     dev_mode_enabled = args.dev_mode
     if dev_mode_enabled:
-        logging.info("Development mode enabled - conversation management APIs are active")
+        console.config("开发模式", "已启用 (会话管理 API 已激活)")
     
     init_logging()
     logging.info(args)
+    
     from .util import make_normal_llm_model
     model = make_normal_llm_model(args)
     model.set_verbose(True)
+    
     if (args.model_name is None or args.model_name == ''):
         args.model_name = args.path
         if (args.model_name is None or args.model_name == ''):
             args.model_name = args.model
 
-    # 输入 <think> 归一化开关：由主程序决定并传入 FastLLmCompletion。
-    # 优先级：显式参数 > 自动判断(读取 config.json) > 默认关闭
-    normalize_think = False
-    nt_value = getattr(args, 'nt', '')
-    if isinstance(nt_value, str) and nt_value != "":
-        v = nt_value.strip().lower()
-        if v in ["1", "true", "on", "yes", "y"]:
-            normalize_think = True
-        elif v in ["0", "false", "off", "no", "n"]:
-            normalize_think = False
-    else:
-        config_path = os.path.join(args.path, "config.json")
-        if os.path.exists(config_path):
-            try:
-                with open(config_path, "r", encoding="utf-8") as f:
-                    cfg = json.load(f)
-                arch0 = ""
-                if isinstance(cfg.get("architectures"), list) and len(cfg["architectures"]) > 0:
-                    arch0 = str(cfg["architectures"][0])
-                if ("Qwen3" in arch0) or ("Qwen3Next" in arch0):
-                    normalize_think = True
-            except Exception:
-                pass
-
     fastllm_completion = FastLLmCompletion(
         model_name = args.model_name,
         model = model,
         think = (args.think.lower() != "false"),
-        hide_input = args.hide_input,
-        normalize_think = normalize_think
+        hide_input = args.hide_input
     )
     fastllm_embed = FastLLmEmbed(model_name = args.model_name, model = model)
     fastllm_reranker = FastLLmReranker(model_name = args.model_name, model = model)
     fastllm_model = FastLLmModel(model_name = args.model_name)
+    
+    console.header("服务就绪")
+    console.info(f"监听地址: http://{args.host}:{args.port}")
+    console.info("API 端点: /v1/chat/completions, /v1/completions, /v1/embeddings")
+    print()
+    
     uvicorn.run(app, host = args.host, port = args.port)
 
 if __name__ == "__main__":

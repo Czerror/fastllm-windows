@@ -253,7 +253,7 @@ function Show-Menu {
 function Show-YesNo {
     param(
         [string]$Question,
-        [bool]$Default = $false
+        [bool]$Default = $true
     )
     
     $defaultText = if ($Default) { "Y/n" } else { "y/N" }
@@ -753,7 +753,7 @@ else {
     # 2. CUDA 架构选择
     $cudaArch = "75;80;86;89;90;120"
     if ($target -ne "cpu" -and $CudaInfo) {
-        $archIndex = Show-Menu -Title "选择 CUDA 架构" -Options $CudaArchPresets -Default 0 -ShowDesc
+        $archIndex = Show-Menu -Title "选择 CUDA 架构" -Options $CudaArchPresets -Default 1 -ShowDesc
         $cudaArch = $CudaArchPresets[$archIndex].Value
         
         if ($cudaArch -eq "custom") {

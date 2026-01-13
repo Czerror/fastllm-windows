@@ -241,6 +241,12 @@ namespace fastllm {
 
         virtual void SetDataType(DataType dataType);
 
+        // 检测当前模型是否为 MoE (Mixture of Experts) 模型
+        virtual bool IsMoeModel() const;
+
+        // 自动应用设备映射配置（MoE 模型默认 cuda+cpu 混合推理）
+        virtual void ApplyAutoDeviceMap();
+
         virtual void UpdateRotaryPtr(Data **sinDataPtr, Data **cosDataPtr, const std::string &device);
 
         // messages: [ (role, content) ... ]
@@ -311,6 +317,7 @@ namespace fastllm {
 
         int tokensLimit = -1;
         int promptLimit = -1;
+        int chunkedPrefillSize = -1; // Chunked Prefill 分块大小，-1 表示自动 (default: 2048)
 
         PastKVCacheManager pastKVCacheManager;
         bool saveHistoryChat = false;

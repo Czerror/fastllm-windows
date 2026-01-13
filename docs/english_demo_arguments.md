@@ -36,7 +36,6 @@ Configuration related to the model, OpenAI API Server, WebUI, and conversation d
 - **API Server Port Number (`--port`)**: Sets the port number of the API server.
 - **API Key (`--api_key`)**: Enables API key auth (no check when empty).
 - **Think Output (`--think`)**: Whether to output `<think>` tags (true/false).
-- **Normalize Think Input (`--nt`)**: Normalizes `<think></think>` in input back to model special tokens to stabilize KV prefix cache hits (true/false).
 
 ## Web UI Configuration Parameters
 - **API Server Port Number (`--port`)**: Sets the port number for the WebUI.

@@ -184,8 +184,55 @@ namespace fastllm {
             }
         }
 #endif
-        this->deviceMap = GetDeviceMap();
-        this->moeDeviceMap = GetMoeDeviceMap();
+        // 注意: deviceMap 和 moeDeviceMap 的设置已移至 ApplyAutoDeviceMap()
+        // 不再在这里从全局配置获取，避免覆盖自动配置逻辑
+    }
+
+    bool basellm::IsMoeModel() const {
+        // 检测是否为 MoE 模型：num_experts > 0 或 moeLinears 非空
+        if (this->num_experts > 0) {
+            return true;
+        }
+        if (!this->moeLinears.empty()) {
+            return true;
+        }
+        // 也可以通过 model_type 来判断
+        static const std::set<std::string> moeModelTypes = {
+            "deepseek_v2", "deepseek_v3", "moe", "qwen3_moe", "qwen3_next",
+            "minimax", "hunyuan", "ernie4_5", "pangu_moe", "glm4_moe"
+        };
+        return moeModelTypes.find(this->model_type) != moeModelTypes.end();
+    }
+
+    void basellm::ApplyAutoDeviceMap() {
+        // 如果用户已显式配置，则不自动覆盖
+        if (!this->deviceMap.empty() || !this->moeDeviceMap.empty()) {
+            return;
+        }
+        
+        // 获取全局默认配置
+        auto globalDeviceMap = GetDeviceMap();
+        auto globalMoeDeviceMap = GetMoeDeviceMap();
+        
+        // 如果全局有配置，使用全局配置
+        if (!globalDeviceMap.empty()) {
+            this->deviceMap = globalDeviceMap;
+        }
+        if (!globalMoeDeviceMap.empty()) {
+            this->moeDeviceMap = globalMoeDeviceMap;
+        }
+        
+        // 如果仍为空，且是 MoE 模型，自动应用默认混合推理配置
+#ifdef USE_CUDA
+        if (this->IsMoeModel() && this->deviceMap.empty()) {
+            // MoE 模型默认: device=cuda, moe_device=cpu
+            this->deviceMap["cuda"] = 1;
+            if (this->moeDeviceMap.empty()) {
+                this->moeDeviceMap["cpu"] = 1;
+            }
+            printf("[自动配置] 检测到 MoE 模型，启用 CUDA+CPU 混合推理 (device=cuda, moe_device=cpu)\n");
+        }
+#endif
     }
 
     void basellm::SaveLowBitModel(const std::string &fileName, int bit) {
@@ -1340,6 +1387,7 @@ if (false) {
         printf("\n");
         fflush(stdout);
 
+        model->ApplyAutoDeviceMap();
         model->WarmUp();
         return std::unique_ptr<fastllm::basellm> (model);
     }
@@ -1354,6 +1402,7 @@ if (false) {
             bertModel->WarmUp();
         }else{
             model->LoadFromFile(fileName);
+            model->ApplyAutoDeviceMap();
             model->WarmUp();
         }
         return std::unique_ptr<fastllm::basellm> (model);
@@ -1995,8 +2044,10 @@ if (false) {
 
         delete loraTensors;
 
-        if (!weightOnly)
+        if (!weightOnly) {
+            model->ApplyAutoDeviceMap();
             model->WarmUp();
+        }
         return std::unique_ptr<fastllm::basellm> (model);
     }
 
