@@ -20,7 +20,7 @@ jobs:
       with:
         fetch-depth: 0
         submodules: recursive
-        token: ${{ secrets.GITHUB_TOKEN }}
+        token: ${{ secrets.PAT_TOKEN || secrets.GITHUB_TOKEN }}
     
     - name: Configure Git
       run: |
@@ -34,52 +34,24 @@ jobs:
     
     - name: Sync upstream to dev branch
       id: sync_dev
+      env:
+        HAS_PAT: ${{ secrets.PAT_TOKEN != '' }}
       run: |
         # 同步纯净的上游代码到 dev 分支
         echo "=== Syncing upstream to dev branch ==="
-        
-        # 检查 dev 分支是否存在（不存在时，从本仓库默认分支创建，避免首次 push 引入 workflow 变更而被拒绝）
-        git fetch origin dev || true
-        if git show-ref --verify --quiet refs/remotes/origin/dev; then
-          git checkout dev
-          git pull origin dev
-        else
-          DEFAULT_BRANCH=$(git symbolic-ref --short refs/remotes/origin/HEAD | sed 's@^origin/@@')
-          git fetch origin "$DEFAULT_BRANCH"
-          git checkout -b dev "origin/$DEFAULT_BRANCH"
+
+        # dev 要求与上游完全一致（包含 workflows）。
+        # 注意：仅用 GITHUB_TOKEN 推送 workflows 变更会被 GitHub 拒绝，因此必须配置 PAT_TOKEN。
+        if [ "${HAS_PAT}" != "true" ]; then
+          echo "::error::PAT_TOKEN is not set. Cannot force-sync dev to upstream/master (includes .github/workflows) with GITHUB_TOKEN."
+          exit 1
         fi
 
-        BEFORE_COMMIT=$(git rev-parse HEAD)
-
-        # 合并上游 master（优先采用上游变更），但保留本仓库的 workflows，避免 GITHUB_TOKEN 推送被拒
-        git merge -X theirs upstream/master -m "chore: sync upstream/master" || true
-        git checkout --ours .github/workflows || true
-        git add .github/workflows || true
-
-        # 若 merge 进入冲突状态，直接用 'theirs' 解决全量冲突，再把 workflows 回滚为 ours
-        if git ls-files -u | grep -q .; then
-          echo "Merge conflicts detected; auto-resolving (theirs, except workflows=ours)"
-          git checkout --theirs .
-          git checkout --ours .github/workflows || true
-          git add -A
-          git commit -m "chore: sync upstream/master"
-        else
-          # 非冲突场景下：可能是 fast-forward（无需提交），也可能是仅 workflows 被回滚导致有待提交的变更
-          if ! git diff --cached --quiet || ! git diff --quiet; then
-            git add -A
-            git commit -m "chore: sync upstream/master" || true
-          fi
-        fi
-
-        AFTER_COMMIT=$(git rev-parse HEAD)
-        if [ "$BEFORE_COMMIT" != "$AFTER_COMMIT" ]; then
-          git push -u origin dev
-          echo "dev_synced=true" >> $GITHUB_OUTPUT
-          echo "✅ dev branch synced to upstream/master (workflows preserved)"
-        else
-          echo "dev_synced=false" >> $GITHUB_OUTPUT
-          echo "ℹ️ dev branch already up to date with upstream"
-        fi
+        # 直接让 dev 指向 upstream/master（镜像上游），并强制推送
+        git checkout -B dev upstream/master
+        git push -u origin dev --force
+        echo "dev_synced=true" >> $GITHUB_OUTPUT
+        echo "✅ dev branch force-synced to upstream/master"
     
     - name: Update submodules on master
       id: submodules
