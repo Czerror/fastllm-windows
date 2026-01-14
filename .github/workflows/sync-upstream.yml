@@ -20,7 +20,7 @@ jobs:
       with:
         fetch-depth: 0
         submodules: recursive
-        token: ${{ secrets.PAT_TOKEN || secrets.GITHUB_TOKEN }}
+        token: ${{ secrets.GITHUB_TOKEN }}
     
     - name: Configure Git
       run: |
@@ -34,24 +34,53 @@ jobs:
     
     - name: Sync upstream to dev branch
       id: sync_dev
-      env:
-        HAS_PAT: ${{ secrets.PAT_TOKEN != '' }}
       run: |
         # 同步纯净的上游代码到 dev 分支
         echo "=== Syncing upstream to dev branch ==="
 
-        # dev 要求与上游完全一致（包含 workflows）。
-        # 注意：仅用 GITHUB_TOKEN 推送 workflows 变更会被 GitHub 拒绝，因此必须配置 PAT_TOKEN。
-        if [ "${HAS_PAT}" != "true" ]; then
-          echo "::error::PAT_TOKEN is not set. Cannot force-sync dev to upstream/master (includes .github/workflows) with GITHUB_TOKEN."
+        # 说明：dev 直接同步上游代码，但排除 .github/workflows 目录的变更，避免 GITHUB_TOKEN 推送被拒。
+
+        # 准备分支
+        git fetch upstream
+        git fetch origin dev || true
+        if git show-ref --verify --quiet refs/remotes/origin/dev; then
+          git checkout dev
+          git pull origin dev
+        else
+          git checkout -b dev upstream/master
+        fi
+
+        BEFORE_COMMIT=$(git rev-parse HEAD)
+
+        # 拉取并合并上游（尽量直观：有冲突就失败，让维护者处理）
+        if ! git merge -X theirs --no-edit upstream/master; then
+          echo "::error::Merge upstream/master into dev failed (conflicts). Please resolve manually."
+          git merge --abort || true
           exit 1
         fi
 
-        # 直接让 dev 指向 upstream/master（镜像上游），并强制推送
-        git checkout -B dev upstream/master
-        git push -u origin dev --force
-        echo "dev_synced=true" >> $GITHUB_OUTPUT
-        echo "✅ dev branch force-synced to upstream/master"
+        # 覆盖 workflows 为本仓库默认分支版本（通常是 master/main）
+        DEFAULT_BRANCH=$(git symbolic-ref --short refs/remotes/origin/HEAD | sed 's@^origin/@@')
+        git fetch origin "$DEFAULT_BRANCH"
+        git checkout "origin/$DEFAULT_BRANCH" -- .github/workflows || true
+        git add .github/workflows || true
+
+        # 如有待提交变更（例如 workflows 被覆盖），提交一次
+        if ! git diff --cached --quiet || ! git diff --quiet; then
+          git add -A
+          git commit -m "chore: sync upstream/master (preserve workflows)" || true
+        fi
+
+        AFTER_COMMIT=$(git rev-parse HEAD)
+        if [ "$BEFORE_COMMIT" != "$AFTER_COMMIT" ]; then
+          echo "dev_synced=true" >> $GITHUB_OUTPUT
+          echo "✅ dev branch updated from upstream/master (workflows preserved)"
+        else
+          echo "dev_synced=false" >> $GITHUB_OUTPUT
+          echo "ℹ️ dev branch already up to date with upstream"
+        fi
+
+        git push -u origin dev
     
     - name: Update submodules on master
       id: submodules
