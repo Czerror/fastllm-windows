@@ -89,6 +89,8 @@ class FastLLmCompletion:
         self.tool_parser = None
         # 生成系统指纹（用于标识当前模型配置）
         self._system_fingerprint = f"fp_{shortuuid.random()[:12]}"
+        # 累计请求计数器
+        self._total_request_count = 0
 
     @property
     def system_fingerprint(self) -> str:
@@ -493,6 +495,10 @@ class FastLLmCompletion:
         tools = [tool.model_dump(exclude_none=True) for tool in request.tools] if request.tools is not None else None
         # print("tools", tools)
 
+        # 累计请求数
+        self._total_request_count += 1
+        console.request_start(self._total_request_count, request_id)
+
         # from request.tools
         handle = self.model.launch_stream_response(
             messages,
@@ -588,6 +594,9 @@ class FastLLmCompletion:
             ),
             system_fingerprint=self.system_fingerprint
         )
+
+        # 请求处理完成（先输出"请求完成"，再输出统计信息）
+        console.request_complete(request_id)
 
         # 打印推理统计信息
         stats = self.model.get_handle_stats(handle)
@@ -784,6 +793,9 @@ class FastLLmCompletion:
                 pass
             raise
         finally:
+            # 请求处理完成（先输出"请求完成"，再输出统计信息）
+            console.request_complete(request_id)
+            
             # 打印推理统计信息
             stats = self.model.get_handle_stats(handle)
             if stats:
@@ -791,6 +803,8 @@ class FastLLmCompletion:
                     stats.prompt_tokens, stats.output_tokens,
                     stats.total_time, stats.first_token_time, stats.speed
                 )
+            else:
+                logging.debug(f"无法获取请求 {request_id} 的统计信息")
             
             # 正常结束时不要调用 abort，否则会破坏历史 KV cache 写入，导致每轮 Long Prefill。
             if request_id in self.conversation_handles:
@@ -870,6 +884,10 @@ class FastLLmCompletion:
         # 使用模型生成
         input_token_len = self.model.get_input_token_len(prompt)
         
+        # 累计请求数
+        self._total_request_count += 1
+        console.request_start(self._total_request_count, request_id)
+        
         handle = self.model.launch_stream_response(
             prompt,
             max_length=max_length,
@@ -946,6 +964,9 @@ class FastLLmCompletion:
                 completion_tokens=completion_tokens
             )
         )
+        
+        # 请求处理完成（先输出“请求完成”，再输出统计信息）
+        console.request_complete(request_id)
         
         # 打印推理统计信息
         stats = self.model.get_handle_stats(handle)
@@ -1034,6 +1055,9 @@ class FastLLmCompletion:
             yield f"data: {chunk.model_dump_json(exclude_unset=True)}\n\n"
             
         finally:
+            # 请求处理完成（先输出“请求完成”，再输出统计信息）
+            console.request_complete(request_id)
+            
             # 打印推理统计信息
             stats = self.model.get_handle_stats(handle)
             if stats:

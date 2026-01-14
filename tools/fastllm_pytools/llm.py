@@ -185,7 +185,10 @@ class LogEvent:
     PrefillProgress = 3     # 预填充进度
     PrefillComplete = 4     # 预填充完成
     BatchStatus = 5         # 批处理状态
-    General = 6             # 通用日志
+    ModelLoadProgress = 6   # 模型加载进度
+    ModelLoadComplete = 7   # 模型加载完成
+    WarmUp = 8              # 模型预热
+    General = 9             # 通用日志
 
 class LogData(ctypes.Structure):
     """C风格的日志数据结构，用于接收来自C++的日志"""
@@ -202,6 +205,7 @@ class LogData(ctypes.Structure):
         ("pending", ctypes.c_int),
         ("contextLen", ctypes.c_int),
         ("device", ctypes.c_char_p),
+        ("isComplete", ctypes.c_int),  # 批处理完成标志
     ]
 
 # C回调函数类型
@@ -230,6 +234,7 @@ def _create_log_callback_wrapper(py_callback):
                 'pending': data.pending,
                 'contextLen': data.contextLen,
                 'device': data.device.decode('utf-8') if data.device else '',
+                'isComplete': bool(data.isComplete),  # 批处理完成标志
             }
             py_callback(py_data)
     return LOG_CALLBACK_TYPE(c_callback)
@@ -280,13 +285,15 @@ class LogHandlers:
     
     # 用于节流日志更新的状态
     _last_prefill_percent = -1
-    _last_batch_active = 0
+    _last_load_percent = -1
     
     @staticmethod
     def pretty_handler(data):
         """美化输出日志处理器，带进度条和节流"""
         import sys
         from . import console
+        from .console import Style, is_ansi_enabled
+        _ansi_enabled = is_ansi_enabled()
         
         event = data['event']
         message = data.get('message', '')
@@ -312,15 +319,21 @@ class LogHandlers:
                     progress = current / total
                     bar_width = 30
                     filled = int(bar_width * progress)
-                    bar = '█' * filled + '░' * (bar_width - filled)
-                    sys.stdout.write(f"\r  预填充: [{bar}] {current}/{total} ({speed:.1f} tok/s)  ")
+                    bar = '#' * filled + '-' * (bar_width - filled)
+                    # 隐藏光标，清除整行
+                    if _ansi_enabled:
+                        sys.stdout.write(f"\x1b[?25l\x1b[2K\r{Style.CYAN}预填充中 {Style.RESET}[{Style.GREEN}{bar[:filled]}{Style.RESET}{Style.DIM}{bar[filled:]}{Style.RESET}] {percent}% {current}/{total} ({speed:.1f} tok/s)")
+                    else:
+                        sys.stdout.write(f"\r预填充中 [{bar}] {percent}% {current}/{total} ({speed:.1f} tok/s)")
                     sys.stdout.flush()
         
         elif event == LogEvent.PrefillComplete:
-            # Prefill 完成，重置状态
+            # Prefill 完成，显示光标，重置状态
             LogHandlers._last_prefill_percent = -1
             speed, elapsed = data['speed'], data['elapsed']
-            sys.stdout.write(f"\r  预填充: 完成 ({speed:.1f} tok/s, {elapsed:.2f}s)               \n")
+            if _ansi_enabled:
+                sys.stdout.write(f"\x1b[?25h\r\x1b[2K")  # 显示光标，清除进度行
+            sys.stdout.write(f"\r预填充完成 ({speed:.1f} tok/s, {elapsed:.2f}s)               \n")
             sys.stdout.flush()
         
         elif event == LogEvent.BatchStatus:
@@ -328,23 +341,62 @@ class LogHandlers:
             active, pending = data['active'], data['pending']
             speed = data.get('speed', 0)
             context_len = data.get('contextLen', 0)
+            is_complete = data.get('isComplete', False)
             
-            # 检测生成结束：active 从 >0 变成 0
-            if LogHandlers._last_batch_active > 0 and active == 0 and pending == 0:
-                sys.stdout.write("\r" + " " * 70 + "\r")
+            # 使用核心模块传递的 isComplete 标志判断生成结束
+            if is_complete:
+                # 显示生成完成信息
+                status_parts = []
+                if context_len > 0:
+                    status_parts.append(f"上下文 {context_len}")
+                if speed > 0:
+                    status_parts.append(f"{speed:.1f} tokens/s")
+                if status_parts:
+                    sys.stdout.write(f"\x1b[2K\r{Style.DIM}  生成完成: {', '.join(status_parts)}{Style.RESET}\n")
+                else:
+                    sys.stdout.write("\x1b[2K\r")
                 sys.stdout.flush()
-            
-            LogHandlers._last_batch_active = active
-            
-            if active > 0 or pending > 0:
+            elif active > 0 or pending > 0:
                 status_parts = [f"活跃 {active}", f"等待 {pending}"]
                 if context_len > 0:
                     status_parts.append(f"上下文 {context_len}")
                 if speed > 0:
-                    status_parts.append(f"{speed:.1f} tok/s")
-                line = f"\r  生成中: {', '.join(status_parts)}"
-                sys.stdout.write(line.ljust(70))
+                    status_parts.append(f"{speed:.1f} tokens/s")
+                # 先清除整行，避免被其他日志打断后显示错乱
+                sys.stdout.write("\x1b[2K")  # 清除整行
+                line = f"\r{Style.DIM}  生成中: {', '.join(status_parts)}{Style.RESET}"
+                sys.stdout.write(line.ljust(70 + len(Style.DIM) + len(Style.RESET)))
                 sys.stdout.flush()
+        
+        elif event == LogEvent.ModelLoadProgress:
+            # 模型加载进度（节流：只在百分比变化时更新）
+            current, total = data['current'], data['total']
+            if total > 0:
+                percent = (current * 100) // total
+                if percent != LogHandlers._last_load_percent:
+                    LogHandlers._last_load_percent = percent
+                    progress = current / total
+                    bar_width = 30
+                    filled = int(progress * bar_width)
+                    bar = '#' * filled + '-' * (bar_width - filled)
+                    if _ansi_enabled:
+                        sys.stdout.write(f"\x1b[?25l\x1b[2K\r{Style.DIM}加载权重 {Style.RESET}[{Style.GREEN}{bar[:filled]}{Style.RESET}{Style.DIM}{bar[filled:]}{Style.RESET}] {percent}%")
+                    else:
+                        sys.stdout.write(f"\r加载权重 [{bar}] {percent}%")
+                    sys.stdout.flush()
+                # 加载完成时重置状态
+                if current >= total:
+                    LogHandlers._last_load_percent = -1
+        
+        elif event == LogEvent.ModelLoadComplete:
+            # 模型加载完成，显示光标，清除进度行
+            sys.stdout.write("\x1b[?25h\x1b[2K\r")
+            sys.stdout.flush()
+        
+        elif event == LogEvent.WarmUp:
+            # 模型预热（与 C++ 端一致）
+            sys.stdout.write(f"\x1b[2K\r{Style.DIM}  预热模型...{Style.RESET}")
+            sys.stdout.flush()
         
         elif event == LogEvent.General:
             if message:
@@ -359,7 +411,7 @@ class LogHandlers:
             return  # 跳过进度输出
         
         if event == LogEvent.PrefillComplete:
-            print(f"Prefill complete: {data['elapsed']:.2f}s, {data['speed']:.1f} tok/s")
+            print(f"Prefill complete: {data['elapsed']:.2f}s, {data['speed']:.1f} tokens/s")
         elif event == LogEvent.KVCacheHit:
             print(f"KVCache hit, context: {data['contextLen']}")
         elif event == LogEvent.KVCacheMiss:

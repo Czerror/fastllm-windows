@@ -6,6 +6,8 @@
 
 #include <cstring>
 #include <csignal>
+#include <map>
+#include <mutex>
 
 #ifdef WIN32
 #define DLL_EXPORT _declspec(dllexport)
@@ -14,6 +16,10 @@
 #endif
 
 #include "pytools_t2s.cpp"
+
+// 统计信息缓存（在 pytools 层面维护，避免污染底层代码）
+static std::mutex statsCache_mutex;
+static std::map<std::pair<int, int>, fastllm::InferenceStatsInfo> statsCache;
 
 void signal_handler(int signal) {
     if (signal == SIGINT) {
@@ -513,6 +519,14 @@ extern "C" {
 
     DLL_EXPORT int fetch_response_llm_model(int modelId, int handleId) {
         auto model = models.GetModel(modelId);
+        
+        // 在获取 token 前，先尝试保存统计信息（因为 FetchResponseTokens 可能会删除 context）
+        auto context = model->responseContextDict.GetHandle(handleId);
+        if (context != nullptr) {
+            std::lock_guard<std::mutex> lock(statsCache_mutex);
+            statsCache[{modelId, handleId}] = context->GetStats();
+        }
+        
         return model->FetchResponseTokens(handleId);
     }
 
@@ -532,17 +546,35 @@ extern "C" {
                                                   int *promptTokens, int *outputTokens,
                                                   double *totalTime, double *firstTokenTime, double *speed) {
         auto model = models.GetModel(modelId);
+        
+        // 优先从活跃 context 获取
         auto context = model->responseContextDict.GetHandle(handleId);
-        if (context == nullptr) {
-            return false;
+        if (context != nullptr) {
+            auto stats = context->GetStats();
+            *promptTokens = stats.promptTokens;
+            *outputTokens = stats.outputTokens;
+            *totalTime = stats.totalTime;
+            *firstTokenTime = stats.firstTokenTime;
+            *speed = stats.speed;
+            return true;
         }
-        auto stats = context->GetStats();
-        *promptTokens = stats.promptTokens;
-        *outputTokens = stats.outputTokens;
-        *totalTime = stats.totalTime;
-        *firstTokenTime = stats.firstTokenTime;
-        *speed = stats.speed;
-        return true;
+        
+        // 否则从缓存获取
+        std::lock_guard<std::mutex> lock(statsCache_mutex);
+        auto key = std::make_pair(modelId, handleId);
+        if (statsCache.find(key) != statsCache.end()) {
+            auto& stats = statsCache[key];
+            *promptTokens = stats.promptTokens;
+            *outputTokens = stats.outputTokens;
+            *totalTime = stats.totalTime;
+            *firstTokenTime = stats.firstTokenTime;
+            *speed = stats.speed;
+            // 获取后清除缓存
+            statsCache.erase(key);
+            return true;
+        }
+        
+        return false;
     }
 
     DLL_EXPORT void add_cache_llm_model(int modelId, int len, int *values) {
@@ -646,6 +678,7 @@ extern "C" {
         int pending;
         int contextLen;
         const char* device;
+        int isComplete;     // 批处理完成标志
     };
 
     // C风格的回调函数类型
@@ -680,6 +713,7 @@ extern "C" {
                     cData.pending = logData.data.pending;
                     cData.contextLen = logData.data.contextLen;
                     cData.device = g_deviceBuffer.c_str();
+                    cData.isComplete = logData.data.isComplete ? 1 : 0;
                     
                     g_pyLogCallback(&cData);
                 }

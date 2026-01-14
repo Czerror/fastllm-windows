@@ -332,12 +332,6 @@ def fastllm_server(args):
     model = make_normal_llm_model(args)
     model.set_verbose(True)
     
-    # 显示设备映射信息
-    if hasattr(args, '_parsed_device_map') and args._parsed_device_map:
-        console.config("设备映射", format_device_map(args._parsed_device_map))
-    if hasattr(args, '_parsed_moe_device_map') and args._parsed_moe_device_map:
-        console.config("MoE 设备映射", format_device_map(args._parsed_moe_device_map))
-    
     if (args.model_name is None or args.model_name == ''):
         args.model_name = args.path
         if (args.model_name is None or args.model_name == ''):
@@ -358,7 +352,8 @@ def fastllm_server(args):
     console.info("API 端点: /v1/chat/completions, /v1/completions, /v1/embeddings")
     print()
     
-    uvicorn.run(app, host = args.host, port = args.port)
+    # 禁用 uvicorn 访问日志，避免与进度条输出冲突
+    uvicorn.run(app, host = args.host, port = args.port, access_log=False)
 
 if __name__ == "__main__":
     args = parse_args()

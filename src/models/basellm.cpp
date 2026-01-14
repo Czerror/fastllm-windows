@@ -35,10 +35,9 @@ namespace fastllm {
 
     void EmitWarmUpLog() {
         LogData log;
-        log.event = LogEvent::General;
+        log.event = LogEvent::WarmUp;
         log.level = LogLevel::Info;
         log.tag = "model";
-        log.message = "Warmup...";
         EmitLog(log);
     }
 
@@ -729,13 +728,10 @@ namespace fastllm {
                         log.event = LogEvent::KVCacheConfig;
                         log.level = LogLevel::Info;
                         log.tag = "KVCache";
-                        log.data.total = maxTotalLens;
-                        std::ostringstream oss;
-                        oss << "KV缓存: " << std::fixed << std::setprecision(2) << (double)kvCacheLimit / 1e6 << " MB, "
-                            << "Token上限: " << maxTotalLens << ", "
-                            << "Prompt上限: " << std::min(model->max_positions, model->promptLimit) << ", "
-                            << "Batch上限: " << maxBatch;
-                        log.message = oss.str();
+                        log.data.kvCacheMB = (double)kvCacheLimit / 1e6;
+                        log.data.tokenLimit = maxTotalLens;
+                        log.data.promptLimit = std::min(model->max_positions, model->promptLimit);
+                        log.data.maxBatch = maxBatch;
                         EmitLog(log);
                     }
 
@@ -1072,37 +1068,6 @@ printf("len = %d, spend = %f s. tokens / s = %f\n", (int)total, spend, (float)to
                             forwardLocker.unlock();
                             dictLocker.lock();
 
-                            if (model->verbose) {
-                                genTokens += seqLens.size();
-                                auto nowTime = std::chrono::system_clock::now();
-                                float spend = GetSpan(lastRecordTime, nowTime);
-                                if (spend > 1) {
-                                    int total = 0, alive = 0, aliveLen = 0, pending = 0;
-                                    for (auto &it: model->responseContextDict.dicts) {
-                                        if (it.second->isEnding) {
-                                            continue;
-                                        }
-                                        if (it.second->pastKeyValues[model->kvCacheId].first.expansionDims.size() > 0) {
-                                            alive++;
-                                            aliveLen += it.second->pastKeyValues[model->kvCacheId].first.expansionDims[1];
-                                        } else {
-                                            pending++;
-                                        }
-                                    }
-                                    LogData log;
-                                    log.event = LogEvent::BatchStatus;
-                                    log.level = LogLevel::Debug;
-                                    log.tag = "状态";
-                                    log.data.active = alive;
-                                    log.data.pending = pending;
-                                    log.data.contextLen = aliveLen;
-                                    log.data.speed = (float)genTokens / spend;
-                                    EmitLog(log);
-                                    lastRecordTime = nowTime;
-                                    genTokens = 0;
-                                }
-                            }
-
                             for (int i = 0; i < handles.size(); i++) {
                                 auto &it = *model->responseContextDict.dicts.find(handles[i]);
                                 int curRet = ret[i];
@@ -1135,6 +1100,42 @@ printf("len = %d, spend = %f s. tokens / s = %f\n", (int)total, spend, (float)to
                                         it.second->isEnding = true;
                                         it.second->TryRecord(model);
                                     }
+                                }
+                            }
+                            
+                            // 批处理状态日志（统一由核心模块计算状态）
+                            if (model->verbose) {
+                                genTokens += seqLens.size();
+                                auto nowTime = std::chrono::system_clock::now();
+                                float spend = GetSpan(lastRecordTime, nowTime);
+                                
+                                // 统计当前活跃/等待请求数
+                                int alive = 0, aliveLen = 0, pending = 0;
+                                for (auto &it: model->responseContextDict.dicts) {
+                                    if (it.second->isEnding) continue;
+                                    if (it.second->pastKeyValues[model->kvCacheId].first.expansionDims.size() > 0) {
+                                        alive++;
+                                        aliveLen += it.second->pastKeyValues[model->kvCacheId].first.expansionDims[1];
+                                    } else {
+                                        pending++;
+                                    }
+                                }
+                                
+                                // 每秒更新状态，或者当所有请求完成时立即发送
+                                bool allComplete = (alive == 0 && pending == 0);
+                                if (spend > 1 || allComplete) {
+                                    LogData log;
+                                    log.event = LogEvent::BatchStatus;
+                                    log.level = LogLevel::Debug;
+                                    log.tag = "状态";
+                                    log.data.active = alive;
+                                    log.data.pending = pending;
+                                    log.data.contextLen = aliveLen;
+                                    log.data.speed = (spend > 0) ? (float)genTokens / spend : 0;
+                                    log.data.isComplete = allComplete;
+                                    EmitLog(log);
+                                    lastRecordTime = nowTime;
+                                    genTokens = 0;
                                 }
                             }
                         } else {
@@ -1195,9 +1196,7 @@ printf("len = %d, spend = %f s. tokens / s = %f\n", (int)total, spend, (float)to
                 log.data.current = len;
                 log.data.total = (int)inputTokens.size();
                 log.data.device = deviceName;
-                std::ostringstream oss;
-                oss << "命中前缀缓存: " << len << " tokens (输入 " << (int)inputTokens.size() << " tokens, 跳过 " << std::fixed << std::setprecision(1) << len * 100.0 / inputTokens.size() << "%, 位置: " << deviceName << ")";
-                log.message = oss.str();
+                log.data.skipPercent = (float)(len * 100.0 / inputTokens.size());
                 EmitLog(log);
             }
             forwardLocker.lock();
@@ -1235,9 +1234,7 @@ printf("len = %d, spend = %f s. tokens / s = %f\n", (int)total, spend, (float)to
                 log.level = LogLevel::Debug;
                 log.tag = "KVCache";
                 log.data.total = (int)inputTokens.size();
-                std::ostringstream oss;
-                oss << "未命中缓存, 需预填充 " << (int)inputTokens.size() << " tokens (缓存条目数: " << (int)pastKVCacheManager.memorys.size() << ")";
-                log.message = oss.str();
+                log.data.cacheEntries = (int)pastKVCacheManager.memorys.size();
                 EmitLog(log);
             }
         }

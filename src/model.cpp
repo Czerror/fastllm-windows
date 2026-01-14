@@ -576,7 +576,7 @@ namespace fastllm {
                     ErrorInFastLLM("SafeTensorItem.CreateBuffer: unsupport src dtype " + this->dtype + "\n");
                 }
             } else if (this->dtype == "I64") {
-                printf("skip I64 tensor %s\n", this->tensorName.c_str());
+                // printf("skip I64 tensor %s\n", this->tensorName.c_str());
                 return;
             } else {
                 ErrorInFastLLM("SafeTensorItem.CreateBuffer: unsupport src dtype " + this->dtype + "\n");
@@ -990,10 +990,10 @@ namespace fastllm {
         std::vector <std::string> ggufFileNames = GenerateGGUFFileList(fileName);
         AssertInFastLLM(ggufFileNames.size() > 0, "0 gguf file found!");
 
-        printf("Load model from files:\n");
-        for (auto &s : ggufFileNames) {
-            printf("%s\n", s.c_str());
-        }
+        // printf("Load model from files:\n");
+        // for (auto &s : ggufFileNames) {
+        //     printf("%s\n", s.c_str());
+        // }
         json11::Json config;
         ReadGGUFMetaData(ggufFileNames[0], config);
         json11::Json params = config["params"];
@@ -1028,7 +1028,7 @@ namespace fastllm {
                     std::string tokenizerConfigFile = path + "tokenizer_config.json";
                     auto tokenizerConfig = json11::Json::parse(ReadAllFile(tokenizerConfigFile), error);
                     std::string eos_token = tokenizerConfig["eos_token"].string_value();
-                    printf("eos_token = %s\n", eos_token.c_str());
+                    // printf("eos_token = %s\n", eos_token.c_str());
                     for (auto added_token : tokenizer["added_tokens"].array_items()) {
                         if (added_token["content"] == eos_token) {
                             model->eos_token_ids.insert(added_token["id"].int_value());
@@ -1066,49 +1066,49 @@ namespace fastllm {
             }
         } else {
             // Load params from gguf
-            printf("general.architecture = %s\n", arch.c_str());
-            printf("general.name = %s\n", params["general.name"].string_value().c_str());
+            // printf("general.architecture = %s\n", arch.c_str());
+            // printf("general.name = %s\n", params["general.name"].string_value().c_str());
 
             model = CreateModelWithType(ConvertGGUFTypeToFastllmType(arch));
             if (!params[arch + ".block_count"].is_null()) {
                 model->block_cnt = params[arch + ".block_count"].int_value();
-                printf("Load block_cnt = %d\n", model->block_cnt);
+                // printf("Load block_cnt = %d\n", model->block_cnt);
             }
 
             if (!params[arch + ".attention.head_count"].is_null()) {
                 model->num_attention_heads = params[arch + ".attention.head_count"].int_value();
-                printf("Load num_attention_heads = %d\n", model->num_attention_heads);
+                // printf("Load num_attention_heads = %d\n", model->num_attention_heads);
             }
 
             if (!params[arch + ".attention.head_count_kv"].is_null()) {
                 model->num_key_value_heads = params[arch + ".attention.head_count_kv"].int_value();
                 model->weight.dicts["num_key_value_heads"] = std::to_string(model->num_key_value_heads);
-                printf("Load num_key_value_heads = %d\n", model->num_key_value_heads);
+                // printf("Load num_key_value_heads = %d\n", model->num_key_value_heads);
             }
 
             if (!params[arch + ".embedding_length"].is_null()) {
                 model->embed_dim = params[arch + ".embedding_length"].int_value();
-                printf("Load embed_dim = %d\n", model->embed_dim);
+                // printf("Load embed_dim = %d\n", model->embed_dim);
             }
 
             if (!params[arch + ".context_length"].is_null()) {
                 model->max_positions = params[arch + ".context_length"].int_value();
-                printf("Load max_positions = %d\n", model->max_positions);
+                // printf("Load max_positions = %d\n", model->max_positions);
             }
 
             if (!params[arch + ".attention.layer_norm_rms_epsilon"].is_null()) {
                 model->rms_norm_eps = params[arch + ".attention.layer_norm_rms_epsilon"].number_value();
-                printf("Load rms_norm_eps = %f\n", model->rms_norm_eps);
+                // printf("Load rms_norm_eps = %f\n", model->rms_norm_eps);
             }
 
             if (!params["tokenizer.ggml.eos_token_id"].is_null()) {
                 model->eos_token_id = params["tokenizer.ggml.eos_token_id"].number_value();
-                printf("Load eos_token_id = %d\n", model->eos_token_id);
+                // printf("Load eos_token_id = %d\n", model->eos_token_id);
             }
 
             if (!params["tokenizer.chat_template"].is_null()) {
                 model->weight.tokenizer.chatTemplate = params["tokenizer.chat_template"].string_value();
-                printf("Load chatTemplate = %s\n", model->weight.tokenizer.chatTemplate.c_str());
+                // printf("Load chatTemplate = %s\n", model->weight.tokenizer.chatTemplate.c_str());
             }
 
             int idx = 0;
@@ -1388,8 +1388,8 @@ if (false) {
             delete threads[i];
         }
 
-        printf("\n");
-        fflush(stdout);
+        // printf("\n");
+        // fflush(stdout);
 
         model->ApplyAutoDeviceMap();
         model->WarmUp();
@@ -1516,7 +1516,7 @@ if (false) {
                 std::string tokenizerConfigFile = path + "tokenizer_config.json";
                 auto tokenizerConfig = json11::Json::parse(ReadAllFile(tokenizerConfigFile), error);
                 std::string eos_token = tokenizerConfig["eos_token"].string_value();
-                printf("eos_token = %s\n", eos_token.c_str());
+                // printf("eos_token = %s\n", eos_token.c_str());
                 for (auto added_token : tokenizer["added_tokens"].array_items()) {
                     if (added_token["content"] == eos_token) {
                         model->eos_token_ids.insert(added_token["id"].int_value());
@@ -1655,8 +1655,9 @@ if (false) {
             }
 
             totalBytes += tensor.bytes;
-            printf("Load %d \r", (++cur) * 100 / (int)safeTensors.itmeDict.size());
-            fflush(stdout);
+            // printf("Load %d \r", (++cur) * 100 / (int)safeTensors.itmeDict.size());
+            // fflush(stdout);
+            cur++;
         }
 
         // 4.2 读取
@@ -2031,6 +2032,22 @@ if (false) {
 
                         locker.lock();
                         cnt++;
+                        // 发送模型加载进度日志（节流：只在百分比变化时发送）
+                        if (GetLogCallback()) {
+                            int totalSize = (int)tensors.size();
+                            int newPercent = (cnt * 100) / totalSize;
+                            int oldPercent = ((cnt - 1) * 100) / totalSize;
+                            // 首次、百分比变化、或最后一个时发送
+                            if (cnt == 1 || newPercent != oldPercent || cnt == totalSize) {
+                                LogData log;
+                                log.event = LogEvent::ModelLoadProgress;
+                                log.level = LogLevel::Info;
+                                log.tag = "model";
+                                log.data.current = cnt;
+                                log.data.total = totalSize;
+                                EmitLog(log);
+                            }
+                        }
                         locker.unlock();
                     }
                 }, parts[i].first, parts[i].second)
@@ -2041,8 +2058,15 @@ if (false) {
             delete threads[i];
         }
 
-        printf("\n");
-        fflush(stdout);
+        // 发送模型加载完成日志
+        if (GetLogCallback()) {
+            LogData log;
+            log.event = LogEvent::ModelLoadComplete;
+            log.level = LogLevel::Info;
+            log.tag = "model";
+            log.data.total = (int)tensors.size();
+            EmitLog(log);
+        }
 
         delete loraTensors;
 
@@ -2187,16 +2211,16 @@ if (false) {
         }
 
         if (dtypeRules.size() > 0) {
-            printf("Dtype rules:\n");
-            for (auto &it : dtypeRules) {
-                printf("%s: %s\n", it.first.c_str(), it.second.c_str());
-            }
+            // printf("Dtype rules:\n");
+            // for (auto &it : dtypeRules) {
+            //     printf("%s: %s\n", it.first.c_str(), it.second.c_str());
+            // }
         }
 
         for (auto &file : safeTensors.fileNames) {
             std::map <std::string, Data> weights;
             std::string outputFileName = outputFileDict[file];
-            printf("Export weight model: %s\n", outputFileName.c_str());
+            // printf("Export weight model: %s\n", outputFileName.c_str());
             std::vector <SafeTensorItem*> items;
             for (auto &it : safeTensors.itmeDict) {
                 if (it.second.fileName == file) {
@@ -2268,6 +2292,7 @@ if (false) {
                             int curGroupCnt = model->moeLinears.find(weightName) != model->moeLinears.end() ? moeGroupCnt : groupCnt;
                             if ((dataType == DATA_AUTO_LINEAR || dataType == DATA_AUTO_CONV) && dtypeRules.size() > 0) {
                                 ParseDataType(weightName, dtypeRules, dataType, curGroupCnt, ggmlType);
+/*
                                 if (dataType == DATA_GGUF_FORMAT) {
                                     printf("weight \"%s\" -> %s\n", weightName.c_str(), ggml_type_name((ggml_type)ggmlType));
                                 } else {
@@ -2277,6 +2302,7 @@ if (false) {
                                     }
                                     printf("\n");
                                 }
+*/
                             }
 
                             if (dataType >= DATA_AUTO_NONE) {

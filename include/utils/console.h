@@ -115,23 +115,6 @@ static constexpr const char* CURSOR_SAVE = "\x1b[s";
 static constexpr const char* CURSOR_RESTORE = "\x1b[u";
 
 // ============================================================================
-// 进度动画帧 (Spinner)
-// ============================================================================
-static constexpr const char* SPINNER_FRAMES[] = {
-    "\xe2\xa0\x8b", // ⠋
-    "\xe2\xa0\x99", // ⠙
-    "\xe2\xa0\xb9", // ⠹
-    "\xe2\xa0\xb8", // ⠸
-    "\xe2\xa0\xbc", // ⠼
-    "\xe2\xa0\xb4", // ⠴
-    "\xe2\xa0\xa6", // ⠦
-    "\xe2\xa0\xa7", // ⠧
-    "\xe2\xa0\x87", // ⠇
-    "\xe2\xa0\x8f"  // ⠏
-};
-static constexpr int SPINNER_FRAME_COUNT = 10;
-
-// ============================================================================
 // 预定义边框线
 // ============================================================================
 static constexpr const char* LINE_DOUBLE = "════════════════════════════════════════════════════════════";
@@ -258,9 +241,12 @@ inline void printStatusIcon(const char* icon, const char* color, const std::stri
 
 // 成功消息 (绿色 ✓)
 inline void printSuccess(const std::string& msg) {
+    // 先清除当前行（可能有进度或状态信息）
     if (getAnsiEnabled()) {
+        std::cout << CLEAR_LINE << "\r";
         std::cout << GREEN << ICON_CHECK << " " << RESET << msg << std::endl;
     } else {
+        std::cout << "\r" << std::string(60, ' ') << "\r";
         std::cout << "[OK] " << msg << std::endl;
     }
 }
@@ -423,25 +409,13 @@ inline void printBox2Line(const std::string& text, int width = 60) {
 // ============================================================================
 // 进度条
 // ============================================================================
-inline void printProgressBar(double progress, int width = 40, const char* label = nullptr) {
-    if (label) {
-        ansi(std::cout, DIM) << label << " ";
-        reset(std::cout);
-    }
-    int filled = static_cast<int>(progress * width);
-    std::cout << "[";
-    ansi(std::cout, GREEN);
-    for (int i = 0; i < filled; ++i) std::cout << "#";
-    reset(std::cout);
-    ansi(std::cout, DIM);
-    for (int i = filled; i < width; ++i) std::cout << "-";
-    reset(std::cout);
-    std::cout << "] " << static_cast<int>(progress * 100) << "%" << std::endl;
-}
 
 // 单行进度更新 (覆盖当前行)
 inline void updateProgressInline(double progress, int width = 40, const char* label = nullptr) {
-    if (getAnsiEnabled()) std::cout << CLEAR_LINE;
+    if (getAnsiEnabled()) {
+        std::cout << CURSOR_HIDE;  // 隐藏光标避免闪烁
+        std::cout << CLEAR_LINE;
+    }
     if (label) {
         ansi(std::cout, DIM) << label << " ";
         reset(std::cout);

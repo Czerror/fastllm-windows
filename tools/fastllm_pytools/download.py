@@ -98,8 +98,8 @@ class HFDDownloader:
             console.header(f"下载模型: {self.args.repo_id}")
             
             # 获取并处理元数据
-            with console.spinner("获取仓库元数据", "元数据获取完成"):
-                metadata = self.fetch_metadata()
+            metadata = self.fetch_metadata()
+            console.success("元数据获取完成")
             self.check_authentication(metadata)
             
             # 生成下载列表

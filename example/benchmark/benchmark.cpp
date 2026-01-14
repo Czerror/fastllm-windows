@@ -211,7 +211,7 @@ int main(int argc, char **argv) {
     console::printConfig("Prompt 耗时", promptOss.str());
     console::printConfig("输出 Tokens", std::to_string(tokens));
     std::ostringstream outputOss;
-    outputOss << std::fixed << std::setprecision(2) << spend << " s (" << tokens / spend << " tokens/s)";
+    outputOss << std::fixed << std::setprecision(2) << spend << " s (" << tokens / spend << " tok/s)";
     console::printConfig("输出耗时", outputOss.str());
     return 0;
 }

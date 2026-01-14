@@ -7,8 +7,6 @@ console.py - 控制台美化输出模块
 
 import os
 import sys
-import threading
-import time
 from contextlib import contextmanager
 
 # 检测 ANSI 支持
@@ -79,100 +77,6 @@ class Icon:
     SPARKLE = "✨"
 
 
-# Spinner 动画帧
-SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
-SPINNER_FRAMES_SIMPLE = ["|", "/", "-", "\\"]
-
-
-class Spinner:
-    """旋转动画指示器"""
-    
-    def __init__(self, message: str = "加载中", use_simple: bool = False):
-        self.message = message
-        self.frames = SPINNER_FRAMES_SIMPLE if use_simple else SPINNER_FRAMES
-        self.running = False
-        self.thread = None
-        self.frame_idx = 0
-        self.start_time = None
-    
-    def _animate(self):
-        while self.running:
-            elapsed = time.time() - self.start_time
-            frame = self.frames[self.frame_idx % len(self.frames)]
-            
-            # 再次检查 running 状态，避免在 stop 后继续输出
-            if not self.running:
-                break
-                
-            if _ansi_enabled:
-                # 清除当前行并显示 spinner
-                sys.stdout.write(f"\x1b[2K\r{Style.CYAN}{frame}{Style.RESET} {self.message} ({elapsed:.1f}s)")
-            else:
-                sys.stdout.write(f"\r{frame} {self.message} ({elapsed:.1f}s)")
-            sys.stdout.flush()
-            
-            self.frame_idx += 1
-            time.sleep(0.1)
-    
-    def start(self):
-        """启动 spinner"""
-        self.running = True
-        self.start_time = time.time()
-        self.thread = threading.Thread(target=self._animate, daemon=True)
-        self.thread.start()
-    
-    def stop(self, final_message: str = None, success: bool = True):
-        """停止 spinner"""
-        self.running = False
-        if self.thread:
-            self.thread.join(timeout=0.5)  # 等待线程完全退出
-        
-        elapsed = time.time() - self.start_time if self.start_time else 0
-        
-        # 短暂延迟确保线程完全停止
-        time.sleep(0.05)
-        
-        # 清除 spinner 行
-        if _ansi_enabled:
-            sys.stdout.write("\x1b[2K\r")
-        else:
-            sys.stdout.write("\r" + " " * 60 + "\r")
-        sys.stdout.flush()
-        
-        # 显示最终消息
-        if final_message:
-            if success:
-                if _ansi_enabled:
-                    print(f"{Style.GREEN}{Icon.CHECK}{Style.RESET} {final_message} ({elapsed:.1f}s)")
-                else:
-                    print(f"[OK] {final_message} ({elapsed:.1f}s)")
-            else:
-                if _ansi_enabled:
-                    print(f"{Style.RED}{Icon.CROSS}{Style.RESET} {final_message} ({elapsed:.1f}s)")
-                else:
-                    print(f"[FAIL] {final_message} ({elapsed:.1f}s)")
-        sys.stdout.flush()
-
-
-@contextmanager
-def spinner(message: str = "加载中", success_msg: str = None, fail_msg: str = None):
-    """
-    Spinner 上下文管理器
-    
-    使用方式:
-        with spinner("加载模型", "模型加载完成"):
-            load_model()
-    """
-    s = Spinner(message)
-    s.start()
-    try:
-        yield s
-        s.stop(success_msg or message + " 完成", success=True)
-    except Exception as e:
-        s.stop(fail_msg or f"{message} 失败: {e}", success=False)
-        raise
-
-
 def is_ansi_enabled() -> bool:
     """检查 ANSI 是否启用"""
     return _ansi_enabled
@@ -188,28 +92,15 @@ def styled(text: str, *styles) -> str:
 
 def success(msg: str) -> None:
     """打印成功消息"""
+    # 先清除当前行（可能有进度或状态信息）
     if _ansi_enabled:
+        sys.stdout.write("\x1b[2K\r")
+        sys.stdout.flush()
         print(f"{Style.GREEN}{Icon.CHECK}{Style.RESET} {msg}")
     else:
+        sys.stdout.write("\r" + " " * 60 + "\r")
+        sys.stdout.flush()
         print(f"[OK] {msg}")
-
-
-def print_inference_stats(prompt_tokens: int, output_tokens: int, 
-                          total_time: float, first_token_time: float, speed: float) -> None:
-    """打印推理统计信息（与 C++ apiserver 格式一致）"""
-    if _ansi_enabled:
-        print(f"{Style.GREEN}{Icon.CHECK}{Style.RESET} "
-              f"提示词: {Style.BRIGHT_CYAN}{prompt_tokens}{Style.RESET}, "
-              f"输出: {Style.BRIGHT_CYAN}{output_tokens}{Style.RESET}, "
-              f"耗时: {Style.YELLOW}{total_time:.2f}s{Style.RESET}, "
-              f"首字: {Style.YELLOW}{first_token_time:.2f}s{Style.RESET}, "
-              f"速度: {Style.BRIGHT_GREEN}{speed:.1f} t/s{Style.RESET}")
-    else:
-        print(f"[完成] 提示词: {prompt_tokens}, "
-              f"输出: {output_tokens}, "
-              f"耗时: {total_time:.2f}s, "
-              f"首字: {first_token_time:.2f}s, "
-              f"速度: {speed:.1f} t/s")
 
 
 def error(msg: str) -> None:
@@ -258,6 +149,44 @@ def rule(char: str = "─", width: int = 40) -> None:
     print(char * width)
 
 
+def request_start(total_count: int, request_id: str) -> None:
+    """打印请求开始信息（与 C++ apiserver 一致）"""
+    if _ansi_enabled:
+        # 格式：[累计请求数](蓝色) = N
+        print(f"{Style.CYAN}[累计请求数]{Style.RESET} = {total_count}")
+    else:
+        print(f"[累计请求数] = {total_count}")
+
+
+def request_complete(request_id: str) -> None:
+    """打印请求完成信息（与 C++ apiserver 一致）"""
+    # 先清除当前行（可能有"生成中"状态），确保正确换行
+    sys.stdout.write("\x1b[2K\r")
+    sys.stdout.flush()
+    if _ansi_enabled:
+        # 格式：  请求 X 处理完成 (灰色，有缩进)
+        print(f"{Style.DIM}  请求 {request_id} 处理完成{Style.RESET}")
+    else:
+        print(f"  请求 {request_id} 处理完成")
+
+
+def print_inference_stats(prompt_tokens: int, output_tokens: int, total_time: float, 
+                          first_token_time: float, speed: float) -> None:
+    """打印推理统计信息（与 C++ apiserver 一致）"""
+    # 注意：调用方（request_complete）已经清除行并换行，这里直接输出
+    if _ansi_enabled:
+        print(f"{Style.GREEN}{Icon.CHECK}{Style.RESET} "
+              f"提示词: {Style.BRIGHT_CYAN}{prompt_tokens}{Style.RESET}, "
+              f"输出: {Style.BRIGHT_CYAN}{output_tokens}{Style.RESET}, "
+              f"耗时: {Style.YELLOW}{total_time:.2f}s{Style.RESET}, "
+              f"首字: {Style.YELLOW}{first_token_time:.2f}s{Style.RESET}, "
+              f"速度: {Style.BRIGHT_GREEN}{speed:.1f} tokens/s{Style.RESET}")
+    else:
+        print(f"[完成] 提示词: {prompt_tokens}, 输出: {output_tokens}, "
+              f"耗时: {total_time:.2f}s, 首字: {first_token_time:.2f}s, "
+              f"速度: {speed:.1f} tokens/s")
+
+
 def prompt(text: str) -> str:
     """美化的输入提示"""
     if _ansi_enabled:
@@ -278,21 +207,6 @@ def user_prompt() -> str:
     if _ansi_enabled:
         return f"\n{Style.BOLD}{Style.BLUE}User：{Style.RESET}"
     return "\nUser："
-
-
-# 进度条相关
-def progress_bar(progress: float, width: int = 40, label: str = None) -> str:
-    """生成进度条字符串"""
-    filled = int(progress * width)
-    bar = "█" * filled + "░" * (width - filled)
-    pct = int(progress * 100)
-    
-    if _ansi_enabled:
-        prefix = f"{Style.DIM}{label} {Style.RESET}" if label else ""
-        return f"{prefix}[{Style.GREEN}{bar[:filled]}{Style.RESET}{Style.DIM}{bar[filled:]}{Style.RESET}] {pct}%"
-    else:
-        prefix = f"{label} " if label else ""
-        return f"{prefix}[{bar}] {pct}%"
 
 
 def clear_line() -> None:

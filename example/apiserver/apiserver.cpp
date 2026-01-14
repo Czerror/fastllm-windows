@@ -928,12 +928,12 @@ struct WorkQueue {
                     ts->activateQueryNumber++;
 
                     ts->totalQueryNumber++;
-                    printf("累计请求数 = %d\n", ts->totalQueryNumber);
+                    // 显示累计请求数：[累计请求数(蓝色)] = N
+                    printf("\033[36m[累计请求数]\033[0m = %d\n", ts->totalQueryNumber);
 //printf("activate = %d, q.size() = %d\n", ts->activateQueryNumber, (int) ts->q.size());
 
                     std::thread *t = new std::thread([](WorkQueue *ts, WorkNode *now) {
                         ts->Deal(now);
-                        printf("客户端 %lld 请求处理完成\n", (long long)now->client);
                         ts->locker.lock();
                         ts->activateQueryNumber--;
                         ts->locker.unlock();
@@ -1706,7 +1706,7 @@ struct WorkQueue {
                 int outputTokens = 0;
                 std::vector<float> results;
                 std::string utf8Buffer;  // Buffer for incomplete UTF-8 sequences (reference: llama.cpp)
-                InferenceStats stats((int)tokens.size());
+                InferenceStats stats((int)tokens.size(), (long long)node->client);
                 while (true) {
                     int result = model->FetchResponseTokens(handleId);
                     if (result == -1) {
@@ -1841,7 +1841,7 @@ struct WorkQueue {
 
                 CloseSocket(node->client);
             } else {
-                InferenceStats stats((int)tokens.size());
+                InferenceStats stats((int)tokens.size(), (long long)node->client);
                 int outputTokens = 0;
                 std::vector<float> results;
                 while (true) {
@@ -2039,7 +2039,7 @@ struct WorkQueue {
 
                 int outputTokens = 0;
                 std::vector<float> results;
-                InferenceStats stats((int)tokens.size());
+                InferenceStats stats((int)tokens.size(), (long long)node->client);
                 while (true) {
                     int result = model->FetchResponseTokens(handleId);
                     if (result == -1) {
@@ -2110,7 +2110,7 @@ struct WorkQueue {
 
             int outputTokens = 0;
             std::vector<float> results;
-            InferenceStats stats((int)tokens.size());
+            InferenceStats stats((int)tokens.size(), (long long)node->client);
             while (true) {
                 int result = model->FetchResponseTokens(handleId);
                 if (result == -1) {
@@ -2439,8 +2439,19 @@ int main(int argc, char** argv) {
         exit(0);
     }
     bool isHFDir = fastllm::FileExists(config.path + "/config.json") || fastllm::FileExists(config.path + "config.json");
-    workQueue.model = isHFDir ? fastllm::CreateLLMModelFromHF(config.path, config.dtype, config.groupCnt)
-        : fastllm::CreateLLMModelFromFile(config.path);
+    
+    // 显示加载模型分类标题
+    console::printHeader("加载模型");
+    
+    // 加载模型（日志回调会显示进度）
+    {
+        auto loadStart = std::chrono::steady_clock::now();
+        workQueue.model = isHFDir ? fastllm::CreateLLMModelFromHF(config.path, config.dtype, config.groupCnt)
+            : fastllm::CreateLLMModelFromFile(config.path);
+        auto loadEnd = std::chrono::steady_clock::now();
+        double elapsed = std::chrono::duration<double>(loadEnd - loadStart).count();
+        console::printSuccess("模型加载完成 (" + std::to_string((int)elapsed) + "s)");
+    }
     workQueue.model->SetSaveHistoryChat(true);
 
     if (!config.embeddingPath.empty()) {
@@ -2448,7 +2459,14 @@ int main(int argc, char** argv) {
             std::cerr << "embedding模型文件 " << config.embeddingPath << " 不存在！" << std::endl;
             exit(0);
         }
-        workQueue.embeddingModel = fastllm::CreateEmbeddingModelFromFile(config.embeddingPath);
+        // 加载 Embedding 模型
+        {
+            auto loadStart = std::chrono::steady_clock::now();
+            workQueue.embeddingModel = fastllm::CreateEmbeddingModelFromFile(config.embeddingPath);
+            auto loadEnd = std::chrono::steady_clock::now();
+            double elapsed = std::chrono::duration<double>(loadEnd - loadStart).count();
+            console::printSuccess("Embedding 模型加载完成 (" + std::to_string((int)elapsed) + "s)");
+        }
         workQueue.embeddingModel->SetSaveHistoryChat(false);
         workQueue.embeddingModel->SetDataType(config.atype);
         console::printConfig("Embedding 模型", config.embeddingPath);

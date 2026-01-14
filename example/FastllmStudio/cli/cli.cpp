@@ -69,7 +69,7 @@ int main(int argc, char **argv) {
                     }
                     if (index == -1) {
                         printf("\n");
-                        printf("tokens speed: %f tokens / s.\n", cnt / fastllm::GetSpan(st, std::chrono::system_clock::now()));
+                        printf("生成速度: %.1f tokens/s\n", cnt / fastllm::GetSpan(st, std::chrono::system_clock::now()));
                     }
                 }, generationConfig);
                 history = model->MakeHistory(history, curRound, input, ret);

@@ -33,6 +33,9 @@ namespace fastllm {
         PrefillProgress,    // 预填充进度
         PrefillComplete,    // 预填充完成
         BatchStatus,        // 批处理状态
+        ModelLoadProgress,  // 模型加载进度
+        ModelLoadComplete,  // 模型加载完成
+        WarmUp,             // 模型预热
         General             // 通用日志
     };
 
@@ -51,6 +54,14 @@ namespace fastllm {
             int pending = 0;
             int contextLen = 0;
             std::string device;
+            // KVCache 相关
+            double kvCacheMB = 0;       // KV缓存大小(MB)
+            int tokenLimit = 0;         // Token上限
+            int promptLimit = 0;        // 提示词上限
+            int maxBatch = 0;           // 批量上限
+            int cacheEntries = 0;       // 缓存条目数
+            float skipPercent = 0;      // 跳过百分比
+            bool isComplete = false;    // 批处理完成标志（用于 BatchStatus）
         } data;
     };
 

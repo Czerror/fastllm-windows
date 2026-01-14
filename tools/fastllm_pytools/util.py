@@ -243,10 +243,16 @@ def make_normal_llm_model(args):
         with open(args.chat_template, "r", encoding="utf-8") as file:
             args.chat_template = file.read()
     
-    # 使用 Spinner 显示模型加载进度
-    with console.spinner("加载模型", "模型加载完成"):
-        model = llm.model(args.path, dtype = args.dtype, moe_dtype = args.moe_dtype, graph = graph, tokenizer_type = "auto", lora = args.lora, 
-                            dtype_config = args.dtype_config, ori_model_path = args.ori, chat_template = args.chat_template, tool_call_parser = args.tool_call_parser)
+    # 显示加载模型分类标题
+    console.header("加载模型")
+    
+    # 加载模型（日志回调会显示进度，与 C++ apiserver 一致）
+    import time
+    load_start = time.time()
+    model = llm.model(args.path, dtype = args.dtype, moe_dtype = args.moe_dtype, graph = graph, tokenizer_type = "auto", lora = args.lora, 
+                        dtype_config = args.dtype_config, ori_model_path = args.ori, chat_template = args.chat_template, tool_call_parser = args.tool_call_parser)
+    load_elapsed = time.time() - load_start
+    console.success(f"模型加载完成 ({load_elapsed:.0f}s)")
     
     if (args.enable_thinking.lower() in ["", "false", "0", "off"]):
         model.enable_thinking = False

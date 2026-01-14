@@ -8,6 +8,8 @@
 
 #include "executor.h"
 
+#include "models/basellm.h"  // 日志回调系统
+
 #include <cstring>
 #include <cmath>
 #include <cfloat>
@@ -2149,11 +2151,24 @@ namespace fastllm {
                 }
             }
 
-            printf("Load (%d / %d) \r", (i + 1), len);
-            fflush(stdout);
+            if (GetLogCallback()) {
+                LogData log;
+                log.event = LogEvent::ModelLoadProgress;
+                log.level = LogLevel::Info;
+                log.tag = "model";
+                log.data.current = i + 1;
+                log.data.total = len;
+                EmitLog(log);
+            }
         }
-        printf("\n");
-        fflush(stdout);
+        if (GetLogCallback()) {
+            LogData log;
+            log.event = LogEvent::ModelLoadComplete;
+            log.level = LogLevel::Info;
+            log.tag = "model";
+            log.data.total = len;
+            EmitLog(log);
+        }
         return;
     }
 

@@ -30,6 +30,7 @@ namespace console {
 
 // 显示推理统计信息（线程安全，防止颜色串行）
 inline void printStats(int promptTokens, int outputTokens, double totalTime, double firstTokenTime, double speed) {
+    // 注意：调用方（InferenceStatsHelper::print）已清除行并输出"请求完成"
     std::ostringstream oss;
     if (getAnsiEnabled()) {
         oss << GREEN << ICON_CHECK << RESET 
@@ -37,14 +38,14 @@ inline void printStats(int promptTokens, int outputTokens, double totalTime, dou
             << ", 输出: " << BRIGHT_CYAN << outputTokens << RESET
             << ", 耗时: " << YELLOW << std::fixed << std::setprecision(2) << totalTime << "s" << RESET
             << ", 首字: " << YELLOW << std::fixed << std::setprecision(2) << firstTokenTime << "s" << RESET
-            << ", 速度: " << BRIGHT_GREEN << std::fixed << std::setprecision(1) << speed << " t/s" << RESET
+            << ", 速度: " << BRIGHT_GREEN << std::fixed << std::setprecision(1) << speed << " tokens/s" << RESET
             << std::endl;
     } else {
         oss << "[完成] 提示词: " << promptTokens 
             << ", 输出: " << outputTokens 
             << ", 耗时: " << std::fixed << std::setprecision(2) << totalTime << "s"
             << ", 首字: " << std::fixed << std::setprecision(2) << firstTokenTime << "s"
-            << ", 速度: " << std::fixed << std::setprecision(1) << speed << " t/s"
+            << ", 速度: " << std::fixed << std::setprecision(1) << speed << " tokens/s"
             << std::endl;
     }
     // 一次性输出，避免多线程交错导致颜色串行
@@ -66,8 +67,9 @@ public:
     int promptTokens = 0;
     int outputTokens = 0;
     bool firstTokenReceived = false;
+    long long clientId = 0;  // 请求 ID，用于显示"请求 X 处理完成"
     
-    InferenceStatsHelper(int promptToks = 0) : promptTokens(promptToks) {
+    InferenceStatsHelper(int promptToks = 0, long long client = 0) : promptTokens(promptToks), clientId(client) {
         requestStart = std::chrono::high_resolution_clock::now();
     }
     
@@ -114,8 +116,16 @@ public:
         return info;
     }
     
-    // 打印统计信息
+    // 打印统计信息（先输出"请求完成"，再输出统计）
     void print() const {
+        // 先输出"请求完成"（灰色，有缩进）
+        if (clientId > 0) {
+            if (console::getAnsiEnabled()) {
+                printf("\033[2K\r\033[2m  请求 %lld 处理完成\033[0m\n", clientId);
+            } else {
+                printf("\r%70s\r  请求 %lld 处理完成\n", "", clientId);
+            }
+        }
         console::printStats(promptTokens, outputTokens, getTotalTime(), getFirstTokenLatency(), getSpeed());
     }
 };
