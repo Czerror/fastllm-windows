@@ -1546,18 +1546,62 @@ printf("len = %d, spend = %f s. tokens / s = %f\n", (int)total, spend, (float)to
         if (this->weight.tokenizer.chatTemplate == "") {
             std::string ret = "";
             std::string user = "";
+            std::string customSystem = "";
             int round = 0;
+            
+            // 首先提取 system 消息
+            for (auto &message : messages) {
+                if (message.first == "system") {
+                    customSystem = message.second;
+                    break;  // 只取第一个 system 消息
+                }
+            }
+            
+            // 如果有自定义 system 消息，临时替换 pre_prompt
+            std::string originalPrePrompt = this->pre_prompt;
+            if (!customSystem.empty()) {
+                // 检测 pre_prompt 的格式并相应地替换
+                // 常见格式: "<|im_start|>system\n{content}<|im_end|>\n"
+                // 或者: "<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n{content}<|eot_id|>"
+                if (this->pre_prompt.find("<|im_start|>system") != std::string::npos) {
+                    // Qwen/ChatML 格式
+                    this->pre_prompt = "<|im_start|>system\n" + customSystem + "<|im_end|>\n";
+                } else if (this->pre_prompt.find("<|start_header_id|>system") != std::string::npos) {
+                    // Llama 3 格式
+                    this->pre_prompt = "<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n" + customSystem + "<|eot_id|>";
+                } else {
+                    // 简单替换，假设 pre_prompt 就是 system 内容
+                    this->pre_prompt = customSystem;
+                }
+            }
+            
             for (auto &message : messages) {
                 if (message.first == "user") {
                     user = message.second;
                 } else if (message.first == "assistant") {
                     ret = MakeHistory(ret, round++, user, message.second);
                 }
+                // system 消息已通过 pre_prompt 处理，跳过
             }
             ret = MakeInput(ret, round, user);
+            
+            // 恢复原始 pre_prompt
+            this->pre_prompt = originalPrePrompt;
+            
             return ret;
         }
         return ApplyChatTemplate(ChatMessagesToJinjaVar(messages));
+    }
+
+    std::string basellm::ApplyChatTemplate(const ChatMessages &messages, const JinjaVar &tools) {
+        // 如果有 Jinja chatTemplate，使用它并传递 tools
+        if (this->weight.tokenizer.chatTemplate != "") {
+            JinjaVar var = ChatMessagesToJinjaVar(messages);
+            var["tools"] = tools;
+            return ApplyChatTemplate(var);
+        }
+        // 否则回退到无 tools 的版本（tools 通过 system message 注入）
+        return ApplyChatTemplate(messages);
     }
 
     std::vector <int> basellm::ApplyChatTemplateToTokens(const ChatMessages &messages) {

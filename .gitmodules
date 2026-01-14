@@ -6,3 +6,9 @@
         path = third_party/sentencepiece
         url = https://github.com/google/sentencepiece.git
         branch = master
+[submodule "third_party/nlohmann"]
+	path = third_party/nlohmann
+	url = https://github.com/nlohmann/json.git
+[submodule "third_party/minja"]
+	path = third_party/minja
+	url = https://github.com/google/minja.git

@@ -430,6 +430,18 @@ namespace fastllm {
             return JinjaVar(string);
         };
         functionArgCount["strip"] = 2;
+        // tojson 过滤器/函数: 将 JinjaVar 转换为 JSON 字符串
+        // 作为过滤器使用: {{ value | tojson }}
+        // 作为函数使用: {{ tojson(value) }}
+        functionMap["tojson"] = [](const JinjaVar &element) {
+            // 当作为函数调用时，参数在 arrayValue[0]
+            // 当作为过滤器调用时，element 就是值本身
+            if (element.type == JinjaVar::JinjaArray && element.arrayValue.size() == 1) {
+                return JinjaVar(element.arrayValue[0].Dump());
+            }
+            return JinjaVar(element.Dump());
+        };
+        functionArgCount["tojson"] = 1;
     }
 
     JinjaTemplate::JinjaTemplate (const std::string &temp) {

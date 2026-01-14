@@ -318,6 +318,9 @@ namespace fastllm {
 
         // messages: [ (role, content) ... ]
         virtual std::string ApplyChatTemplate(const ChatMessages &messages);
+        
+        // 带 tools 参数的版本 (用于 function calling)
+        virtual std::string ApplyChatTemplate(const ChatMessages &messages, const JinjaVar &tools);
 
         virtual std::vector <int> ApplyChatTemplateToTokens(const ChatMessages &messages);
 

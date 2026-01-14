@@ -738,6 +738,15 @@ namespace fastllm {
         }
         auto tokenizerConfig = json11::Json::parse(ReadAllFile(tokenizerConfigFile), error);
         model->weight.tokenizer.SetTokenizerConfig(tokenizerConfig);
+        
+        // 如果 tokenizer_config.json 中没有 chat_template，尝试读取 chat_template.jinja 文件
+        if (model->weight.tokenizer.chatTemplate.empty()) {
+            std::string jinjaFile = path + "chat_template.jinja";
+            if (fastllm::FileExists(jinjaFile)) {
+                model->weight.tokenizer.chatTemplate = ReadAllFile(jinjaFile);
+            }
+        }
+        
         std::string tokenizerClass = tokenizerConfig["tokenizer_class"].string_value();
         if (tokenizerClass == "PreTrainedTokenizerFast" || tokenizerClass == "Qwen2Tokenizer") {
         } else if (tokenizerClass == "ChatGLM4Tokenizer") {
@@ -751,6 +760,15 @@ namespace fastllm {
         std::string tokenizerConfigFile = path + "tokenizer_config.json";
         auto tokenizerConfig = json11::Json::parse(ReadAllFile(tokenizerConfigFile), error);
         model->weight.tokenizer.SetTokenizerConfig(tokenizerConfig);
+        
+        // 如果 tokenizer_config.json 中没有 chat_template，尝试读取 chat_template.jinja 文件
+        if (model->weight.tokenizer.chatTemplate.empty()) {
+            std::string jinjaFile = path + "chat_template.jinja";
+            if (fastllm::FileExists(jinjaFile)) {
+                model->weight.tokenizer.chatTemplate = ReadAllFile(jinjaFile);
+            }
+        }
+        
         if (!model->weight.tokenizer.chatTemplate.empty() && model->weight.dicts.find("chat_template") == model->weight.dicts.end())
             model->weight.AddDict("chat_template", model->weight.tokenizer.chatTemplate);
         std::string tokenizerClass = tokenizerConfig["tokenizer_class"].string_value();

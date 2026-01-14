@@ -275,6 +275,10 @@ include_directories(include/devices/cpu)
 include_directories(third_party/json11)
 include_directories(third_party/gguf)
 
+# minja and nlohmann/json for chat template handling
+include_directories(third_party/nlohmann/single_include)
+include_directories(third_party/minja/include)
+
 # USE_MMAP: Only enable on non-Windows or when not building PY_API
 # Windows lacks sys/mman.h, so mmap is not available
 if (USE_MMAP)
@@ -540,8 +544,16 @@ add_custom_command(
 add_executable(benchmark example/benchmark/benchmark.cpp)
 target_link_libraries(benchmark fastllm)
 
+# chat_handler library (uses minja for Jinja2 templates)
+add_library(chat_handler STATIC src/chat_handler.cpp)
+target_include_directories(chat_handler PUBLIC 
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/nlohmann/single_include
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/minja/include
+)
+
 add_executable(apiserver example/apiserver/apiserver.cpp)
-target_link_libraries(apiserver fastllm)
+target_link_libraries(apiserver fastllm chat_handler)
 
 if (BUILD_STUDIO_CLI)
     add_executable(FastllmStudio_cli example/FastllmStudio/cli/cli.cpp example/FastllmStudio/cli/ui.cpp)

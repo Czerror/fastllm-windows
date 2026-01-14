@@ -1,3 +1,14 @@
+## V0.1.5.1.7
+
+- **C++ API Tool Call 支持**: apiserver 支持 OpenAI 兼容的 Function Calling / Tool Call
+- **Minja 模板引擎**: 集成 minja 库实现 Jinja2 chat template 渲染，支持多模型格式
+- **MCP Server 兼容**: 支持与 MCP (Model Context Protocol) Server 集成使用
+- **流式 Tool Call 解析**: 支持 Qwen3、DeepSeek 等多种 tool call 输出格式的流式解析
+- **Thinking/Reasoning 支持**: 支持 `<think>` / `<thinking>` 标签的 reasoning content 提取
+- **nlohmann/json 统一**: apiserver 使用 nlohmann::json 替代 json11，API 更现代化
+- **PEG Parser**: 内置轻量级 PEG 解析器用于结构化输出解析
+- **代码清理**: 移除 apiserver 中未使用的函数和重复 include
+
 ## V0.1.5.1.5
 
 - **日志系统重构**: 统一 C++ 和 Python 端的日志输出格式，支持美化进度条显示

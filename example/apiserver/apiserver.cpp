@@ -117,30 +117,29 @@ using socket_t = int;
 #include <cctype>
 #include <climits>
 #include <condition_variable>
-#include <cstring>
 #include <errno.h>
 #include <fcntl.h>
 #include <fstream>
 #include <functional>
-#include <iomanip>
-#include <iostream>
 #include <list>
 #include <map>
 #include <memory>
-#include <mutex>
 #include <random>
 #include <regex>
 #include <set>
 #include <sstream>
-#include <string>
 #include <sys/stat.h>
-#include <thread>
 #include "model.h"
+#include <nlohmann/json.hpp>
+
+// 使用 nlohmann::json 别名
+using json = nlohmann::json;
 
 // ===== 控制台美化输出支持 =====
 #include "utils/inference_stats.h"
 #include "utils/console.h"
 #include "utils/log_handler.h"  // 日志回调处理模块
+#include "utils/chat_handler.h" // Minja chat template 和 tool call 处理
 
 // 本地别名，保持兼容性
 using InferenceStats = fastllm::InferenceStatsHelper;
@@ -201,12 +200,12 @@ static ValidationResult ValidatePenalty(double v, const std::string &paramName) 
     return {};
 }
 
-static json11::Json BuildOpenAIError(const std::string &message,
-                                    const std::string &type,
-                                    const json11::Json &param = nullptr,
-                                    const json11::Json &code = nullptr) {
-    return json11::Json::object {
-        {"error", json11::Json::object {
+static json BuildOpenAIError(const std::string &message,
+                            const std::string &type,
+                            const json &param = nullptr,
+                            const json &code = nullptr) {
+    return json{
+        {"error", json{
             {"message", message},
             {"type", type},
             {"param", param},
@@ -225,7 +224,7 @@ static std::string HttpStatusText(int status) {
     }
 }
 
-static void SendJson(socket_t client, int status, const json11::Json &body) {
+static void SendJson(socket_t client, int status, const json &body) {
     std::string message;
     message += "HTTP/1.1 " + std::to_string(status) + " " + HttpStatusText(status) + "\r\n";
     message += "Content-Type:application/json\r\n";
@@ -233,19 +232,6 @@ static void SendJson(socket_t client, int status, const json11::Json &body) {
     message += "Access-Control-Allow-Origin: *\r\n";
     message += "\r\n";
     message += body.dump();
-    (void)WriteAll(client, message);
-}
-
-static void SendSSEHeaders(socket_t client) {
-    std::string message;
-    message += "HTTP/1.1 200 OK\r\n";
-    message += "Content-Type:text/event-stream\r\n";
-    message += "Cache-Control:no-cache\r\n";
-    message += "Connection:keep-alive\r\n";
-    message += "server:fastllm api server\r\n";
-    message += "Access-Control-Allow-Origin: *\r\n";
-    message += "Transfer-Encoding: chunked\r\n";
-    message += "\r\n";
     (void)WriteAll(client, message);
 }
 
@@ -392,12 +378,6 @@ static size_t ValidateUtf8(const std::string &text) {
     return len;
 }
 
-// Check if a string is valid UTF-8
-// Reference: llama.cpp's is_valid_utf8()
-static bool IsValidUtf8(const std::string &str) {
-    return ValidateUtf8(str) == str.size();
-}
-
 // Truncate string to valid UTF-8 boundary
 // Reference: llama.cpp's approach to ensure valid UTF-8 in JSON output
 static std::string TruncateToValidUtf8(const std::string &s) {
@@ -408,37 +388,27 @@ static std::string TruncateToValidUtf8(const std::string &s) {
     return s.substr(0, validLen);
 }
 
-static bool SendSSEData(socket_t client, const json11::Json &obj) {
-    std::string cur = "data: " + CompactJson(obj.dump()) + "\n\n";
-    return SendChunk(client, cur);
-}
-
-static bool SendSSEDone(socket_t client) {
-    std::string cur = "data: [DONE]\n\n";
-    return SendChunk(client, cur);
-}
-
-static std::string ExtractContentText(const json11::Json &content) {
+static std::string ExtractContentText(const json &content) {
     if (content.is_string()) {
-        return content.string_value();
+        return content.get<std::string>();
     }
     if (content.is_null()) {
         return "";
     }
     if (content.is_array()) {
         std::string out;
-        for (auto &part : content.array_items()) {
+        for (auto &part : content) {
             if (part.is_string()) {
-                out += part.string_value();
+                out += part.get<std::string>();
                 continue;
             }
             if (!part.is_object()) {
                 continue;
             }
-            std::string type = part["type"].string_value();
+            std::string type = part["type"].get<std::string>();
             if (type == "text" || type == "input_text") {
                 if (part["text"].is_string()) {
-                    out += part["text"].string_value();
+                    out += part["text"].get<std::string>();
                 }
             }
         }
@@ -446,136 +416,99 @@ static std::string ExtractContentText(const json11::Json &content) {
     }
     if (content.is_object()) {
         if (content["text"].is_string()) {
-            return content["text"].string_value();
+            return content["text"].get<std::string>();
         }
     }
     return "";
 }
 
-static std::string ExtractMessageText(const json11::Json &msg) {
+static std::string ExtractMessageText(const json &msg) {
     if (!msg.is_object()) {
         return "";
     }
     return ExtractContentText(msg["content"]);
 }
 
-// ========== Tool Calls 支持 ==========
+// ========== Minja ChatHandler (全局实例) ==========
+static std::unique_ptr<fastllm::ChatHandler> g_chatHandler;
+static fastllm::ChatTemplateCaps g_chatCaps;
 
-struct ToolCallInfo {
-    std::string id;
-    std::string name;
-    std::string arguments;
-};
-
-// 生成 tool call ID
-static std::string GenerateToolCallID() {
-    return "call_" + GenerateRandomID().substr(0, 24);
-}
-
-// 尝试从模型输出中解析工具调用
-// 支持多种格式：
-// 1. OpenAI function calling 格式: {"name": "xxx", "arguments": {...}}
-// 2. JSON 格式的函数调用数组
-static std::vector<ToolCallInfo> ParseToolCalls(const std::string &output) {
-    std::vector<ToolCallInfo> calls;
+// 初始化 ChatHandler (在模型加载后调用)
+static void InitChatHandler(fastllm::basellm *model) {
+    if (!model) return;
     
-    // 查找 JSON 对象的起始位置
-    size_t jsonStart = output.find('{');
-    if (jsonStart == std::string::npos) {
-        return calls;
-    }
-    
-    // 尝试提取最外层的 JSON
-    int depth = 0;
-    size_t jsonEnd = std::string::npos;
-    for (size_t i = jsonStart; i < output.size(); i++) {
-        if (output[i] == '{') depth++;
-        else if (output[i] == '}') {
-            depth--;
-            if (depth == 0) {
-                jsonEnd = i + 1;
-                break;
-            }
+    // 获取 chat_template
+    std::string chatTemplate = model->weight.tokenizer.chatTemplate;
+    if (chatTemplate.empty()) {
+        auto it = model->weight.dicts.find("chat_template");
+        if (it != model->weight.dicts.end()) {
+            chatTemplate = it->second;
         }
     }
     
-    if (jsonEnd == std::string::npos) {
-        return calls;
+    if (chatTemplate.empty()) {
+        console::printWarning("未找到 chat_template，将使用默认 tool call 解析");
+        return;
     }
     
-    std::string jsonStr = output.substr(jsonStart, jsonEnd - jsonStart);
-    std::string err;
-    auto parsed = json11::Json::parse(jsonStr, err);
-    
-    if (!err.empty() || parsed.is_null()) {
-        return calls;
-    }
-    
-    // 检查是否为 function call 格式
-    if (parsed["name"].is_string()) {
-        ToolCallInfo info;
-        info.id = GenerateToolCallID();
-        info.name = parsed["name"].string_value();
-        if (parsed["arguments"].is_object()) {
-            info.arguments = parsed["arguments"].dump();
-        } else if (parsed["arguments"].is_string()) {
-            info.arguments = parsed["arguments"].string_value();
-        } else if (parsed["parameters"].is_object()) {
-            info.arguments = parsed["parameters"].dump();
+    // 获取 bos/eos tokens
+    std::string bosToken, eosToken;
+    if (model->bos_token_id >= 0) {
+        auto it = model->weight.tokenizer.tokenToStringDict.find(model->bos_token_id);
+        if (it != model->weight.tokenizer.tokenToStringDict.end()) {
+            bosToken = it->second;
         }
-        calls.push_back(info);
     }
-    // 检查是否为 tool_calls 数组格式
-    else if (parsed["tool_calls"].is_array()) {
-        for (auto &item : parsed["tool_calls"].array_items()) {
-            if (item["function"].is_object()) {
-                ToolCallInfo info;
-                info.id = item["id"].is_string() ? item["id"].string_value() : GenerateToolCallID();
-                info.name = item["function"]["name"].string_value();
-                if (item["function"]["arguments"].is_object()) {
-                    info.arguments = item["function"]["arguments"].dump();
-                } else if (item["function"]["arguments"].is_string()) {
-                    info.arguments = item["function"]["arguments"].string_value();
-                }
-                calls.push_back(info);
-            }
+    if (model->eos_token_id >= 0) {
+        auto it = model->weight.tokenizer.tokenToStringDict.find(model->eos_token_id);
+        if (it != model->weight.tokenizer.tokenToStringDict.end()) {
+            eosToken = it->second;
         }
     }
     
-    return calls;
+    try {
+        g_chatHandler = std::make_unique<fastllm::ChatHandler>(chatTemplate, bosToken, eosToken);
+        if (g_chatHandler->hasTemplate()) {
+            g_chatCaps = g_chatHandler->getCapabilities();
+            console::printSuccess("Minja ChatHandler 已初始化");
+            console::printConfig("supports_tools", g_chatCaps.supports_tools ? "true" : "false");
+            console::printConfig("supports_tool_calls", g_chatCaps.supports_tool_calls ? "true" : "false");
+            console::printConfig("supports_parallel_tool_calls", g_chatCaps.supports_parallel_tool_calls ? "true" : "false");
+        } else {
+            g_chatHandler.reset();
+            console::printWarning("ChatHandler 模板解析失败");
+        }
+    } catch (const std::exception& e) {
+        console::printError("ChatHandler 初始化失败: " + std::string(e.what()));
+        g_chatHandler.reset();
+    }
 }
 
-// 构建 tool_calls JSON 数组
-static json11::Json::array BuildToolCallsJson(const std::vector<ToolCallInfo> &calls) {
-    json11::Json::array arr;
-    for (auto &call : calls) {
-        arr.push_back(json11::Json::object {
-            {"id", call.id},
-            {"type", "function"},
-            {"function", json11::Json::object {
-                {"name", call.name},
-                {"arguments", call.arguments}
-            }}
-        });
-    }
-    return arr;
-}
+// ========== Tool Calls 支持 (使用 ChatHandler) ==========
 
 // 检查请求中是否包含 tools 定义
-static bool HasToolsInRequest(const json11::Json &config) {
-    return config["tools"].is_array() && !config["tools"].array_items().empty();
+static bool HasToolsInRequest(const json &config) {
+    return config["tools"].is_array() && !config["tools"].empty();
 }
 
-// 获取 tool_choice 设置
-static std::string GetToolChoice(const json11::Json &config) {
-    if (config["tool_choice"].is_string()) {
-        return config["tool_choice"].string_value();
+// 使用 ChatHandler 解析 tool calls
+static std::vector<fastllm::ToolCall> ParseToolCalls(const std::string &output) {
+    if (g_chatHandler && g_chatHandler->hasTemplate()) {
+        auto calls = g_chatHandler->parseToolCalls(output);
+        // 确保每个 tool call 都有 ID
+        for (auto &tc : calls) {
+            if (tc.id.empty()) {
+                tc.id = fastllm::ChatHandler::generateToolCallId();
+            }
+        }
+        return calls;
     }
-    if (config["tool_choice"].is_object()) {
-        // 如果指定了具体的 function，返回 "required"
-        return "required";
-    }
-    return "auto"; // 默认值
+    return {};
+}
+
+// 构建 tool_calls JSON 数组 (使用 ChatHandler)
+static json BuildToolCallsJson(const std::vector<fastllm::ToolCall> &calls) {
+    return fastllm::ChatHandler::toolCallsToJson(calls);
 }
 
 // ========== Response Format 支持 ==========
@@ -586,7 +519,7 @@ struct ResponseFormatInfo {
 };
 
 // 解析 response_format 参数
-static ResponseFormatInfo ParseResponseFormat(const json11::Json &config) {
+static ResponseFormatInfo ParseResponseFormat(const json &config) {
     ResponseFormatInfo info;
     info.type = "text"; // 默认值
     
@@ -596,7 +529,7 @@ static ResponseFormatInfo ParseResponseFormat(const json11::Json &config) {
     
     auto rf = config["response_format"];
     if (rf["type"].is_string()) {
-        info.type = rf["type"].string_value();
+        info.type = rf["type"].get<std::string>();
     }
     
     // 解析 json_schema
@@ -619,59 +552,6 @@ static std::string BuildJsonModePrompt(const ResponseFormatInfo &format) {
         return "\n\nYou must respond with valid JSON that follows this schema:\n" + format.schema + "\n\nDo not include any text outside of the JSON object.";
     }
     return "";
-}
-
-// ========== Tools Prompt 构建 ==========
-
-// 将 tools 定义转换为 prompt 格式，注入到 system message 中
-static std::string BuildToolsPrompt(const json11::Json &config) {
-    if (!HasToolsInRequest(config)) {
-        return "";
-    }
-    
-    std::string toolChoice = GetToolChoice(config);
-    
-    std::stringstream ss;
-    ss << "\n\n# Tools\n\n";
-    ss << "You have access to the following tools:\n\n";
-    
-    for (auto &tool : config["tools"].array_items()) {
-        if (tool["type"].string_value() == "function" && tool["function"].is_object()) {
-            auto func = tool["function"];
-            std::string name = func["name"].string_value();
-            std::string desc = func["description"].string_value();
-            
-            ss << "## " << name << "\n\n";
-            if (!desc.empty()) {
-                ss << desc << "\n\n";
-            }
-            
-            // 添加参数 schema
-            if (func["parameters"].is_object()) {
-                ss << "Parameters:\n```json\n" << func["parameters"].dump() << "\n```\n\n";
-            }
-        }
-    }
-    
-    // 添加工具调用格式说明
-    ss << "# Tool Call Format\n\n";
-    ss << "When you need to use a tool, respond with a JSON object in this exact format:\n";
-    ss << "```json\n";
-    ss << "{\n";
-    ss << "  \"name\": \"tool_name\",\n";
-    ss << "  \"arguments\": { ... }\n";
-    ss << "}\n";
-    ss << "```\n\n";
-    
-    if (toolChoice == "required") {
-        ss << "You MUST use one of the available tools to respond.\n";
-    } else if (toolChoice == "none") {
-        ss << "Do NOT use any tools. Respond directly with text.\n";
-    } else {
-        ss << "Use a tool if it helps answer the user's question. Otherwise, respond directly.\n";
-    }
-    
-    return ss.str();
 }
 
 static bool WriteAll(socket_t fd, const char *data, size_t len) {
@@ -840,13 +720,17 @@ struct HttpRequest {
 struct WorkNode {
     socket_t client;
     HttpRequest request;
-    json11::Json config;
+    json config;
     std::string error;
 
     void Init(char *buffer, socket_t client) {
         this->client = client;
         request.Init(buffer);
-        config = json11::Json::parse(request.body, this->error);
+        try {
+            config = json::parse(request.body);
+        } catch (const json::exception& e) {
+            this->error = e.what();
+        }
     }
 };
 
@@ -961,7 +845,7 @@ struct WorkQueue {
 
         // 版本信息端点（不需要认证）
         if ((req->route == "/version" || req->route == "/version/") && req->method == "GET") {
-            SendJson(node->client, 200, json11::Json::object {
+            SendJson(node->client, 200, json{
                 {"version", API_SERVER_VERSION},
                 {"engine", "fastllm"}
             });
@@ -987,7 +871,7 @@ struct WorkQueue {
                 return;
             }
 
-            std::string conversationId = node->config["conversation_id"].string_value();
+            std::string conversationId = node->config["conversation_id"].get<std::string>();
             if (conversationId.empty()) {
                 SendJson(node->client, 400, BuildOpenAIError("conversation_id is required", "invalid_request_error", "conversation_id"));
                 CloseSocket(node->client);
@@ -996,7 +880,7 @@ struct WorkQueue {
 
             // 简化实现：实际取消逻辑需要维护活跃对话列表
             // 目前只返回成功响应
-            SendJson(node->client, 200, json11::Json::object {
+            SendJson(node->client, 200, json{
                 {"status", "cancelled"},
                 {"conversation_id", conversationId},
                 {"message", "Cancellation request received (note: full cancellation support requires conversation tracking)"}
@@ -1016,11 +900,11 @@ struct WorkQueue {
             }
 
             // 返回当前活跃查询数
-            SendJson(node->client, 200, json11::Json::object {
+            SendJson(node->client, 200, json{
                 {"active_count", this->activateQueryNumber},
                 {"max_count", this->maxActivateQueryNumber},
                 {"total_processed", this->totalQueryNumber},
-                {"conversations", json11::Json::array {}}  // 简化实现，不跟踪具体对话
+                {"conversations", json::array()}  // 简化实现，不跟踪具体对话
             });
             CloseSocket(node->client);
             return;
@@ -1028,20 +912,20 @@ struct WorkQueue {
 
         // /tokenize 端点 - 文本分词
         if ((req->route == "/tokenize" || req->route == "/tokenize/") && req->method == "POST") {
-            std::string content = node->config["content"].string_value();
+            std::string content = node->config["content"].is_string() ? node->config["content"].get<std::string>() : "";
             if (content.empty()) {
                 SendJson(node->client, 400, BuildOpenAIError("content is required", "invalid_request_error", "content"));
                 CloseSocket(node->client);
                 return;
             }
 
-            bool addSpecial = node->config["add_special"].is_bool() && node->config["add_special"].bool_value();
-            bool withPieces = node->config["with_pieces"].is_bool() && node->config["with_pieces"].bool_value();
+            bool addSpecial = node->config["add_special"].is_boolean() && node->config["add_special"].get<bool>();
+            bool withPieces = node->config["with_pieces"].is_boolean() && node->config["with_pieces"].get<bool>();
 
             // 使用 tokenizer 进行分词
             auto inputs = model->weight.tokenizer.Encode(content);
             
-            json11::Json::array tokensArray;
+            json tokensArray = json::array();
             for (int i = 0; i < inputs.Count(0); i++) {
                 int tokenId = static_cast<int>(((float *)inputs.cpuData)[i]);
                 
@@ -1051,7 +935,7 @@ struct WorkQueue {
                     std::string piece = model->weight.tokenizer.Decode(
                         fastllm::Data(fastllm::DataType::FLOAT32, {1}, singleToken)
                     );
-                    tokensArray.push_back(json11::Json::object {
+                    tokensArray.push_back(json{
                         {"id", tokenId},
                         {"piece", piece}
                     });
@@ -1060,7 +944,7 @@ struct WorkQueue {
                 }
             }
 
-            SendJson(node->client, 200, json11::Json::object {
+            SendJson(node->client, 200, json{
                 {"tokens", tokensArray}
             });
             CloseSocket(node->client);
@@ -1076,14 +960,14 @@ struct WorkQueue {
             }
 
             std::vector<float> tokenIds;
-            for (auto &t : node->config["tokens"].array_items()) {
+            for (auto &t : node->config["tokens"]) {
                 if (t.is_number()) {
-                    tokenIds.push_back(static_cast<float>(t.int_value()));
+                    tokenIds.push_back(static_cast<float>(t.get<int>()));
                 }
             }
 
             if (tokenIds.empty()) {
-                SendJson(node->client, 200, json11::Json::object {
+                SendJson(node->client, 200, json{
                     {"content", ""}
                 });
                 CloseSocket(node->client);
@@ -1095,7 +979,7 @@ struct WorkQueue {
                 fastllm::Data(fastllm::DataType::FLOAT32, {static_cast<int>(tokenIds.size())}, tokenIds)
             );
 
-            SendJson(node->client, 200, json11::Json::object {
+            SendJson(node->client, 200, json{
                 {"content", content}
             });
             CloseSocket(node->client);
@@ -1104,30 +988,33 @@ struct WorkQueue {
 
         // /slots 端点 - 处理槽位状态
         if ((req->route == "/slots" || req->route == "/slots/") && req->method == "GET") {
-            json11::Json::array slotsArray;
+            json slotsArray = json::array();
             
             // 返回当前服务器状态（简化版本）
-            json11::Json::object params;
-            params["temperature"] = json11::Json(0.8);
-            params["top_k"] = json11::Json(40);
-            params["top_p"] = json11::Json(0.95);
-            params["n_predict"] = json11::Json(-1);
+            json params = {
+                {"temperature", 0.8},
+                {"top_k", 40},
+                {"top_p", 0.95},
+                {"n_predict", -1}
+            };
 
-            json11::Json::object nextToken;
-            nextToken["has_next_token"] = json11::Json(this->activateQueryNumber > 0);
-            nextToken["n_remain"] = json11::Json(-1);
-            nextToken["n_decoded"] = json11::Json(0);
+            json nextToken = {
+                {"has_next_token", this->activateQueryNumber > 0},
+                {"n_remain", -1},
+                {"n_decoded", 0}
+            };
 
-            json11::Json::object slot;
-            slot["id"] = json11::Json(0);
-            slot["is_processing"] = json11::Json(this->activateQueryNumber > 0);
-            slot["n_ctx"] = json11::Json(model->tokensLimit > 0 ? model->tokensLimit : 4096);
-            slot["params"] = json11::Json(params);
-            slot["next_token"] = json11::Json(nextToken);
-            slot["active_requests"] = json11::Json(this->activateQueryNumber);
-            slot["max_requests"] = json11::Json(this->maxActivateQueryNumber);
+            json slot = {
+                {"id", 0},
+                {"is_processing", this->activateQueryNumber > 0},
+                {"n_ctx", model->tokensLimit > 0 ? model->tokensLimit : 4096},
+                {"params", params},
+                {"next_token", nextToken},
+                {"active_requests", this->activateQueryNumber},
+                {"max_requests", this->maxActivateQueryNumber}
+            };
 
-            slotsArray.push_back(json11::Json(slot));
+            slotsArray.push_back(slot);
 
             SendJson(node->client, 200, slotsArray);
             CloseSocket(node->client);
@@ -1143,17 +1030,18 @@ struct WorkQueue {
                 kvCacheEntries = static_cast<int>(this->model->pastKVCacheManager.memorys.size());
             }
 
-            json11::Json::object kvCache;
-            kvCache["total_entries"] = json11::Json(kvCacheEntries);
-            kvCache["max_entries"] = json11::Json(this->model->pastKVCacheManager.maxRecordNum);
+            json kvCache = {
+                {"total_entries", kvCacheEntries},
+                {"max_entries", this->model->pastKVCacheManager.maxRecordNum}
+            };
             
-            json11::Json result = json11::Json::object {
+            json result = {
                 {"model", ::config.modelName},
                 {"model_path", ::config.path},
                 {"embedding_model_loaded", this->embeddingModel != nullptr},
                 {"server_version", API_SERVER_VERSION},
                 {"engine", "fastllm"},
-                {"default_generation_settings", json11::Json::object {
+                {"default_generation_settings", json{
                     {"max_tokens", 256},
                     {"temperature", 1.0},
                     {"top_p", 1.0},
@@ -1161,8 +1049,8 @@ struct WorkQueue {
                     {"repeat_penalty", 1.0},
                     {"repeat_last_n", 64}
                 }},
-                {"kv_cache", json11::Json(kvCache)},
-                {"supported_endpoints", json11::Json::array {
+                {"kv_cache", kvCache},
+                {"supported_endpoints", json::array({
                     "/v1/chat/completions",
                     "/v1/completions",
                     "/v1/embeddings",
@@ -1176,14 +1064,14 @@ struct WorkQueue {
                     "/detokenize",
                     "/slots",
                     "/metrics"
-                }},
-                {"supported_parameters", json11::Json::array {
+                })},
+                {"supported_parameters", json::array({
                     "temperature", "top_p", "top_k", "max_tokens", "max_completion_tokens",
                     "frequency_penalty", "presence_penalty", "repetition_penalty",
                     "repeat_last_n", "stream", "stream_options", "response_format",
                     "tools", "tool_choice", "stop"
-                }},
-                {"capabilities", json11::Json::object {
+                })},
+                {"capabilities", json{
                     {"streaming", true},
                     {"tool_calls", true},
                     {"response_format", true},
@@ -1253,16 +1141,16 @@ struct WorkQueue {
             message += "server:fastllm api server\r\n";
             message += "\r\n";
             
-            json11::Json result = json11::Json::object {
+            json result = {
                 {"object", "list"},
-                {"data", json11::Json::array {
-                    json11::Json::object {
+                {"data", json::array({
+                    json{
                         {"id", ::config.modelName},
                         {"object", "model"},
                         {"created", _GetCurrentTime()},
                         {"owned_by", "fastllm"}
                     }
-                }}
+                })}
             };
             message += result.dump();
             (void)WriteAll(node->client, message);
@@ -1284,10 +1172,10 @@ struct WorkQueue {
 
             std::string inputText;
             if (node->config["input"].is_string()) {
-                inputText = node->config["input"].string_value();
-            } else if (node->config["input"].is_array() && !node->config["input"].array_items().empty()) {
-                auto first = node->config["input"].array_items()[0];
-                inputText = first.is_string() ? first.string_value() : first.dump();
+                inputText = node->config["input"].get<std::string>();
+            } else if (node->config["input"].is_array() && !node->config["input"].empty()) {
+                auto first = node->config["input"][0];
+                inputText = first.is_string() ? first.get<std::string>() : first.dump();
             } else {
                 SendJson(node->client, 400, BuildOpenAIError("Input cannot be empty", "invalid_request_error", "input"));
                 CloseSocket(node->client);
@@ -1302,28 +1190,27 @@ struct WorkQueue {
             }
 
             auto vec = this->embeddingModel->EmbeddingSentence(inputText, true);
-            json11::Json::array emb;
-            emb.reserve(vec.size());
+            json emb = json::array();
             for (auto v : vec) {
                 emb.push_back(v);
             }
 
-            std::string respModel = node->config["model"].string_value();
+            std::string respModel = node->config["model"].is_string() ? node->config["model"].get<std::string>() : "";
             if (respModel.empty()) {
                 respModel = ::config.modelName;
             }
 
-            json11::Json result = json11::Json::object {
+            json result = {
                 {"object", "list"},
-                {"data", json11::Json::array {
-                    json11::Json::object {
+                {"data", json::array({
+                    json{
                         {"object", "embedding"},
                         {"embedding", emb},
                         {"index", 0}
                     }
-                }},
+                })},
                 {"model", respModel},
-                {"usage", json11::Json::object {
+                {"usage", json{
                     {"prompt_tokens", promptTokens},
                     {"total_tokens", promptTokens}
                 }}
@@ -1347,29 +1234,29 @@ struct WorkQueue {
             }
 
             // 解析请求
-            std::string query = node->config["query"].string_value();
+            std::string query = node->config["query"].is_string() ? node->config["query"].get<std::string>() : "";
             if (query.empty()) {
                 SendJson(node->client, 400, BuildOpenAIError("query is required", "invalid_request_error", "query"));
                 CloseSocket(node->client);
                 return;
             }
 
-            if (!node->config["documents"].is_array() || node->config["documents"].array_items().empty()) {
+            if (!node->config["documents"].is_array() || node->config["documents"].empty()) {
                 SendJson(node->client, 400, BuildOpenAIError("documents is required and must be non-empty array", "invalid_request_error", "documents"));
                 CloseSocket(node->client);
                 return;
             }
 
             std::vector<std::string> documents;
-            for (auto &doc : node->config["documents"].array_items()) {
+            for (auto &doc : node->config["documents"]) {
                 if (doc.is_string()) {
-                    documents.push_back(doc.string_value());
+                    documents.push_back(doc.get<std::string>());
                 } else if (doc.is_object() && doc["text"].is_string()) {
-                    documents.push_back(doc["text"].string_value());
+                    documents.push_back(doc["text"].get<std::string>());
                 }
             }
 
-            int topN = node->config["top_n"].is_number() ? node->config["top_n"].int_value() : static_cast<int>(documents.size());
+            int topN = node->config["top_n"].is_number() ? node->config["top_n"].get<int>() : static_cast<int>(documents.size());
             topN = std::min(topN, static_cast<int>(documents.size()));
 
             // 计算 query embedding
@@ -1398,28 +1285,28 @@ struct WorkQueue {
             });
 
             // 构建结果
-            json11::Json::array results;
+            json results = json::array();
             for (int i = 0; i < topN && i < static_cast<int>(scores.size()); i++) {
                 auto &item = scores[i];
-                results.push_back(json11::Json::object {
+                results.push_back(json{
                     {"index", item.first},
                     {"relevance_score", item.second},
-                    {"document", json11::Json::object {
+                    {"document", json{
                         {"text", documents[item.first]}
                     }}
                 });
             }
 
-            std::string respModel = node->config["model"].string_value();
+            std::string respModel = node->config["model"].is_string() ? node->config["model"].get<std::string>() : "";
             if (respModel.empty()) {
                 respModel = ::config.modelName;
             }
 
-            json11::Json response = json11::Json::object {
+            json response = {
                 {"object", "list"},
                 {"data", results},
                 {"model", respModel},
-                {"usage", json11::Json::object {
+                {"usage", json{
                     {"total_tokens", 0}  // 简化实现，不计算具体 token 数
                 }}
             };
@@ -1442,7 +1329,8 @@ struct WorkQueue {
                 }
             }
             if (node->error != "") {
-                printf("error body = %s, prompt = %s, error = %s\n", node->request.body.c_str(), node->config["prompt"].string_value().c_str(), node->error.c_str());
+                std::string promptStr = node->config["prompt"].is_string() ? node->config["prompt"].get<std::string>() : "";
+                printf("error body = %s, prompt = %s, error = %s\n", node->request.body.c_str(), promptStr.c_str(), node->error.c_str());
                 message += node->error;
                 (void)WriteAll(node->client, message);
                 CloseSocket(node->client);
@@ -1451,7 +1339,7 @@ struct WorkQueue {
 
             std::string output = "";
             fastllm::ChatMessages messages;
-            std::string promptText = node->config["prompt"].string_value();
+            std::string promptText = node->config["prompt"].get<std::string>();
             messages.push_back({"user", promptText});
             auto prompt = model->ApplyChatTemplate(messages);
             auto inputs = model->weight.tokenizer.Encode(prompt);
@@ -1460,7 +1348,7 @@ struct WorkQueue {
                 tokens.push_back(((float *) inputs.cpuData)[i]);
             }
             fastllm::GenerationConfig config;
-            config.output_token_limit = node->config["max_tokens"].is_null() ? 200 : node->config["max_tokens"].int_value();
+            config.output_token_limit = node->config["max_tokens"].is_null() ? 200 : node->config["max_tokens"].get<int>();
             int handleId = model->LaunchResponseTokens(tokens, config);
             std::vector<float> results;
             while (true) {
@@ -1494,31 +1382,31 @@ struct WorkQueue {
 
             fastllm::ChatMessages chatMessages;
             if (node->config["messages"].is_array()) {
-                for (auto &it : node->config["messages"].array_items()) {
-                    std::string role = it["role"].string_value();
+                for (auto &it : node->config["messages"]) {
+                    std::string role = it["role"].get<std::string>();
                     std::string content = ExtractMessageText(it);
                     chatMessages.push_back({role, content});
                 }
             } else if (node->config["prompt"].is_string()) {
-                std::string promptText = node->config["prompt"].string_value();
+                std::string promptText = node->config["prompt"].get<std::string>();
                 chatMessages.push_back({"user", promptText});
             } else {
                 node->error = "messages or prompt is required";
             }
 
             {
-                std::string reqModel = node->config["model"].string_value();
+                std::string reqModel = node->config["model"].is_string() ? node->config["model"].get<std::string>() : "";
                 if (!reqModel.empty() && reqModel != ::config.modelName) {
                     node->error = "The model `" + reqModel + "` does not exist.";
                 }
             }
 
-            json11::Json errorParam = nullptr;
+            json errorParam = nullptr;
             int errorStatus = 400;
             std::string errorType = "invalid_request_error";
 
             {
-                std::string reqModel = node->config["model"].string_value();
+                std::string reqModel = node->config["model"].is_string() ? node->config["model"].get<std::string>() : "";
                 if (!reqModel.empty() && reqModel != ::config.modelName) {
                     errorStatus = 404;
                     errorType = "model_not_found";
@@ -1529,28 +1417,28 @@ struct WorkQueue {
             }
 
             if (node->error == "" && node->config["temperature"].is_number()) {
-                auto vr = ValidateTemperature(node->config["temperature"].number_value());
+                auto vr = ValidateTemperature(node->config["temperature"].get<double>());
                 if (!vr.ok) {
                     node->error = vr.message;
                     errorParam = vr.param;
                 }
             }
             if (node->error == "" && node->config["top_p"].is_number()) {
-                auto vr = ValidateTopP(node->config["top_p"].number_value());
+                auto vr = ValidateTopP(node->config["top_p"].get<double>());
                 if (!vr.ok) {
                     node->error = vr.message;
                     errorParam = vr.param;
                 }
             }
             if (node->error == "" && node->config["frequency_penalty"].is_number()) {
-                auto vr = ValidatePenalty(node->config["frequency_penalty"].number_value(), "frequency_penalty");
+                auto vr = ValidatePenalty(node->config["frequency_penalty"].get<double>(), "frequency_penalty");
                 if (!vr.ok) {
                     node->error = vr.message;
                     errorParam = vr.param;
                 }
             }
             if (node->error == "" && node->config["presence_penalty"].is_number()) {
-                auto vr = ValidatePenalty(node->config["presence_penalty"].number_value(), "presence_penalty");
+                auto vr = ValidatePenalty(node->config["presence_penalty"].get<double>(), "presence_penalty");
                 if (!vr.ok) {
                     node->error = vr.message;
                     errorParam = vr.param;
@@ -1561,24 +1449,6 @@ struct WorkQueue {
                 SendJson(node->client, errorStatus, BuildOpenAIError(node->error, errorType, errorParam));
                 CloseSocket(node->client);
                 return;
-            }
-
-            // 处理 tools - 将工具定义注入到 system prompt
-            std::string toolsPrompt = BuildToolsPrompt(node->config);
-            if (!toolsPrompt.empty()) {
-                // 查找是否已有 system 消息
-                bool hasSystem = false;
-                for (auto &msg : chatMessages) {
-                    if (msg.first == "system") {
-                        msg.second += toolsPrompt;
-                        hasSystem = true;
-                        break;
-                    }
-                }
-                if (!hasSystem) {
-                    // 在开头添加 system 消息
-                    chatMessages.insert(chatMessages.begin(), {"system", toolsPrompt.substr(2)}); // 去掉开头的 \n\n
-                }
             }
 
             // 处理 response_format
@@ -1612,35 +1482,35 @@ struct WorkQueue {
 
             fastllm::GenerationConfig config;
             if (node->config["max_tokens"].is_number()) {
-                config.output_token_limit = node->config["max_tokens"].int_value();
+                config.output_token_limit = node->config["max_tokens"].get<int>();
             } else if (node->config["max_completion_tokens"].is_number()) {
-                config.output_token_limit = node->config["max_completion_tokens"].int_value();
+                config.output_token_limit = node->config["max_completion_tokens"].get<int>();
             } else {
                 config.output_token_limit = 256;
             }
             if (node->config["frequency_penalty"].is_number()) {
-                config.repeat_penalty = node->config["frequency_penalty"].number_value();
+                config.repeat_penalty = node->config["frequency_penalty"].get<double>();
             }
             if (node->config["temperature"].is_number()) {
-                config.temperature = node->config["temperature"].number_value();
+                config.temperature = node->config["temperature"].get<double>();
             }
             if (node->config["top_p"].is_number()) {
-                config.top_p = node->config["top_p"].number_value();
+                config.top_p = node->config["top_p"].get<double>();
             }
             if (node->config["top_k"].is_number()) {
-                config.top_k = node->config["top_k"].int_value();
+                config.top_k = node->config["top_k"].get<int>();
             }
             // presence_penalty 映射到 repeat_penalty (如果未设置 frequency_penalty)
             if (node->config["presence_penalty"].is_number() && !node->config["frequency_penalty"].is_number()) {
-                config.repeat_penalty = 1.0f + node->config["presence_penalty"].number_value();
+                config.repeat_penalty = 1.0f + node->config["presence_penalty"].get<double>();
             }
             // repetition_penalty 直接支持 (兼容 HuggingFace 风格)
             if (node->config["repetition_penalty"].is_number()) {
-                config.repeat_penalty = node->config["repetition_penalty"].number_value();
+                config.repeat_penalty = node->config["repetition_penalty"].get<double>();
             }
             // last_n 参数 (用于重复惩罚的上下文窗口)
             if (node->config["repeat_last_n"].is_number()) {
-                config.last_n = node->config["repeat_last_n"].int_value();
+                config.last_n = node->config["repeat_last_n"].get<int>();
             }
 
             std::string output = "";
@@ -1648,14 +1518,14 @@ struct WorkQueue {
             auto requestStartTime = std::chrono::high_resolution_clock::now();  // 记录开始时间
             
             bool isStream = false;
-            if (node->config["stream"].is_bool() && node->config["stream"].bool_value()) {
+            if (node->config["stream"].is_boolean() && node->config["stream"].get<bool>()) {
                 isStream = true;
             }
 
             bool includeUsage = true;
             if (node->config["stream_options"].is_object()) {
-                if (node->config["stream_options"]["include_usage"].is_bool()) {
-                    includeUsage = node->config["stream_options"]["include_usage"].bool_value();
+                if (node->config["stream_options"]["include_usage"].is_boolean()) {
+                    includeUsage = node->config["stream_options"]["include_usage"].get<bool>();
                 }
             }
 
@@ -1678,22 +1548,22 @@ struct WorkQueue {
                     return;
                 }
             
-                json11::Json startResult = json11::Json::object {
+                json startResult = {
                     {"id", curId},
                     {"object", "chat.completion.chunk"},
                     {"created", createTime},
                     {"model", ::config.modelName},
                     {"system_fingerprint", "fastllm-" + ::config.modelName},
-                    {"choices", json11::Json::array {
-                        json11::Json::object {
+                    {"choices", json::array({
+                        json{
                             {"index", 0},
-                            {"delta", json11::Json::object {
+                            {"delta", json{
                                 {"role", "assistant"}
                             }},
                             {"logprobs", nullptr},
                             {"finish_reason", nullptr}
                         }
-                    }}
+                    })}
                 };
                 std::string cur = ("data: " + CompactJson(startResult.dump()) + "\n\n");
 
@@ -1716,22 +1586,22 @@ struct WorkQueue {
                             // Send remaining buffer - truncate to valid UTF-8
                             std::string validContent = TruncateToValidUtf8(utf8Buffer);
                             if (!validContent.empty()) {
-                                json11::Json bufferResult = json11::Json::object {
+                                json bufferResult = {
                                     {"id", curId},
                                     {"object", "chat.completion.chunk"},
                                     {"created", createTime},
                                     {"model", ::config.modelName},
                                     {"system_fingerprint", "fastllm-" + ::config.modelName},
-                                    {"choices", json11::Json::array {
-                                        json11::Json::object {
+                                    {"choices", json::array({
+                                        json{
                                             {"index", 0},
-                                            {"delta", json11::Json::object {
+                                            {"delta", json{
                                                 {"content", validContent}
                                             }},
                                             {"logprobs", nullptr},
                                             {"finish_reason", nullptr}
                                         }
-                                    }}
+                                    })}
                                 };
                                 std::string bufCur = ("data: " + CompactJson(bufferResult.dump()) + "\n\n");
                                 (void)WriteAll(node->client, bufCur);
@@ -1744,30 +1614,28 @@ struct WorkQueue {
                             finishReason = "length";
                         }
 
-                        json11::Json partResult = json11::Json::object {
+                        json partResult = {
                             {"id", curId},
                             {"object", "chat.completion.chunk"},
                             {"created", createTime},
                             {"model", ::config.modelName},
                             {"system_fingerprint", "fastllm-" + ::config.modelName},
-                            {"choices", json11::Json::array {
-                                json11::Json::object {
+                            {"choices", json::array({
+                                json{
                                     {"index", 0},
-                                    {"delta", json11::Json::object {}},
+                                    {"delta", json::object()},
                                     {"logprobs", nullptr},
                                     {"finish_reason", finishReason}
                                 }
-                            }}
+                            })}
                         };
 
                         if (includeUsage) {
-                            auto obj = partResult.object_items();
-                            obj["usage"] = json11::Json::object {
+                            partResult["usage"] = json{
                                 {"prompt_tokens", (int)tokens.size()},
                                 {"total_tokens", (int)tokens.size() + outputTokens},
                                 {"completion_tokens", outputTokens}
                             };
-                            partResult = obj;
                         }
 
                         std::string cur = ("data: " + CompactJson(partResult.dump()) + "\n\n");
@@ -1805,22 +1673,22 @@ struct WorkQueue {
                         // Use the complete UTF-8 portion
                         std::string now = complete;
                         
-                        json11::Json partResult = json11::Json::object {
+                        json partResult = {
                             {"id", curId},
                             {"object", "chat.completion.chunk"},
                             {"created", createTime},
                             {"model", ::config.modelName},
                             {"system_fingerprint", "fastllm-" + ::config.modelName},
-                            {"choices", json11::Json::array {
-                                json11::Json::object {
+                            {"choices", json::array({
+                                json{
                                     {"index", 0},
-                                    {"delta", json11::Json::object {
+                                    {"delta", json{
                                         {"content", now}
                                     }},
                                     {"logprobs", nullptr},
                                     {"finish_reason", nullptr}
                                 }
-                            }}
+                            })}
                         };
 
                         std::string cur = ("data: " + CompactJson(partResult.dump()) + "\n\n");
@@ -1866,7 +1734,7 @@ struct WorkQueue {
 
                 // 检测 tool_calls
                 bool hasTools = HasToolsInRequest(node->config);
-                std::vector<ToolCallInfo> toolCalls;
+                std::vector<fastllm::ToolCall> toolCalls;
                 if (hasTools) {
                     toolCalls = ParseToolCalls(output);
                     if (!toolCalls.empty()) {
@@ -1875,7 +1743,7 @@ struct WorkQueue {
                 }
 
                 // 构建消息对象
-                json11::Json::object msgObj = {
+                json msgObj = {
                     {"role", "assistant"}
                 };
                 
@@ -1887,21 +1755,21 @@ struct WorkQueue {
                     msgObj["content"] = output;
                 }
 
-                json11::Json result = json11::Json::object {
+                json result = {
                     {"id", curId},
                     {"object", "chat.completion"},
                     {"created", createTime},
                     {"model", ::config.modelName},
                     {"system_fingerprint", "fastllm-" + ::config.modelName},
-                    {"choices", json11::Json::array {
-                        json11::Json::object {
+                    {"choices", json::array({
+                        json{
                             {"index", 0},
                             {"message", msgObj},
                             {"logprobs", nullptr},
                             {"finish_reason", finishReason}
                         }
-                    }},
-                    {"usage", json11::Json::object {
+                    })},
+                    {"usage", json{
                         {"prompt_tokens", (int)tokens.size()},
                         {"total_tokens", (int)tokens.size() + outputTokens},
                         {"completion_tokens", outputTokens}
@@ -1921,10 +1789,10 @@ struct WorkQueue {
             // OpenAI /v1/completions
             std::string promptText;
             if (node->config["prompt"].is_string()) {
-                promptText = node->config["prompt"].string_value();
-            } else if (node->config["prompt"].is_array() && !node->config["prompt"].array_items().empty()) {
-                auto first = node->config["prompt"].array_items()[0];
-                promptText = first.is_string() ? first.string_value() : first.dump();
+                promptText = node->config["prompt"].get<std::string>();
+            } else if (node->config["prompt"].is_array() && !node->config["prompt"].empty()) {
+                auto first = node->config["prompt"][0];
+                promptText = first.is_string() ? first.get<std::string>() : first.dump();
             } else {
                 SendJson(node->client, 400, BuildOpenAIError("prompt is required", "invalid_request_error", "prompt"));
                 CloseSocket(node->client);
@@ -1932,7 +1800,7 @@ struct WorkQueue {
             }
 
             {
-                std::string reqModel = node->config["model"].string_value();
+                std::string reqModel = node->config["model"].is_string() ? node->config["model"].get<std::string>() : "";
                 if (!reqModel.empty() && reqModel != ::config.modelName) {
                     SendJson(node->client, 404, BuildOpenAIError(
                         "The model `" + reqModel + "` does not exist.",
@@ -1944,7 +1812,7 @@ struct WorkQueue {
             }
 
             if (node->config["temperature"].is_number()) {
-                auto vr = ValidateTemperature(node->config["temperature"].number_value());
+                auto vr = ValidateTemperature(node->config["temperature"].get<double>());
                 if (!vr.ok) {
                     SendJson(node->client, 400, BuildOpenAIError(vr.message, "invalid_request_error", vr.param));
                     CloseSocket(node->client);
@@ -1952,7 +1820,7 @@ struct WorkQueue {
                 }
             }
             if (node->config["top_p"].is_number()) {
-                auto vr = ValidateTopP(node->config["top_p"].number_value());
+                auto vr = ValidateTopP(node->config["top_p"].get<double>());
                 if (!vr.ok) {
                     SendJson(node->client, 400, BuildOpenAIError(vr.message, "invalid_request_error", vr.param));
                     CloseSocket(node->client);
@@ -1960,7 +1828,7 @@ struct WorkQueue {
                 }
             }
             if (node->config["frequency_penalty"].is_number()) {
-                auto vr = ValidatePenalty(node->config["frequency_penalty"].number_value(), "frequency_penalty");
+                auto vr = ValidatePenalty(node->config["frequency_penalty"].get<double>(), "frequency_penalty");
                 if (!vr.ok) {
                     SendJson(node->client, 400, BuildOpenAIError(vr.message, "invalid_request_error", vr.param));
                     CloseSocket(node->client);
@@ -1969,18 +1837,18 @@ struct WorkQueue {
             }
 
             fastllm::GenerationConfig gen;
-            gen.output_token_limit = node->config["max_tokens"].is_number() ? node->config["max_tokens"].int_value() : 16;
+            gen.output_token_limit = node->config["max_tokens"].is_number() ? node->config["max_tokens"].get<int>() : 16;
             if (node->config["temperature"].is_number()) {
-                gen.temperature = node->config["temperature"].number_value();
+                gen.temperature = node->config["temperature"].get<double>();
             }
             if (node->config["top_p"].is_number()) {
-                gen.top_p = node->config["top_p"].number_value();
+                gen.top_p = node->config["top_p"].get<double>();
             }
             if (node->config["top_k"].is_number()) {
-                gen.top_k = node->config["top_k"].int_value();
+                gen.top_k = node->config["top_k"].get<int>();
             }
             if (node->config["frequency_penalty"].is_number()) {
-                gen.repeat_penalty = node->config["frequency_penalty"].number_value();
+                gen.repeat_penalty = node->config["frequency_penalty"].get<double>();
             }
 
             auto inputs = model->weight.tokenizer.Encode(promptText);
@@ -1989,8 +1857,8 @@ struct WorkQueue {
                 tokens.push_back(((float *) inputs.cpuData)[i]);
             }
 
-            const bool echo = node->config["echo"].is_bool() && node->config["echo"].bool_value();
-            const bool isStream = node->config["stream"].is_bool() && node->config["stream"].bool_value();
+            const bool echo = node->config["echo"].is_boolean() && node->config["echo"].get<bool>();
+            const bool isStream = node->config["stream"].is_boolean() && node->config["stream"].get<bool>();
 
             const std::string curId = "cmpl-" + GenerateRandomID();
             const auto createTime = _GetCurrentTime();
@@ -2014,20 +1882,20 @@ struct WorkQueue {
                 }
 
                 if (echo && !promptText.empty()) {
-                    json11::Json echoChunk = json11::Json::object {
+                    json echoChunk = {
                         {"id", curId},
                         {"object", "text_completion"},
                         {"created", createTime},
                         {"model", ::config.modelName},
                         {"system_fingerprint", "fastllm-" + ::config.modelName},
-                        {"choices", json11::Json::array {
-                            json11::Json::object {
+                        {"choices", json::array({
+                            json{
                                 {"index", 0},
                                 {"text", promptText},
                                 {"logprobs", nullptr},
                                 {"finish_reason", nullptr}
                             }
-                        }}
+                        })}
                     };
                     std::string cur = "data: " + CompactJson(echoChunk.dump()) + "\n\n";
                     if (!WriteAll(node->client, cur)) {
@@ -2047,20 +1915,20 @@ struct WorkQueue {
                         if (outputTokens >= gen.output_token_limit) {
                             finishReason = "length";
                         }
-                        json11::Json endChunk = json11::Json::object {
+                        json endChunk = {
                             {"id", curId},
                             {"object", "text_completion"},
                             {"created", createTime},
                             {"model", ::config.modelName},
                             {"system_fingerprint", "fastllm-" + ::config.modelName},
-                            {"choices", json11::Json::array {
-                                json11::Json::object {
+                            {"choices", json::array({
+                                json{
                                     {"index", 0},
                                     {"text", ""},
                                     {"logprobs", nullptr},
                                     {"finish_reason", finishReason}
                                 }
-                            }}
+                            })}
                         };
                         std::string cur = "data: " + CompactJson(endChunk.dump()) + "\n\n";
                         (void)WriteAll(node->client, cur);
@@ -2073,20 +1941,20 @@ struct WorkQueue {
                     std::string now = model->weight.tokenizer.Decode(
                         fastllm::Data (fastllm::DataType::FLOAT32, {(int)results.size()}, results)
                     );
-                    json11::Json part = json11::Json::object {
+                    json part = {
                         {"id", curId},
                         {"object", "text_completion"},
                         {"created", createTime},
                         {"model", ::config.modelName},
                         {"system_fingerprint", "fastllm-" + ::config.modelName},
-                        {"choices", json11::Json::array {
-                            json11::Json::object {
+                        {"choices", json::array({
+                            json{
                                 {"index", 0},
                                 {"text", now},
                                 {"logprobs", nullptr},
                                 {"finish_reason", nullptr}
                             }
-                        }}
+                        })}
                     };
                     std::string cur = "data: " + CompactJson(part.dump()) + "\n\n";
                     if (!WriteAll(node->client, cur)) {
@@ -2130,21 +1998,21 @@ struct WorkQueue {
                 finishReason = "length";
             }
 
-            json11::Json result = json11::Json::object {
+            json result = {
                 {"id", curId},
                 {"object", "text_completion"},
                 {"created", createTime},
                 {"model", ::config.modelName},
                 {"system_fingerprint", "fastllm-" + ::config.modelName},
-                {"choices", json11::Json::array {
-                    json11::Json::object {
+                {"choices", json::array({
+                    json{
                         {"index", 0},
                         {"text", output},
                         {"logprobs", nullptr},
                         {"finish_reason", finishReason}
                     }
-                }},
-                {"usage", json11::Json::object {
+                })},
+                {"usage", json{
                     {"prompt_tokens", (int)tokens.size()},
                     {"total_tokens", (int)tokens.size() + outputTokens},
                     {"completion_tokens", outputTokens}
@@ -2453,6 +2321,9 @@ int main(int argc, char** argv) {
         console::printSuccess("模型加载完成 (" + std::to_string((int)elapsed) + "s)");
     }
     workQueue.model->SetSaveHistoryChat(true);
+    
+    // 初始化 ChatHandler (用于 minja chat template 和 tool call 解析)
+    InitChatHandler(workQueue.model.get());
 
     if (!config.embeddingPath.empty()) {
         if (!fastllm::FileExists(config.embeddingPath)) {
