@@ -47,7 +47,9 @@ jobs:
           # 从当前分支创建 dev 分支，保留本地 workflow
           git checkout -b dev
           git push -u origin dev
+          echo "dev_synced=true" >> $GITHUB_OUTPUT
           echo "✅ Created dev branch"
+          exit 0
         fi
         
         # 检查是否有上游更新
@@ -55,14 +57,13 @@ jobs:
         UPSTREAM_COMMIT=$(git rev-parse upstream/master)
         LOCAL_COMMIT=$(git rev-parse HEAD)
         
-        # 合并上游代码，排除 workflow 文件
-        if git diff --quiet HEAD upstream/master -- . ':!.github/workflows'; then
+        if [ "$UPSTREAM_COMMIT" = "$LOCAL_COMMIT" ]; then
           echo "dev_synced=false" >> $GITHUB_OUTPUT
           echo "ℹ️ dev branch already up to date with upstream"
         else
           echo "Syncing changes from upstream (excluding workflows)"
           
-          # 使用 read-tree 只合并非 workflow 文件
+          # 使用 checkout 只合并非 workflow 文件
           git checkout upstream/master -- . || true
           git checkout HEAD -- .github/workflows/ || true
           
