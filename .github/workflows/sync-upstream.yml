@@ -6,6 +6,9 @@ on:
     - cron: '0 0 * * *'
   workflow_dispatch:  # 支持手动触发
 
+permissions:
+  contents: write
+
 jobs:
   sync:
     name: Sync with upstream
@@ -32,7 +35,7 @@ jobs:
     - name: Sync upstream to dev branch
       id: sync_dev
       run: |
-        # 同步纯净的上游代码到 dev 分支
+        # 同步上游代码到 dev 分支（排除 workflow 文件）
         echo "=== Syncing upstream to dev branch ==="
         
         # 检查 dev 分支是否存在
@@ -41,27 +44,38 @@ jobs:
           git checkout dev
           git pull origin dev
         else
-          # 从上游 master 创建 dev 分支
-          git checkout -b dev upstream/master
+          # 从当前分支创建 dev 分支，保留本地 workflow
+          git checkout -b dev
           git push -u origin dev
-          echo "dev_synced=true" >> $GITHUB_OUTPUT
-          echo "✅ Created dev branch from upstream/master"
-          exit 0
+          echo "✅ Created dev branch"
         fi
         
         # 检查是否有上游更新
+        git fetch upstream master
         UPSTREAM_COMMIT=$(git rev-parse upstream/master)
-        DEV_COMMIT=$(git rev-parse HEAD)
+        LOCAL_COMMIT=$(git rev-parse HEAD)
         
-        if [ "$UPSTREAM_COMMIT" != "$DEV_COMMIT" ]; then
-          echo "Updating dev branch to upstream/master"
-          git reset --hard upstream/master
-          git push origin dev --force-with-lease
-          echo "dev_synced=true" >> $GITHUB_OUTPUT
-          echo "✅ dev branch updated to upstream/master"
-        else
+        # 合并上游代码，排除 workflow 文件
+        if git diff --quiet HEAD upstream/master -- . ':!.github/workflows'; then
           echo "dev_synced=false" >> $GITHUB_OUTPUT
           echo "ℹ️ dev branch already up to date with upstream"
+        else
+          echo "Syncing changes from upstream (excluding workflows)"
+          
+          # 使用 read-tree 只合并非 workflow 文件
+          git checkout upstream/master -- . || true
+          git checkout HEAD -- .github/workflows/ || true
+          
+          if ! git diff --quiet; then
+            git add .
+            git commit -m "chore: Sync with upstream (excluding workflows)" || true
+            git push origin dev
+            echo "dev_synced=true" >> $GITHUB_OUTPUT
+            echo "✅ dev branch synced with upstream"
+          else
+            echo "dev_synced=false" >> $GITHUB_OUTPUT
+            echo "ℹ️ No changes to sync"
+          fi
         fi
     
     - name: Update submodules on master
