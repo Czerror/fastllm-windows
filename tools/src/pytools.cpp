@@ -679,6 +679,13 @@ extern "C" {
         int contextLen;
         const char* device;
         int isComplete;     // 批处理完成标志
+        // KVCache 相关
+        double kvCacheMB;   // KV缓存大小(MB)
+        int tokenLimit;     // Token上限
+        int promptLimit;    // 提示词上限
+        int maxBatch;       // 批量上限
+        int cacheEntries;   // 缓存条目数
+        float skipPercent;  // 跳过百分比
     };
 
     // C风格的回调函数类型
@@ -714,6 +721,13 @@ extern "C" {
                     cData.contextLen = logData.data.contextLen;
                     cData.device = g_deviceBuffer.c_str();
                     cData.isComplete = logData.data.isComplete ? 1 : 0;
+                    // KVCache 相关
+                    cData.kvCacheMB = logData.data.kvCacheMB;
+                    cData.tokenLimit = logData.data.tokenLimit;
+                    cData.promptLimit = logData.data.promptLimit;
+                    cData.maxBatch = logData.data.maxBatch;
+                    cData.cacheEntries = logData.data.cacheEntries;
+                    cData.skipPercent = logData.data.skipPercent;
                     
                     g_pyLogCallback(&cData);
                 }

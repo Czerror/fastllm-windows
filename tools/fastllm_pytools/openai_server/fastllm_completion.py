@@ -487,8 +487,8 @@ class FastLLmCompletion:
         # logging.info(request)
 
         if self.show_input:
-            logging.info(f"fastllm input message: {messages}")
-            # logging.info(f"input tokens: {input_token_len}")
+            logging.debug(f"fastllm input message: {messages}")
+            # logging.debug(f"input tokens: {input_token_len}")
 
         input_token_len = self.model.get_input_token_len(messages)
 
@@ -515,7 +515,7 @@ class FastLLmCompletion:
         )
         # Store the mapping between conversation ID and handle
         self.conversation_handles[request_id] = handle
-        logging.info(f"Created conversation: {request_id}, handle: {handle}")
+        logging.debug(f"Created conversation: {request_id}, handle: {handle}")
         result_generator = self.model.stream_response_handle_async(handle)
         # Streaming response
         if request.stream:
@@ -552,7 +552,7 @@ class FastLLmCompletion:
             if await raw_request.is_disconnected():
                 print("is_disconnected!!!")
                 self.model.abort_handle(handle)
-                logging.info(f"Abort request: {request_id}")
+                logging.debug(f"Abort request: {request_id}")
                 return self.create_error_response("Client disconnected")
 
         # 使用工具解析器提取工具调用（如果有）
@@ -609,7 +609,7 @@ class FastLLmCompletion:
         # After completion, remove the conversation from tracking dictionary
         if request_id in self.conversation_handles:
             del self.conversation_handles[request_id]
-            logging.info(f"Removed completed conversation from tracking: {request_id}")
+            logging.debug(f"Removed completed conversation from tracking: {request_id}")
 
         return response
 
@@ -686,7 +686,7 @@ class FastLLmCompletion:
             async for res in result_generator:
                 if await raw_request.is_disconnected():
                     self.model.abort_handle(handle)
-                    logging.info(f"Abort stream request (client disconnected): {request_id}")
+                    logging.debug(f"Abort stream request (client disconnected): {request_id}")
                     return
                 completion_tokens += 1
                 delta_text = res
@@ -788,7 +788,7 @@ class FastLLmCompletion:
             # 客户端断开通常会触发取消；确保模型侧也尽快停止
             try:
                 self.model.abort_handle(handle)
-                logging.info(f"Abort stream request (cancelled): {request_id}")
+                logging.debug(f"Abort stream request (cancelled): {request_id}")
             except Exception:
                 pass
             raise
@@ -834,7 +834,7 @@ class FastLLmCompletion:
             handle = self.conversation_handles[conversation_id]
             try:
                 self.model.abort_handle(handle)
-                logging.info(f"Aborted conversation: {conversation_id}, handle: {handle}")
+                logging.debug(f"Aborted conversation: {conversation_id}, handle: {handle}")
                 # Remove the conversation from the mapping
                 del self.conversation_handles[conversation_id]
                 return True
@@ -938,7 +938,7 @@ class FastLLmCompletion:
             completion_tokens += 1
             if await raw_request.is_disconnected():
                 self.model.abort_handle(handle)
-                logging.info(f"Abort completion request: {request_id}")
+                logging.debug(f"Abort completion request: {request_id}")
                 return self.create_error_response("Client disconnected")
         
         # 确定 finish_reason
@@ -1016,7 +1016,7 @@ class FastLLmCompletion:
             async for res in result_generator:
                 if await raw_request.is_disconnected():
                     self.model.abort_handle(handle)
-                    logging.info(f"Abort completion stream: {request_id}")
+                    logging.debug(f"Abort completion stream: {request_id}")
                     return
                 
                 completion_tokens += 1

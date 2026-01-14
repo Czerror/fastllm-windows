@@ -206,6 +206,13 @@ class LogData(ctypes.Structure):
         ("contextLen", ctypes.c_int),
         ("device", ctypes.c_char_p),
         ("isComplete", ctypes.c_int),  # 批处理完成标志
+        # KVCache 相关
+        ("kvCacheMB", ctypes.c_double),   # KV缓存大小(MB)
+        ("tokenLimit", ctypes.c_int),     # Token上限
+        ("promptLimit", ctypes.c_int),    # 提示词上限
+        ("maxBatch", ctypes.c_int),       # 批量上限
+        ("cacheEntries", ctypes.c_int),   # 缓存条目数
+        ("skipPercent", ctypes.c_float),  # 跳过百分比
     ]
 
 # C回调函数类型
@@ -235,6 +242,13 @@ def _create_log_callback_wrapper(py_callback):
                 'contextLen': data.contextLen,
                 'device': data.device.decode('utf-8') if data.device else '',
                 'isComplete': bool(data.isComplete),  # 批处理完成标志
+                # KVCache 相关
+                'kvCacheMB': data.kvCacheMB,
+                'tokenLimit': data.tokenLimit,
+                'promptLimit': data.promptLimit,
+                'maxBatch': data.maxBatch,
+                'cacheEntries': data.cacheEntries,
+                'skipPercent': data.skipPercent,
             }
             py_callback(py_data)
     return LOG_CALLBACK_TYPE(c_callback)
@@ -299,16 +313,41 @@ class LogHandlers:
         message = data.get('message', '')
         
         if event == LogEvent.KVCacheConfig:
-            console.info(message)
+            # KV缓存配置（与 C++ 端一致的格式）
+            kv_mb = data.get('kvCacheMB', 0)
+            token_limit = data.get('tokenLimit', 0)
+            prompt_limit = data.get('promptLimit', 0)
+            max_batch = data.get('maxBatch', 0)
+            if kv_mb > 0 or token_limit > 0:
+                config_str = f"KV缓存: {kv_mb:.2f} MB, Token上限: {token_limit}, 提示词上限: {prompt_limit}, 批量上限: {max_batch}"
+                console.config("KV缓存配置", config_str)
+            elif message:
+                console.config("KV缓存配置", message)
         
         elif event == LogEvent.KVCacheHit:
-            console.info(message)
+            # 命中缓存（与 C++ 端一致的格式）
+            current = data.get('current', 0)
+            total = data.get('total', 0)
+            skip_percent = data.get('skipPercent', 0)
+            device = data.get('device', '')
+            if current > 0 and total > 0:
+                hit_str = f"命中前缀缓存: {current} tokens (输入 {total} tokens, 跳过 {skip_percent:.1f}%, 位置: {device})"
+                console.info(hit_str)
+            elif message:
+                console.info(message)
         
         elif event == LogEvent.KVCacheMiss:
-            console.info(message)
+            # 未命中缓存（与 C++ 端一致的格式）
+            total = data.get('total', 0)
+            cache_entries = data.get('cacheEntries', 0)
+            if total > 0:
+                miss_str = f"未命中缓存, 需预填充 {total} tokens (缓存条目数: {cache_entries})"
+                console.warning(miss_str)
+            elif message:
+                console.warning(message)
         
         elif event == LogEvent.PrefillProgress:
-            # Prefill 进度（节流：只在百分比变化 >= 1% 时更新，但首次一定显示）
+            # Prefill 进度（节流：只在百分比变化时更新）
             current, total = data['current'], data['total']
             speed = data['speed']
             if total > 0:
@@ -320,21 +359,28 @@ class LogHandlers:
                     bar_width = 30
                     filled = int(bar_width * progress)
                     bar = '#' * filled + '-' * (bar_width - filled)
-                    # 隐藏光标，清除整行
+                    # 与 C++ 端保持一致：隐藏光标 -> 清除整行 -> 回到行首 -> 写内容
                     if _ansi_enabled:
                         sys.stdout.write(f"\x1b[?25l\x1b[2K\r{Style.CYAN}预填充中 {Style.RESET}[{Style.GREEN}{bar[:filled]}{Style.RESET}{Style.DIM}{bar[filled:]}{Style.RESET}] {percent}% {current}/{total} ({speed:.1f} tok/s)")
                     else:
-                        sys.stdout.write(f"\r预填充中 [{bar}] {percent}% {current}/{total} ({speed:.1f} tok/s)")
+                        # 非 ANSI：用空格覆盖旧内容
+                        line = f"\r预填充中 [{bar}] {percent}% {current}/{total} ({speed:.1f} tok/s)"
+                        sys.stdout.write(line.ljust(80))
                     sys.stdout.flush()
         
         elif event == LogEvent.PrefillComplete:
-            # Prefill 完成，显示光标，重置状态
+            # Prefill 完成，显示光标，重置状态（与 C++ 端一致）
             LogHandlers._last_prefill_percent = -1
-            speed, elapsed = data['speed'], data['elapsed']
+            total = data.get('total', 0)
+            speed = data.get('speed', 0)
+            elapsed = data.get('elapsed', 0)
             if _ansi_enabled:
-                sys.stdout.write(f"\x1b[?25h\r\x1b[2K")  # 显示光标，清除进度行
-            sys.stdout.write(f"\r预填充完成 ({speed:.1f} tok/s, {elapsed:.2f}s)               \n")
+                sys.stdout.write(f"\x1b[?25h")  # 显示光标
+            sys.stdout.write("\n")  # 换行
             sys.stdout.flush()
+            # 使用 console.info 输出完成信息
+            complete_str = f"预填充完成: {total} tokens, 耗时 {elapsed:.2f}s, {int(speed)} tokens/s"
+            console.info(complete_str)
         
         elif event == LogEvent.BatchStatus:
             # 批处理状态（包含速度和上下文长度）

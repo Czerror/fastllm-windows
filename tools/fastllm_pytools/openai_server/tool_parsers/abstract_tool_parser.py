@@ -212,10 +212,10 @@ class ToolParserManager:
             if ("<｜tool▁calls▁begin｜>" in chat_template):
                 target = "deepseek_v31"
             if (target == ""):
-                print("Warning: can't detect tool parse, use default tool parser")
+                logger.debug("Warning: can't detect tool parse, use default tool parser")
                 target = "hermes"
             else:
-                print("Auto tool parse detect type: " + target)
+                logger.debug("Auto tool parse detect type: " + target)
             return cls.get_tool_parser(target)
 
         if (model_type == 'qwen3' or model_type == 'qwen2' or model_type == 'qwen3_moe'
@@ -232,8 +232,8 @@ class ToolParserManager:
         elif model_type == 'deepseek_v3' or model_type == 'deepseek_v2':
             target = 'deepseek_v31'
         else:
-            print("Warning: can't detect tool parse, use default tool parser")
+            logger.debug("Warning: can't detect tool parse, use default tool parser")
             return cls.get_tool_parser('hermes')
         
-        print("Auto tool parse detect type: " + target)
+        logger.debug("Auto tool parse detect type: " + target)
         return cls.get_tool_parser(target)
