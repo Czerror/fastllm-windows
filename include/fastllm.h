@@ -35,12 +35,15 @@
 #endif
 
 namespace fastllm {
+    class Data;
+
     void SetDeviceMap(const std::map <std::string, int> &deviceMap);
     void SetMoeDeviceMap(const std::map <std::string, int> &moeDeviceMap);
 
     std::map <std::string, int> GetDeviceMap();
     std::map <std::string, int> GetMoeDeviceMap();
 
+    Data *GetEmptyData();
     void PrintInstructionInfo();
     void SetThreads(int t);
     void SetLowMemMode(bool m);
@@ -349,6 +352,7 @@ namespace fastllm {
 
         std::vector <uint16_t> halfScales; // 某些量化方式使用float16的scales
 
+        bool isModelWeight = false; // 是否是模型权重
         std::string name; // weightName
         std::string fileName;
         long long filePos;
@@ -683,11 +687,12 @@ namespace fastllm {
     bool CanRunMergeAttention();
     
     void MergeAttention(Data &input, Data &weight0, Data &bias0, Data &weight1, Data &bias1, 
-                        Data &qkv, Data &q, Data &k, Data &v, Data &curInput, Data &curOutput,
-                        int qNum, int kvNum, int headDim, int rotDim, float attentionScale,
-                        const Data &positionIds, Data &sinData, Data &cosData,
-                        std::vector <Data*> &keys, std::vector <Data*> &values, std::vector <Data*> &masks, 
-                        Data &output);
+        bool doQKNorm, Data &qNorm, Data &kNorm, float eps,
+        Data &qkv, Data &q, Data &k, Data &v,
+        int qNum, int kvNum, int headDim, int rotDim, float attentionScale,
+        const Data &positionIds, Data &sinData, Data &cosData,
+        std::vector <Data*> &keys, std::vector <Data*> &values, std::vector <Data*> &masks, 
+        Data &output);
 
     bool CanRunMLP();
 

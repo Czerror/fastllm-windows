@@ -6,13 +6,29 @@
 
 std::vector <long long> FastllmCudaGetFreeSizes();
 
-// CUDA error checking helper - defined in fastllm-cuda.cu
-void showError(cudaError_t result, char const* const message, const char* const file, int const line);
+#define FETCH_FLOAT4(pointer) (reinterpret_cast<float4*>(&(pointer))[0])
+#define FETCH_FLOAT2(pointer) (reinterpret_cast<float2*>(&(pointer))[0])
 
 #ifdef  __cplusplus
 extern "C" {
 #endif
 
+struct CudaInfos {
+    int cudaArch;
+    bool hasTensorCore;
+
+    CudaInfos ();
+};
+
+CudaInfos *getCudaInfos();
+
+void FastllmCudaLinearFromCPU(uint8_t *input, fastllm::DataType inputType, 
+    uint8_t *weight, fastllm::DataType weightType, 
+    uint8_t *output, fastllm::DataType outputType, int n, int m, int k);
+void FastllmCudaPickInput(uint8_t *input, uint8_t *partInput, int rows, int cols, int *cudaIndex);
+void FastllmCudaPickOutput(uint8_t *partOutput, uint8_t *output, int rows, int cols, int *index, float *scales, fastllm::DataType dataType);
+
+void DeviceSync();
 void ForceDeviceSync();
 void FastllmInitCublas(void);
 
@@ -83,6 +99,7 @@ bool FastllmCudaMatMulFloat32(const fastllm::Data &input, fastllm::Data &weight,
 bool FastllmCudaMatMulFloat16(const fastllm::Data &input, fastllm::Data &weight, const fastllm::Data &bias, fastllm::Data &output, int n, int m, int k);
 bool FastllmCudaMatMulFloatFP8E4M3(const fastllm::Data &input, fastllm::Data &weight, const fastllm::Data &bias, fastllm::Data &output, int n, int m, int k);
 bool FastllmCudaMatMulFloatGGUF(const fastllm::Data &input, fastllm::Data &weight, const fastllm::Data &bias, fastllm::Data &output, int n, int m, int k);
+bool FastllmCudaMatMulFloatFP8E4M3Block128(const fastllm::Data &input, fastllm::Data &weight, const fastllm::Data &bias, fastllm::Data &output, int n, int m, int k);
 
 bool FastllmCudaHalfMatMulFloat32(const fastllm::Data &input, fastllm::Data &weight, const fastllm::Data &bias, fastllm::Data &output, int n, int m, int k);
 

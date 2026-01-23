@@ -274,6 +274,7 @@ include_directories(include/models)
 include_directories(include/devices/cpu)
 include_directories(third_party/json11)
 include_directories(third_party/gguf)
+include_directories(third_party/flashinfer)
 
 # USE_MMAP: Only enable on non-Windows or when not building PY_API
 # Windows lacks sys/mman.h, so mmap is not available
@@ -351,12 +352,14 @@ if (USE_CUDA)
     include_directories(include/devices/cuda)
     #message(${CMAKE_CUDA_IMPLICIT_LINK_DIRECTORIES})
     set(FASTLLM_CUDA_SOURCES src/devices/cuda/cudadevice.cpp src/devices/cuda/cudadevicebatch.cpp 
-        src/devices/cuda/fastllm-cuda.cu src/devices/cuda/fastllm-ggml-cuda.cu)
+        src/devices/cuda/fastllm-cuda.cu 
+        src/devices/cuda/fastllm-ggml-cuda.cu
+        src/devices/cuda/attention/fastllm-attention.cu)
 
     include_directories(include/devices/multicuda)
     set(FASTLLM_CUDA_SOURCES ${FASTLLM_CUDA_SOURCES} src/devices/multicuda/multicudadevice.cpp src/devices/multicuda/fastllm-multicuda.cu)
 
-    set(FASTLLM_LINKED_LIBS ${FASTLLM_LINKED_LIBS} cublas)
+    set(FASTLLM_LINKED_LIBS ${FASTLLM_LINKED_LIBS} cublas nccl)
     set(CMAKE_CUDA_ARCHITECTURES ${CUDA_ARCH})
 endif()
 
