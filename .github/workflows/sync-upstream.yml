@@ -105,6 +105,32 @@ jobs:
           echo "updated=true" >> $GITHUB_OUTPUT
         fi
     
+    - name: Get version from setup.py
+      id: version
+      if: steps.submodules.outputs.updated == 'true'
+      run: |
+        VERSION=$(sed -n 's/.*version\s*=\s*"\([^"]*\)".*/\1/p' tools/scripts/setup.py)
+        echo "version=${VERSION}" >> $GITHUB_OUTPUT
+        echo "Detected version: ${VERSION}"
+    
+    - name: Create version tag
+      if: steps.submodules.outputs.updated == 'true'
+      run: |
+        VERSION="${{ steps.version.outputs.version }}"
+        TAG_NAME="v${VERSION}"
+        
+        # 检查tag是否已存在于远程
+        git fetch origin
+        if git rev-parse "${TAG_NAME}" >/dev/null 2>&1; then
+          echo "Tag ${TAG_NAME} already exists, skipping creation"
+          exit 0
+        fi
+        
+        # 创建tag并推送
+        git tag "${TAG_NAME}" master
+        git push origin "${TAG_NAME}"
+        echo "✅ Created and pushed tag: ${TAG_NAME}"
+    
     - name: Create sync summary
       run: |
         echo "=== Sync Summary ==="
@@ -114,14 +140,3 @@ jobs:
     outputs:
       dev_synced: ${{ steps.sync_dev.outputs.dev_synced }}
       submodules_updated: ${{ steps.submodules.outputs.updated }}
-
-  # 子模块更新时触发构建（仅构建，不发布）
-  trigger-build:
-    name: Trigger Build (no release)
-    needs: sync
-    if: needs.sync.outputs.submodules_updated == 'true'
-    uses: ./.github/workflows/build-windows.yml
-    with:
-      build_cpu: true
-      build_cuda: true
-    secrets: inherit
