@@ -17,8 +17,6 @@
 #include <vector>
 #include <deque>
 #include <array>
-#include <sstream>
-#include <iomanip>
 #ifndef __CUDACC__
 #if defined(__GNUC__) && __GNUC__ < 8 && !defined(__clang__)
 #include <experimental/filesystem>
@@ -27,10 +25,7 @@
 #endif
 #endif
 
-#if defined(_WIN32) || defined(_WIN64)
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
+#if defined(_WIN32) or defined(_WIN64)
 #include <Windows.h>
 #else
 #include <unistd.h>
@@ -101,6 +96,8 @@ namespace fastllm {
 
     static void ErrorInFastLLM(const std::string &error) {
         printf("FastLLM Error: %s\n", error.c_str());
+        printf("Press any key to exit...\n");
+        getchar();
         exit(0);
     }
 
@@ -211,13 +208,10 @@ namespace fastllm {
                     // AMX-TILE is the base requirement (EAX=7, ECX=0, EDX bit 24)
                     if(os_amx_enabled) {
                         bool hasAMX_TILE = (regs[3] & (1 << 24)) != 0;
-                        // Usually we also check for specific AMX arithmetic capabilities:
-                        // AMX-INT8 (EDX bit 25) or AMX-BF16 (EDX bit 22)
-                        bool hasAMX_INT8 = (regs[3] & (1 << 25)) != 0;
+                        // Current AMX kernels require AMX-BF16 (EDX bit 22).
                         bool hasAMX_BF16 = (regs[3] & (1 << 22)) != 0;
 
-                        // We set hasAMX to true if we have the tile architecture AND at least one compute capability
-                        hasAMX = hasAMX_TILE && (hasAMX_INT8 || hasAMX_BF16);
+                        hasAMX = hasAMX_TILE && hasAMX_BF16;
                     }
 
                     // AVX512_BF16: EAX=7, ECX=1, EAX bit 5
@@ -231,35 +225,24 @@ namespace fastllm {
                     // Dependencies
                     hasAVX512BF16 = hasAVX512BF16 && hasAVX512F;
                     hasAVX512VNNI = hasAVX512VNNI && hasAVX512F;
+                    // Current AMX kernels use BF16 tile compute and live in an AVX512BF16 target file.
+                    hasAMX = hasAMX && hasAVX512BF16;
                 }
             }
 #endif             
-            // 不在构造函数中打印，由调用方决定是否输出
+            std::string x[2] = {"OFF", "ON"};
+            printf("CPU Instruction Info: ");
+            printf("[AVX2: %s] ", x[hasAVX2].c_str());
+            printf("[AVX512F: %s] ", x[hasAVX512F].c_str());
+            printf("[AVX512_VNNI: %s] ", x[hasAVX512VNNI].c_str());
+            printf("[AVX512_BF16: %s] ", x[hasAVX512BF16].c_str());
+            printf("[AMX: %s] ", x[hasAMX].c_str()); // Print AMX status
+            printf("\n");
 #endif 
-        }
-
-        // 获取 CPU 指令集信息字符串（供外部模块使用）
-        std::string getInfoString() const {
-            std::ostringstream oss;
-            auto flag = [](bool v) { return v ? "ON" : "OFF"; };
-            oss << "[AVX2: " << flag(hasAVX2) << "] "
-                << "[AVX512F: " << flag(hasAVX512F) << "] "
-                << "[AVX512_VNNI: " << flag(hasAVX512VNNI) << "] "
-                << "[AVX512_BF16: " << flag(hasAVX512BF16) << "] "
-                << "[AMX: " << flag(hasAMX) << "]";
-            return oss.str();
-        }
-
-        // 获取各指令集支持状态（供外部模块格式化输出）
-        struct Flags {
-            bool avx2, avx512f, avx512vnni, avx512bf16, amx;
-        };
-        Flags getFlags() const {
-            return {hasAVX2, hasAVX512F, hasAVX512VNNI, hasAVX512BF16, hasAMX};
         }
     };
 
-    extern CPUInstructInfo cpuInstructInfo;
+    // static CPUInstructInfo cpuInstructInfo;
 
     struct FP16ToFP32Manager {
         float dict[65536];
@@ -278,6 +261,28 @@ namespace fastllm {
             for (uint16_t i = 0; i < 65535; i++) {
                 uint32_t x = (i << 16);
                 dict[i] = *((float*)&x);
+            }
+        }
+    };
+
+    struct BF16ToFP16Manager {
+        uint16_t dict[65536];
+
+        BF16ToFP16Manager() {
+            for (uint16_t i = 0; i < 65535; i++) {
+                uint32_t x = (i << 16);
+                dict[i] = float_to_half(*((float*)&x));
+            }
+        }
+    };
+
+    struct FP16ToBF16Manager {
+        uint16_t dict[65536];
+
+        FP16ToBF16Manager() {
+            for (int i = 0; i < 65536; i++) {
+                float f = half_to_float(i);
+                dict[i] = (uint16_t)(*((uint32_t*)&f) >> 16);
             }
         }
     };
@@ -380,30 +385,6 @@ namespace fastllm {
                 s += it.second;
             }
             printf("Total: %f s.\n", s);
-        }
-
-        // 获取耗时记录（供外部模块格式化输出）
-        const std::map<std::string, float>& getRecords() const {
-            return v;
-        }
-
-        // 获取总耗时
-        float getTotal() const {
-            float s = 0;
-            for (auto &it: v) s += it.second;
-            return s;
-        }
-
-        // 获取格式化字符串（供外部模块使用）
-        std::string getInfoString() const {
-            std::ostringstream oss;
-            float s = 0;
-            for (auto &it: v) {
-                oss << it.first << ": " << std::fixed << std::setprecision(4) << it.second << " s\n";
-                s += it.second;
-            }
-            oss << "Total: " << std::fixed << std::setprecision(4) << s << " s";
-            return oss.str();
         }
     };
 

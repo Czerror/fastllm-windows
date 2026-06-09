@@ -8,13 +8,14 @@
 
 #include "executor.h"
 
-#include "models/basellm.h"  // 日志回调系统
-
 #include <cstring>
+#include <cstdlib>
 #include <cmath>
 #include <cfloat>
+#include <climits>
 #include <thread>
 #include <algorithm>
+#include <queue>
 
 #ifdef USE_MMAP
 #include <sys/mman.h>
@@ -46,9 +47,199 @@ namespace py = pybind11;
 #include "gguf.h"
 
 namespace fastllm {
-    std::map <std::string, int> defaultDeviceMap, defaultMoeDeviceMap;
+    extern BF16ToFP32Manager bf16tofp32;
+
+    namespace {
+        bool IsEnvValueTrueIgnoreCase(const char *env) {
+            if (env == nullptr) {
+                return false;
+            }
+
+            std::string value(env);
+            for (char &c : value) {
+                if (c >= 'A' && c <= 'Z') {
+                    c = c - 'A' + 'a';
+                }
+            }
+            return value == "1" || value == "on" || value == "true";
+        }
+
+        bool IsEnvValueEnabledUnlessFalseIgnoreCase(const char *env) {
+            if (env == nullptr || env[0] == '\0') {
+                return false;
+            }
+
+            std::string value(env);
+            for (char &c : value) {
+                if (c >= 'A' && c <= 'Z') {
+                    c = c - 'A' + 'a';
+                }
+            }
+            return value != "0" && value != "false" && value != "off" &&
+                   value != "no" && value != "disable" && value != "disabled";
+        }
+
+        static void PrintDimsInline(const std::vector <int> &dims) {
+            for (int dim : dims) {
+                printf("%d ", dim);
+            }
+        }
+
+        static void PrintBorderLine(char ch, int width = 70, const char *prefix = "") {
+            printf("%s", prefix);
+            for (int i = 0; i < width; i++) {
+                putchar(ch);
+            }
+            printf("\n");
+        }
+
+        static void PrintTensorBlockTitle(const std::string &name) {
+            PrintBorderLine('=');
+            if (name.empty()) {
+                printf("tensor\n");
+            } else {
+                printf("tensor: %s\n", name.c_str());
+            }
+        }
+
+#ifdef USE_CUDA
+        static void *CudaMallocForData(const Data &data, uint64_t bytes) {
+            if (data.isModelWeight && !data.directMemory) {
+                return FastllmCudaMallocModelWeight(bytes);
+            }
+            return data.directMemory ? FastllmCudaDirectMalloc(bytes) : FastllmCudaMalloc(bytes);
+        }
+
+        static void CudaFreeForData(const Data &data, void *ptr) {
+            if (data.cudaDataBorrowed && ptr == data.cudaData) {
+                return;
+            }
+            if (data.directMemory) {
+                FastllmCudaDirectFree(ptr);
+            } else {
+                FastllmCudaFree(ptr);
+            }
+        }
+#endif
+
+        static void PrintRangesInline(const std::vector <std::pair <int, int> > &ranges) {
+            if (ranges.empty()) {
+                printf("(no range)");
+                return;
+            }
+            for (int i = 0; i < ranges.size(); i++) {
+                if (i > 0) {
+                    printf(" ");
+                }
+                printf("[%d, %d)", ranges[i].first, ranges[i].second);
+            }
+        }
+
+        static int NormalizePrintAxis(int axis, int dimsLen) {
+            if (dimsLen <= 0) {
+                return axis;
+            }
+            return (axis % dimsLen + dimsLen) % dimsLen;
+        }
+
+        static bool TryConvertCpuDataToFloat(const Data &data, std::vector <float> &floatData) {
+            if (data.cpuData == nullptr) {
+                return false;
+            }
+            floatData.resize(data.Count(0));
+            if (data.dataType == DataType::FLOAT32) {
+                memcpy(floatData.data(), data.cpuData, data.Count(0) * sizeof(float));
+                return true;
+            } else if (data.dataType == DataType::FLOAT16) {
+                for (int i = 0; i < floatData.size(); i++) {
+                    floatData[i] = half_to_float(((uint16_t*)data.cpuData)[i]);
+                }
+                return true;
+            } else if (data.dataType == DataType::BFLOAT16) {
+                for (int i = 0; i < floatData.size(); i++) {
+                    floatData[i] = bf16tofp32.dict[(((uint16_t*)data.cpuData)[i])];
+                }
+                return true;
+            } else if (data.dataType == DataType::INT32) {
+                for (int i = 0; i < floatData.size(); i++) {
+                    floatData[i] = ((int32_t*)data.cpuData)[i];
+                }
+                return true;
+            }
+            return false;
+        }
+
+        static void PrintFloatDataPreview(const std::vector <float> &floatData,
+                                          const std::vector <int> &dims,
+                                          const char *linePrefix) {
+            if (floatData.empty()) {
+                printf("%s(empty)\n", linePrefix);
+                return;
+            }
+            if (dims.empty()) {
+                printf("%s%f\n", linePrefix, floatData[0]);
+                return;
+            }
+            int m = dims.back();
+            if (m <= 0) {
+                printf("%s(empty)\n", linePrefix);
+                return;
+            }
+
+            int n = (int)floatData.size() / m;
+            if (n * m != (int)floatData.size()) {
+                printf("%s(invalid layout)\n", linePrefix);
+                return;
+            }
+            const int previewRows = 10;
+            bool truncateRows = n > previewRows * 2;
+            for (int i = 0; i < n; i++) {
+                if (truncateRows && i == previewRows) {
+                    printf("%s...\n", linePrefix);
+                }
+                if (truncateRows && i >= previewRows && i < n - previewRows) {
+                    continue;
+                }
+                printf("%s", linePrefix);
+                for (int j = 0; j < 3 && j < m; j++) {
+                    printf("%f ", floatData[i * m + j]);
+                }
+                if (m > 3) {
+                    printf("... ");
+                    for (int j = 0; j < 3 && j < m; j++) {
+                        printf("%f ", floatData[i * m + (m - 3 + j)]);
+                    }
+                }
+                printf("\n");
+            }
+        }
+
+        static void PrintCpuDataPreview(const Data &data, const char *linePrefix = "") {
+            if (data.cpuData == nullptr) {
+                printf("%s(cpu data is null)\n", linePrefix);
+                return;
+            }
+
+            std::vector <float> floatData;
+            if (!TryConvertCpuDataToFloat(data, floatData)) {
+                printf("%s(unsupported data type: %s)\n", linePrefix, GetDataTypeName(data.dataType).c_str());
+                return;
+            }
+            PrintFloatDataPreview(floatData, data.dims, linePrefix);
+        }
+
+        static void PrintSingleTensor(const Data &data, const std::vector <int> &shape, const char *linePrefix = "") {
+            printf("%sshape: ", linePrefix);
+            PrintDimsInline(shape);
+            printf("\n%sdata:\n", linePrefix);
+            PrintCpuDataPreview(data, linePrefix);
+        }
+    }
+
+    std::map <std::string, int> defaultDeviceMap, defaultMoeDeviceMap, defaultLayeredMoeDeviceMap;
+    int defaultMoeDeviceLayers = -1;
     Executor defaultExecutor;
-    Executor *curExecutor = &defaultExecutor;
+    thread_local Executor *curExecutor = &defaultExecutor;
 
     static std::mutex globalLocker;
     static int threads = 4;
@@ -58,14 +249,72 @@ namespace fastllm {
     static bool historyCacheInCPU = false;
     static bool cudaEmbedding = false;
     static bool cudaSharedExpert = false;
+    static int cudaSlabMB = 0;
     static bool enableAMX = false;
+    static int maxTokens = -1;
+    static int defaultPageLen = 128;
+    static float gpuMemRatio = 0.9f;
+    static Data emptyData;
+    static FastllmEnv fastllmEnv;
 
     static std::map <DataType, int> DataTypeBits = {
         {DataType::FLOAT32, 32}, {DataType::BFLOAT16, 16}, {DataType::INT16, 16}, 
         {DataType::INT8, 8}, {DataType::INT4, 4}, {DataType::INT2, 2}, {DataType::BIT, 1}, 
         {DataType::FLOAT16, 16}, {DataType::INT4_NOZERO, 4}, {DataType::INT4_GROUP, 4},
-        {DataType::FP8_E4M3, 8}, {DataType::INT2_GROUP, 2}, {DataType::BASE3_GROUP, 2}
+        {DataType::FP8_E4M3, 8}, {DataType::INT2_GROUP, 2}, {DataType::BASE3_GROUP, 2},
+        {DataType::NVFP4, 4}
     };
+
+    FastllmEnv::FastllmEnv() {
+        const char *activateNumaEnv = std::getenv("FASTLLM_ACTIVATE_NUMA");
+        std::string activateNumaValue = activateNumaEnv ? activateNumaEnv : "";
+        this->activateNuma = !activateNumaValue.empty() && activateNumaValue != "OFF";
+
+        const char *numaThreadsEnv = std::getenv("FASTLLM_NUMA_THREADS");
+        if (numaThreadsEnv != nullptr) {
+            int value = atoi(numaThreadsEnv);
+            if (value > 0) {
+                this->numaThreads = value;
+            }
+        }
+
+        const char *numasEnv = std::getenv("FASTLLM_NUMAS");
+        if (numasEnv != nullptr) {
+            int value = atoi(numasEnv);
+            if (value > 0) {
+                this->numas = value;
+            }
+        }
+
+        const char *cudaSyncEnv = std::getenv("FASTLLM_CUDA_SYNC");
+        this->cudaSync = cudaSyncEnv != nullptr && std::strcmp(cudaSyncEnv, "1") == 0;
+
+        this->printLogits = IsEnvValueTrueIgnoreCase(std::getenv("FASTLLM_PRINT_LOGITS"));
+        this->printProfile = IsEnvValueTrueIgnoreCase(std::getenv("FASTLLM_PRINT_PROFILE"));
+        this->skipWarmup = IsEnvValueTrueIgnoreCase(std::getenv("FASTLLM_SKIP_WARMUP"));
+        this->cudaGraph = IsEnvValueTrueIgnoreCase(std::getenv("FASTLLM_CUDA_GRAPH"));
+        this->cudaMemCheck = IsEnvValueEnabledUnlessFalseIgnoreCase(std::getenv("FASTLLM_CUDA_MEM_CHECK"));
+        this->cudaTriton = IsEnvValueTrueIgnoreCase(std::getenv("FASTLLM_CUDA_TRITON"));
+
+        const char *useFusedTransferAttnEnv = std::getenv("FASTLLM_USE_FUSED_TRANSFER_ATTN");
+        if (useFusedTransferAttnEnv != nullptr && std::strcmp(useFusedTransferAttnEnv, "0") == 0) {
+            this->useFusedTransferAttn = false;
+        }
+
+        const char *useFusedGdnPrefillEnv = std::getenv("FASTLLM_USE_FUSED_GDN_PREFILL");
+        if (useFusedGdnPrefillEnv != nullptr && std::strcmp(useFusedGdnPrefillEnv, "0") == 0) {
+            this->useFusedGdnPrefill = false;
+        }
+
+        const char *debugTokenIdEnv = std::getenv("FASTLLM_DEBUG_TOKEN_ID");
+        if (debugTokenIdEnv != nullptr) {
+            this->debugTokenId = debugTokenIdEnv;
+        }
+    }
+
+    const FastllmEnv &GetFastllmEnv() {
+        return fastllmEnv;
+    }
 
     void PrintInstructionInfo() {
         std::string avx = "OFF", avx2 = "OFF", aarch64 = "OFF", neonFp16 = "OFF", neonDot = "OFF";
@@ -91,12 +340,27 @@ namespace fastllm {
         printf("Neon DOT: %s\n", neonDot.c_str());
     }
 
+    Data *GetEmptyData() {
+        return &emptyData;
+    }
+
     void SetCudaEmbedding(bool v) {
         cudaEmbedding = v;
     }
 
     bool GetCudaEmbedding() {
-        return cudaEmbedding;
+        return cudaEmbedding || GetFastllmEnv().cudaGraph;
+    }
+
+    void SetCudaSlabMB(int mb) {
+        cudaSlabMB = std::max(0, mb);
+#ifdef USE_CUDA
+        FastllmCudaSetWeightSlabBytes((size_t)cudaSlabMB * 1024ULL * 1024ULL);
+#endif
+    }
+
+    int GetCudaSlabMB() {
+        return cudaSlabMB;
     }
 
     void SetCudaSharedExpert(bool v) {
@@ -155,16 +419,41 @@ namespace fastllm {
         return threads;
     }
 
+    extern CPUInstructInfo cpuInstructInfo;
     extern void InitAMX();
     void EnableAMX(bool enable) {
-        enableAMX = enable;
-        if (enable) {
+        enableAMX = enable && cpuInstructInfo.hasAMX;
+        if (enableAMX) {
             InitAMX();
         }
     }
 
     bool GetEnableAMX() {
         return enableAMX;
+    }
+
+    void SetMaxTokens(int tokens) {
+        maxTokens = tokens;
+    }
+
+    int GetMaxTokens() {
+        return maxTokens;
+    }
+
+    void SetPageLen(int pageLen) {
+        defaultPageLen = pageLen;
+    }
+
+    int GetPageLen() {
+        return defaultPageLen;
+    }
+
+    void SetGpuMemRatio(float ratio) {
+        gpuMemRatio = ratio;
+    }
+
+    float GetGpuMemRatio() {
+        return gpuMemRatio;
     }
 
     AliveThreadPool *GetAlivePool() {
@@ -178,7 +467,16 @@ namespace fastllm {
         {DataType::FLOAT32, {"float32", "fp32"}}, {DataType::BFLOAT16, {"bfloat16", "bf16"}}, {DataType::INT16, {"int16"}}, 
         {DataType::INT8, {"int8"}}, {DataType::INT4, {"int4o"}}, {DataType::INT2, {"int2"}}, {DataType::BIT, {"bit"}}, 
         {DataType::FLOAT16, {"float16", "fp16", "half"}}, {DataType::INT4_NOZERO, {"int4"}}, {DataType::INT4_GROUP, {"int4g"}},
-        {DataType::FP8_E4M3, {"float8", "fp8", "fp8_e4m3"}}, {DataType::INT2_GROUP, {"int2g"}}, {DataType::BASE3_GROUP, {"base3g"}}
+        {DataType::FP8_E4M3, {"float8", "fp8", "fp8_e4m3"}}, {DataType::INT2_GROUP, {"int2g"}}, {DataType::BASE3_GROUP, {"base3g"}},
+        {DataType::INT32, {"int32"}}, {DataType::NVFP4, {"nvfp4", "fp4_e2m1"}}, {DataType::INT32PARAM, {"int32param"}},
+        {DataType::FP8_E4M3_BLOCK_128, {"fp8_e4m3_block_128"}}, {DataType::AWQ_4BIT_128, {"awq_4bit_128"}},
+        {DataType::INT4_PERCHANNEL, {"int4_perchannel"}}, {DataType::FP8_E4M3_PERCHANNEL, {"fp8_e4m3_perchannel"}},
+        {DataType::INT4_GROUP128, {"int4_group128"}}, {DataType::INT8_PERCHANNEL, {"int8_perchannel"}},
+        {DataType::NVFP4_BLOCK_16, {"nvfp4_block_16"}},
+        {DataType::NVFP4_BLOCK_16_E8M0, {"nvfp4_block_16_e8m0"}},
+        {DataType::INF_INT8_PERCHANNEL, {"inf_int8_perchannel"}}, {DataType::INF_INT8_GROUP128, {"inf_int8_group128"}},
+        {DataType::DATA_AUTO_NONE, {"data_auto_none"}}, {DataType::DATA_AUTO_LINEAR, {"data_auto_linear"}},
+        {DataType::DATA_AUTO_EMBEDDING, {"data_auto_embedding"}}, {DataType::DATA_AUTO_CONV, {"data_auto_conv"}}
     };
 
     std::string GetDataTypeName(DataType type) {
@@ -191,16 +489,73 @@ namespace fastllm {
         }
     }
 
+    size_t GetNVFP4WeightBytes(size_t rows, size_t columns) {
+        return rows * ((columns + 1) / 2);
+    }
+
+    size_t GetNVFP4ScaleBytes(size_t rows, size_t columns, int blockK, int blockM) {
+        if (rows == 0 || columns == 0 || blockK <= 0 || blockM <= 0) {
+            return 0;
+        }
+        return ((rows - 1) / blockK + 1) * ((columns - 1) / blockM + 1);
+    }
+
+    size_t GetNVFP4StorageBytes(size_t rows, size_t columns, int blockK, int blockM) {
+        return GetNVFP4WeightBytes(rows, columns) + GetNVFP4ScaleBytes(rows, columns, blockK, blockM);
+    }
+
+    float NVFP4E8M0ScaleToFloat(uint8_t v) {
+        uint32_t bits = v == 0 ? 0x00400000u : ((uint32_t)v << 23);
+        float ret;
+        memcpy(&ret, &bits, sizeof(ret));
+        return ret;
+    }
+
+    uint8_t *GetNVFP4ScaleData(Data &data) {
+        if (data.dataType != DataType::NVFP4 || data.dims.size() != 2 ||
+            data.blockK <= 0 || data.blockM <= 0 || !data.scales.empty()) {
+            return nullptr;
+        }
+        uint64_t weightBytes = GetNVFP4WeightBytes(data.dims[0], data.dims[1]);
+        if (data.cpuData == nullptr || data.expansionBytes < weightBytes + GetNVFP4ScaleBytes(data.dims[0], data.dims[1], data.blockK, data.blockM)) {
+            return nullptr;
+        }
+        return data.cpuData + weightBytes;
+    }
+
+    const uint8_t *GetNVFP4ScaleData(const Data &data) {
+        if (data.dataType != DataType::NVFP4 || data.dims.size() != 2 ||
+            data.blockK <= 0 || data.blockM <= 0 || !data.scales.empty()) {
+            return nullptr;
+        }
+        uint64_t weightBytes = GetNVFP4WeightBytes(data.dims[0], data.dims[1]);
+        if (data.cpuData == nullptr || data.expansionBytes < weightBytes + GetNVFP4ScaleBytes(data.dims[0], data.dims[1], data.blockK, data.blockM)) {
+            return nullptr;
+        }
+        return data.cpuData + weightBytes;
+    }
+
     size_t GetDataBytes(DataType type, size_t rows, size_t columns) {
         if (type == DataType::FLOAT32) {
             return rows * columns * sizeof(float);
         } else if (type == DataType::BFLOAT16 || type == DataType::FLOAT16) {
             return rows * columns * sizeof(uint16_t);
+        } else if (type == DataType::INT4_NOZERO || type == DataType::INT4 || type == DataType::INT4_GROUP ||
+                   type == DataType::NVFP4) {
+            return type == DataType::NVFP4 ? GetNVFP4WeightBytes(rows, columns) : rows * (columns / 2);
+        } else if (type == DataType::INT8) {
+            return rows * columns;
         } else if (type == DataType::FP8_E4M3_BLOCK_128) {
             // columns * [fp8] + ((columns - 1) / 128 + 1) * [float]
             return rows * (columns + ((columns - 1) / 128 + 1) * sizeof(float));
         } else if (type == DataType::FP8_E4M3_PERCHANNEL) {
             return rows * (columns + sizeof(float));
+        } else if (type == DataType::NVFP4_BLOCK_16) {
+            int blocks = (columns - 1) / 16 + 1;
+            return rows * blocks * (8 + sizeof(float));
+        } else if (type == DataType::NVFP4_BLOCK_16_E8M0) {
+            int blocks = (columns - 1) / 16 + 1;
+            return rows * blocks * (8 + sizeof(uint8_t));
         } else if (type == DataType::FP8_E4M3) {
             return rows * columns * sizeof(uint8_t);
         } else if (type == DataType::INT4_PERCHANNEL) {
@@ -226,8 +581,20 @@ namespace fastllm {
             return rows * colBytes;
         } else {
             ErrorInFastLLM("GetDataBytes failed. " + GetDataTypeName(type) + "\n");
-            return 0;
         }
+        return 0;
+    }
+
+    static bool FastllmGetPackedRowsCols(const std::vector<int> &dims, size_t &rows, size_t &columns) {
+        if (dims.size() < 2) {
+            return false;
+        }
+        rows = 1;
+        for (int i = 0; i + 1 < (int)dims.size(); i++) {
+            rows *= dims[i];
+        }
+        columns = dims.back();
+        return true;
     }
     
 #ifdef USE_MMAP
@@ -465,6 +832,20 @@ namespace fastllm {
         this->Allocate();
         if (type == DataType::FLOAT32) {
             std::memcpy(this->cpuData, data.data(), this->GetBytes());
+        } else if (type == DataType::FLOAT16 || type == DataType::BFLOAT16) {
+            size_t n = std::min((size_t)this->Count(0), data.size());
+            uint16_t *dst = (uint16_t *) this->cpuData;
+            if (type == DataType::FLOAT16) {
+                for (size_t i = 0; i < n; i++) {
+                    dst[i] = float_to_half(data[i]);
+                }
+            } else {
+                for (size_t i = 0; i < n; i++) {
+                    uint32_t bits;
+                    std::memcpy(&bits, &data[i], sizeof(bits));
+                    dst[i] = (uint16_t)(bits >> 16); // fp32 -> bf16 截断
+                }
+            }
         }
     }
 
@@ -477,6 +858,7 @@ namespace fastllm {
         this->UpdateUnitSize();
         this->isFake = true;
         this->dataDevice = ori.dataDevice;
+        this->ClearTensorParallelLayout();
         if (this->dataDevice == DataDevice::CPU) {
             this->cpuData = ori.cpuData + offset;
         } else if (this->dataDevice == DataDevice::CUDA) {
@@ -493,11 +875,28 @@ namespace fastllm {
         this->name = ori.name;
         this->isKVCache = ori.isKVCache;
         this->isLinearAttention = ori.isLinearAttention;
+        this->isLinearAttentionTransposed = ori.isLinearAttentionTransposed;
         this->cacheUid = ori.cacheUid;
         this->dataDevice = ori.dataDevice;
+        this->tpLayout = ori.tpLayout;
+        this->tpAxis = ori.tpAxis;
+        this->tpGlobalDims = ori.tpGlobalDims;
+        this->tpRanges = ori.tpRanges;
+        this->tpLinearType = ori.tpLinearType;
+        this->tpPackType = ori.tpPackType;
+        this->tpQHeads = ori.tpQHeads;
+        this->tpKVHeads = ori.tpKVHeads;
+        this->tpHeadDim = ori.tpHeadDim;
+        bool needRebuildGGUFTensor = ori.dataType == DataType::DATA_GGUF_FORMAT &&
+                                     (this->ggmlTensor == nullptr || this->ggmlType != ori.ggmlType);
+        this->isGGUFData = ori.isGGUFData || ori.dataType == DataType::DATA_GGUF_FORMAT;
+        this->ggmlType = ori.ggmlType;
+        this->IsRepacked = ori.IsRepacked;
         
         // std::cout<<"调用拷贝构造"<<std::endl;
-        if (ori.expansionDims != this->expansionDims || ori.dims != this->dims || this->cpuData == nullptr || ori.dataType != this->dataType) {
+        if (needRebuildGGUFTensor ||
+            ori.expansionDims != this->expansionDims || ori.dims != this->dims ||
+            this->cpuData == nullptr || ori.dataType != this->dataType) {
             if (ori.dims.size() == 0) {
                 this->dataType = ori.dataType;
                 this->UpdateUnitSize();
@@ -508,8 +907,11 @@ namespace fastllm {
                     this->cpuData = nullptr;
                 } else if (this->dataDevice == DataDevice::CUDA) {
 #ifdef USE_CUDA
-                    FastllmCudaFree(this->cudaData);
+                    if (!this->cudaDataBorrowed) {
+                        FastllmCudaFree(this->cudaData);
+                    }
                     this->cudaData = nullptr;
+                    this->cudaDataBorrowed = false;
 #endif
                 }
                 return;
@@ -537,16 +939,7 @@ namespace fastllm {
         }
     }
 
-    struct BF16ToFP16Manager {
-        float dict[65536];
-
-        BF16ToFP16Manager() {
-            for (uint16_t i = 0; i < 65535; i++) {
-                uint32_t x = (i << 16);
-                dict[i] = float_to_half(*((float*)&x));
-            }
-        }
-    } bf16tofp16;
+    BF16ToFP16Manager bf16tofp16;
 
     extern BF16ToFP32Manager bf16tofp32;
 
@@ -832,6 +1225,21 @@ namespace fastllm {
             int groupCnt, int blockK, int blockM) {
         auto &data = *this;
         data.weightType = weightType;
+        if (dataType == oriDataType &&
+            (dataType == DataType::NVFP4 || dataType == DataType::NVFP4_BLOCK_16 ||
+             dataType == DataType::NVFP4_BLOCK_16_E8M0)) {
+            this->blockK = blockK;
+            this->blockM = blockM;
+            if (dataType == DataType::NVFP4) {
+                this->scales.clear();
+            }
+            data.UpdateUnitSize();
+            data.Allocate(false);
+            if (oriData != nullptr) {
+                memcpy(data.cpuData, oriData, data.GetBytes());
+            }
+            return;
+        }
         data.UpdateUnitSize();
         data.Allocate();
         if (dataType == oriDataType) {
@@ -853,11 +1261,16 @@ namespace fastllm {
                     data.perChannelsConfigs[i].min = data.mins[i];
                     data.perChannelsConfigs[i].scale = data.scales[i];
                 } */
-            } else if (dataType == DataType::FP8_E4M3) {
+            } else if (dataType == DataType::FP8_E4M3 || dataType == DataType::NVFP4) {
                 this->blockK = blockK;
                 this->blockM = blockM;
-                int ks = (this->dims[0] - 1) / this->blockK + 1;
-                int ms = (this->dims[1] - 1) / this->blockM + 1;
+                int rows = 1;
+                for (int i = 0; i + 1 < (int)this->dims.size(); i++) {
+                    rows *= this->dims[i];
+                }
+                int cols = this->dims.back();
+                int ks = (rows - 1) / this->blockK + 1;
+                int ms = (cols - 1) / this->blockM + 1;
                 data.scales.resize(ks * ms);
                 memcpy(data.scales.data(), oriScales, ks * ms * sizeof(float));
             }
@@ -876,6 +1289,14 @@ namespace fastllm {
             int len = data.Count(0);
             for (int i = 0; i < len; i++) {
                 a[i] = float_to_half(b[i]);
+            }
+        } else if (oriDataType == DataType::FLOAT32
+                && dataType == DataType::BFLOAT16) {
+            uint16_t *a = (uint16_t*)data.cpuData;
+            float *b = (float*)oriData;
+            int len = data.Count(0);
+            for (int i = 0; i < len; i++) {
+                a[i] = ((uint32_t*)&b[i])[0] >> 16;
             }
         } else if ((oriDataType == DataType::FLOAT32 || oriDataType == DataType::BFLOAT16)
                 && dataType == DataType::INT4_GROUP) {
@@ -1042,6 +1463,14 @@ namespace fastllm {
         } else if (this->dataType == DataType::INT8 || this->dataType == DataType::FP8_E4M3) {
             this->unitSize = 1;
             this->unitSizeDiv = 1;
+        } else if (this->dataType == DataType::NVFP4) {
+            this->unitSize = 1;
+            this->unitSizeDiv = 2;
+        } else if (this->dataType == DataType::FP8_E4M3_BLOCK_128 ||
+                   this->dataType == DataType::NVFP4_BLOCK_16 ||
+                   this->dataType == DataType::NVFP4_BLOCK_16_E8M0) {
+            this->unitSize = 1;
+            this->unitSizeDiv = 1;
         } else if (this->dataType == DataType::INT4 
                 || this->dataType == DataType::INT4_NOZERO
                 || this->dataType == DataType::INT4_GROUP) {
@@ -1054,7 +1483,7 @@ namespace fastllm {
         } else if (this->dataType == DataType::BIT) {
             this->unitSize = 1;
             this->unitSizeDiv = 8;
-        } else if (this->dataType == DataType::INT32PARAM) {
+        } else if (this->dataType == DataType::INT32PARAM || this->dataType == DataType::INT32) {
             this->unitSize = 4;
             this->unitSizeDiv = 1;
         } else if (this->dataType == DataType::DATA_GGUF_FORMAT) {
@@ -1063,10 +1492,29 @@ namespace fastllm {
             this->unitSizeDiv = 1;
         }
 
-        this->expansionBytes = (this->expansionSize * this->unitSize - 1) / this->unitSizeDiv + 1;
+        if ((this->dataType == DataType::FP8_E4M3_BLOCK_128 ||
+             this->dataType == DataType::NVFP4_BLOCK_16 ||
+             this->dataType == DataType::NVFP4_BLOCK_16_E8M0) && this->dims.size() >= 2) {
+            size_t rows = 0, columns = 0;
+            FastllmGetPackedRowsCols(this->dims, rows, columns);
+            this->expansionBytes = GetDataBytes(this->dataType, rows, columns);
+        } else if (this->dataType == DataType::NVFP4 && this->dims.size() == 2 &&
+            this->blockK > 0 && this->blockM > 0 && this->scales.empty()) {
+            this->expansionBytes = GetNVFP4StorageBytes(this->dims[0], this->dims[1], this->blockK, this->blockM);
+        } else {
+            this->expansionBytes = (this->expansionSize * this->unitSize - 1) / this->unitSizeDiv + 1;
+        }
     }
 
     void Data::Resize(const std::vector<int> &dims) {
+        std::vector <int> oldDims = this->dims;
+        uint64_t oldCount = 1, newCount = 1;
+        for (int v : oldDims) {
+            oldCount *= v;
+        }
+        for (int v : dims) {
+            newCount *= v;
+        }
         this->dims = dims;
         this->UpdateUnitSize();
 
@@ -1105,12 +1553,32 @@ namespace fastllm {
                 this->strides[i] = this->dims[i + 1] * this->strides[i + 1];
             }
         }
+
+        if (this->multiDeviceData && this->tpLayout == TP_LAYOUT_SHARDED && !this->dims.empty()) {
+            int axis = (this->tpAxis % (int)this->dims.size() + (int)this->dims.size()) % (int)this->dims.size();
+            long long totalRange = 0;
+            for (auto &it : this->tpRanges) {
+                for (auto &range : it.second) {
+                    totalRange += range.second - range.first;
+                }
+            }
+            if (oldCount != newCount && totalRange > 0 && totalRange != this->dims[axis]) {
+                for (auto &it : this->multiDeviceDatas) {
+                    delete it.second;
+                }
+                this->multiDeviceDatas.clear();
+                this->multiDeviceData = false;
+                this->ClearTensorParallelLayout();
+                return;
+            }
+        }
     }
 
     void Data::Reshape(const std::vector<int> &dims) {
         if (this->dims == dims) {
             return;
         }
+        std::vector <int> oldDims = this->dims;
         std::vector <int> outputDims = dims;
         uint64_t old = 1;
         for (int i : this->dims) {
@@ -1138,21 +1606,148 @@ namespace fastllm {
             outputDims[index] = old / mul;
         }
         Resize(outputDims);
+
+        if (!this->multiDeviceData || this->tpLayout == TP_LAYOUT_NONE) {
+            return;
+        }
+
+        if (this->tpLayout == TP_LAYOUT_REPLICATED) {
+            this->tpGlobalDims = outputDims;
+            for (auto &it : this->multiDeviceDatas) {
+                if (it.second != nullptr) {
+                    it.second->Resize(outputDims);
+                }
+            }
+            return;
+        }
+
+        auto normalizeAxis = [](int axis, int dimsLen) {
+            return (axis % dimsLen + dimsLen) % dimsLen;
+        };
+        auto sumRanges = [](const std::map<int, std::vector<std::pair<int, int>>> &tpRanges) {
+            long long total = 0;
+            for (auto &it : tpRanges) {
+                for (auto &range : it.second) {
+                    total += range.second - range.first;
+                }
+            }
+            return total;
+        };
+        auto scaleRanges = [&](int mul, int div) {
+            for (auto &it : this->tpRanges) {
+                for (auto &range : it.second) {
+                    range.first = range.first * mul / div;
+                    range.second = range.second * mul / div;
+                }
+            }
+        };
+
+        int oldAxis = normalizeAxis(this->tpAxis, (int)oldDims.size());
+        int newAxis = oldAxis;
+        bool validOldRanges = sumRanges(this->tpRanges) == oldDims[oldAxis];
+        if ((int)oldDims.size() + 1 == (int)outputDims.size() &&
+            oldAxis == (int)oldDims.size() - 1 &&
+            outputDims.back() > 0 &&
+            oldDims.back() == outputDims[(int)outputDims.size() - 2] * outputDims.back()) {
+            newAxis = (int)outputDims.size() - 2;
+            if (validOldRanges) {
+                scaleRanges(1, outputDims.back());
+            }
+        } else if ((int)oldDims.size() == 4 && (int)outputDims.size() == 3 &&
+                   oldAxis == 1 && oldDims[0] == 1 &&
+                   outputDims[0] == oldDims[1] &&
+                   outputDims[1] == oldDims[2] &&
+                   outputDims[2] == oldDims[3]) {
+            newAxis = 0;
+        } else if ((int)oldDims.size() == 3 && (int)outputDims.size() == 3 &&
+                   oldAxis == 0 &&
+                   outputDims[0] * outputDims[1] == oldDims[1] &&
+                   outputDims[2] == oldDims[0] * oldDims[2]) {
+            newAxis = 2;
+            if (validOldRanges) {
+                scaleRanges(oldDims[2], 1);
+            }
+        }
+
+        this->tpAxis = newAxis;
+        this->tpGlobalDims = outputDims;
+
+        int axis = normalizeAxis(this->tpAxis, (int)outputDims.size());
+        long long other = 1;
+        for (int i = 0; i < (int)outputDims.size(); i++) {
+            if (i != axis) {
+                other *= outputDims[i];
+            }
+        }
+        AssertInFastLLM(other > 0, "Tensor parallel reshape error.\n");
+        int offset = 0;
+        for (auto &it : this->multiDeviceDatas) {
+            if (it.second == nullptr) {
+                continue;
+            }
+            std::vector <int> localDims = outputDims;
+            auto rangeIt = this->tpRanges.find(it.first);
+            if (validOldRanges && rangeIt != this->tpRanges.end() && !rangeIt->second.empty()) {
+                int localAxis = 0;
+                for (auto &range : rangeIt->second) {
+                    localAxis += range.second - range.first;
+                }
+                localDims[axis] = localAxis;
+            } else {
+                long long localCount = it.second->Count(0);
+                AssertInFastLLM(localCount % other == 0, "Tensor parallel reshape local count mismatch.\n");
+                int localAxis = (int)(localCount / other);
+                localDims[axis] = localAxis;
+                this->tpRanges[it.first].clear();
+                this->tpRanges[it.first].push_back({offset, offset + localAxis});
+                offset += localAxis;
+            }
+            it.second->Resize(localDims);
+        }
     }
 
     uint64_t Data::GetBytes() const {
         if (this->dataType == DataType::DATA_GGUF_FORMAT) {
             return ggml_nbytes((ggml_tensor*)this->ggmlTensor);
         }
+        if (this->dataType == DataType::NVFP4 && this->dims.size() == 2 &&
+            this->blockK > 0 && this->blockM > 0 && this->scales.empty()) {
+            return GetNVFP4StorageBytes(this->dims[0], this->dims[1], this->blockK, this->blockM);
+        }
+        if ((this->dataType == DataType::FP8_E4M3_BLOCK_128 ||
+             this->dataType == DataType::NVFP4_BLOCK_16 ||
+             this->dataType == DataType::NVFP4_BLOCK_16_E8M0) && this->dims.size() >= 2) {
+            size_t rows = 0, columns = 0;
+            FastllmGetPackedRowsCols(this->dims, rows, columns);
+            return GetDataBytes(this->dataType, rows, columns);
+        }
+        if (this->dataType >= 1000 && this->dataType < DataType::DATA_GGUF_FORMAT 
+            && this->dims.size() == 2) {
+            return GetDataBytes(this->dataType, this->dims[0], this->dims[1]);
+        }
         return (this->strides[0] * this->dims[0] * this->unitSize - 1) / this->unitSizeDiv + 1;
     }
 
-    void Data::MallocSpace(uint64_t size) {
+    void Data::MallocSpace(uint64_t size, bool zero) {
         this->expansionSize = size;
-        this->expansionBytes = (size * this->unitSize - 1) / this->unitSizeDiv + 1;
+        if ((this->dataType == DataType::FP8_E4M3_BLOCK_128 ||
+             this->dataType == DataType::NVFP4_BLOCK_16 ||
+             this->dataType == DataType::NVFP4_BLOCK_16_E8M0) && this->dims.size() >= 2) {
+            size_t rows = 0, columns = 0;
+            FastllmGetPackedRowsCols(this->dims, rows, columns);
+            this->expansionBytes = GetDataBytes(this->dataType, rows, columns);
+        } else if (this->dataType == DataType::NVFP4 && this->dims.size() == 2 &&
+            this->blockK > 0 && this->blockM > 0 && this->scales.empty() &&
+            size == this->Count(0)) {
+            this->expansionBytes = GetNVFP4StorageBytes(this->dims[0], this->dims[1], this->blockK, this->blockM);
+        } else {
+            this->expansionBytes = (size * this->unitSize - 1) / this->unitSizeDiv + 1;
+        }
         if (this->dataDevice == DataDevice::CPU) {
             this->cpuData = new uint8_t[this->expansionBytes];
-            memset(this->cpuData, 0, this->expansionBytes*sizeof(uint8_t));
+            if (zero) {
+                memset(this->cpuData, 0, this->expansionBytes*sizeof(uint8_t));
+            }
         } else if (this->dataDevice == DataDevice::CUDA) {
 #ifdef USE_CUDA
             if (this->directMemory) {
@@ -1160,7 +1755,26 @@ namespace fastllm {
             } else {
                 this->cudaData = FastllmCudaMalloc(this->expansionBytes);
             }
-            FastllmCudaMemset0(this->cudaData, this->expansionBytes);
+            this->cudaDataBorrowed = false;
+            if (this->cudaData == nullptr) {
+                std::string msg = "Error: cuda malloc failed in Data::MallocSpace. requestBytes = " +
+                                  std::to_string(this->expansionBytes) +
+                                  ", dataType = " + GetDataTypeName(this->dataType) + ", dims = [";
+                for (int i = 0; i < (int)this->dims.size(); i++) {
+                    msg += (i == 0 ? "" : ", ") + std::to_string(this->dims[i]);
+                }
+                msg += "].\n";
+                ErrorInFastLLM(msg);
+            }
+            if (this->multiDeviceData && this->tpLayout == TP_LAYOUT_NONE) {
+                for (auto it : this->multiDeviceDatas) {
+                    delete it.second;
+                }
+                this->multiDeviceData = false;
+            }
+            if (zero) {
+                FastllmCudaMemset0(this->cudaData, this->expansionBytes);
+            }
 #else
             ErrorInFastLLM("Error: cuda is not supported.\n");
 #endif
@@ -1172,26 +1786,28 @@ namespace fastllm {
             return;
         this->expansionSize = 0;
         this->expansionBytes = 0;
-        if (this->dataDevice == DataDevice::CPU) {
+        if (this->cpuData != nullptr) {
 #ifdef USE_MMAP
-            if (this->name.empty())
+            if (this->mapFile == nullptr)
                 delete[] this->cpuData;
 #else
             delete[] this->cpuData;
 #endif
             this->cpuData = nullptr;
-        } else if (this->dataDevice == DataDevice::CUDA) {
+        }
 #ifdef USE_CUDA
-            if (this->directMemory) {
-                FastllmCudaDirectFree(this->cudaData);
-            } else {
-                FastllmCudaFree(this->cudaData);
+        if (this->cudaData != nullptr) {
+            if (!this->cudaDataBorrowed) {
+                if (this->directMemory) {
+                    FastllmCudaDirectFree(this->cudaData);
+                } else {
+                    FastllmCudaFree(this->cudaData);
+                }
             }
             this->cudaData = nullptr;
-#else
-            ErrorInFastLLM("Error: cuda is not supported.\n");
-#endif
+            this->cudaDataBorrowed = false;
         }
+#endif
     }
 
     void Data::Allocate() {
@@ -1201,9 +1817,17 @@ namespace fastllm {
         }
     }
 
+    void Data::Allocate(bool zero) {
+        if (!isFake && Count(0) > expansionSize) {
+            FreeSpace();
+            MallocSpace(Count(0), zero);
+        }
+    }
+
     void Data::Allocate(float v) {
         AssertInFastLLM(this->dataType == DataType::FLOAT32
-                        || this->dataType == DataType::FLOAT16, "Allocate error: Data's type should be float32 or float16.\n");
+                        || this->dataType == DataType::FLOAT16
+                        || this->dataType == DataType::BFLOAT16, "Allocate error: Data's type should be float32, float16 or bfloat16.\n");
         this->Allocate();
         if (this->dataDevice == DataDevice::CPU) {
             if (this->dataType == DataType::FLOAT32) {
@@ -1212,6 +1836,10 @@ namespace fastllm {
             } else if (this->dataType == DataType::FLOAT16) {
                 uint16_t *h = (uint16_t*)cpuData;
                 std::fill(h, h + Count(0), float_to_half(v));
+            } else if (this->dataType == DataType::BFLOAT16) {
+                uint16_t *h = (uint16_t*)cpuData;
+                uint16_t bf16v = (uint16_t)(*((uint32_t*)&v) >> 16);
+                std::fill(h, h + Count(0), bf16v);
             }
         } if (this->dataDevice == DataDevice::CUDA) {
 #ifdef USE_CUDA
@@ -1220,6 +1848,10 @@ namespace fastllm {
                 FastllmCudaCopyFromHostToDevice(cudaData, f.data(), Count(0) * sizeof(float));
             } else if (this->dataType == DataType::FLOAT16) {
                 std::vector <uint16_t> f = std::vector <uint16_t> (Count(0), float_to_half(v));
+                FastllmCudaCopyFromHostToDevice(cudaData, f.data(), Count(0) * sizeof(uint16_t));
+            } else if (this->dataType == DataType::BFLOAT16) {
+                uint16_t bf16v = (uint16_t)(*((uint32_t*)&v) >> 16);
+                std::vector <uint16_t> f = std::vector <uint16_t> (Count(0), bf16v);
                 FastllmCudaCopyFromHostToDevice(cudaData, f.data(), Count(0) * sizeof(uint16_t));
             }
 #endif
@@ -1280,6 +1912,7 @@ namespace fastllm {
             } else if (this->dataDevice == DataDevice::CUDA) {
 #ifdef USE_CUDA
                 uint8_t *old = (uint8_t*)this->cudaData;
+                bool oldBorrowed = this->cudaDataBorrowed;
                 MallocSpace(this->strides[0] * std::max(this->dims[0], dims[0]));
                 int outer = this->Count(0) / this->Count(axis);
                 int input0Stride = this->Count(axis);
@@ -1287,7 +1920,9 @@ namespace fastllm {
                 int unitSize = this->unitSize;
                 FastllmCudaMemcpy2DDeviceToDevice((uint8_t*)this->cudaData, input0Stride * unitSize,
                                             (uint8_t*)old, input1Stride * unitSize, this->dims[axis] * inner * unitSize, outer);
-                FastllmCudaFree(old);
+                if (!oldBorrowed) {
+                    CudaFreeForData(*this, old);
+                }
                 FastllmCudaClearBigBuffer();
 #else
                 ErrorInFastLLM("Error: cuda is not supported.\n");
@@ -1299,31 +1934,78 @@ namespace fastllm {
     }
 
     Data::~Data() {
+        if (isFake) {
+            return;
+        }
+        if (this->isPagedKVCache && !this->pageIndex.empty()) {
+            this->pagedKVCacheData->ReleasePageIndices(this->pageIndex);
+        }
         if (this->multiDeviceData) {
             for (auto it : this->multiDeviceDatas) {
                 delete it.second;
             }
         }
-        if (isFake) {
-            return;
-        }
         if (this->cpuData != nullptr)
 #ifdef USE_MMAP
-            if (this->name.empty())
+            if (this->mapFile == nullptr)
                 delete[] this->cpuData;
 #else
            delete[] this->cpuData;
 #endif
 #ifdef USE_CUDA
         if (this->cudaData != nullptr) {
-            FastllmCudaFree(this->cudaData);
-            /*if (this->directMemory) {
-                FastllmCudaDirectFree(this->cudaData);
-            } else {
-                FastllmCudaFree(this->cudaData);
-            }*/
+            if (!this->cudaDataBorrowed) {
+                if (this->directMemory) {
+                    FastllmCudaDirectFree(this->cudaData);
+                } else {
+                    FastllmCudaFree(this->cudaData);
+                }
+            }
         }
 #endif
+    }
+
+    bool Data::IsTensorParallel() const {
+        return this->tpLayout != TP_LAYOUT_NONE;
+    }
+
+    bool Data::IsTensorParallelReplicated() const {
+        return this->tpLayout == TP_LAYOUT_REPLICATED;
+    }
+
+    bool Data::IsTensorParallelSharded() const {
+        return this->tpLayout == TP_LAYOUT_SHARDED;
+    }
+
+    void Data::ClearTensorParallelLayout() {
+        this->tpLayout = TP_LAYOUT_NONE;
+        this->tpAxis = -1;
+        this->tpGlobalDims.clear();
+        this->tpRanges.clear();
+    }
+
+    void Data::ResetMultiDeviceState() {
+        if (!this->multiDeviceData) {
+            ClearTensorParallelLayout();
+            return;
+        }
+        if (this->tpLayout == TP_LAYOUT_REPLICATED && !this->multiDeviceDatas.empty()) {
+            auto it = this->multiDeviceDatas.begin();
+            Data *replica = it->second;
+            if (replica != nullptr && replica->cudaData != nullptr && this->Count(0) > 0) {
+                this->dataDevice = DataDevice::CUDA;
+                this->dataDeviceIds = replica->dataDeviceIds;
+                std::swap(this->cudaData, replica->cudaData);
+                std::swap(this->expansionSize, replica->expansionSize);
+                std::swap(this->expansionBytes, replica->expansionBytes);
+            }
+        }
+        for (auto &it : this->multiDeviceDatas) {
+            delete it.second;
+        }
+        this->multiDeviceDatas.clear();
+        this->multiDeviceData = false;
+        ClearTensorParallelLayout();
     }
 
     void Data::PrintShape() const {
@@ -1338,59 +2020,78 @@ namespace fastllm {
         return this->dims;
     }
 
-    void Data::Print() const {
-        ((Data*)this)->ToDevice(DataDevice::CPU);
-        printf("shape: ");
-        for (int i : this->dims) {
-            printf("%d ", i);
-        }
-        printf("\ndata: ");
-        /*
-        int len = Count(0);
-        if (len < 20) {
-            for (int i = 0; i < len; i++) {
-                printf("%f ", ((float*)cpuData)[i]);
-            }
-        } else {
-            for (int i = 0; i < 10; i++) {
-                printf("%f ", ((float *) cpuData)[i]);
-            }
-            printf("... ");
-            for (int i = 0; i < 10; i++) {
-                printf("%f ", ((float *) cpuData)[len - 10 + i]);
-            }
-        }
-        printf("\n");
-         */
-        int n = Count(0) / dims.back(), m = dims.back();
-        std::vector <float> floatData;
-        floatData.resize(this->Count(0));
-        if (this->dataType == DataType::FLOAT32) {
-            memcpy(floatData.data(), cpuData, this->Count(0) * sizeof(float));
-        } else if (this->dataType == DataType::FLOAT16) {
-            for (int i = 0; i < floatData.size(); i++) {
-                floatData[i] = half_to_float(((uint16_t*)cpuData)[i]);
-            }
+    void Data::Print(const std::string &name) const {
+        PrintTensorBlockTitle(name);
+        if (!this->multiDeviceData) {
+            ((Data*)this)->ToDevice(DataDevice::CPU);
+            PrintSingleTensor(*this, this->dims);
+            PrintBorderLine('=');
+            return;
         }
 
-        for (int i = 0; i < n; i++) {
-            if (i == 10) {
-                printf("...\n");
-            }
-            if (i >= 10 && i <= n - 10) {
-                continue;
-            }
-            for (int j = 0; j < 3 && j < m; j++) {
-                printf("%f ", floatData[i * m + j]);
-            }
-            if (m > 3) {
-                printf("... ");
-                for (int j = 0; j < 3 && j < m; j++) {
-                    printf("%f ", floatData[i * m + (m - 3 + j)]);
+        const std::vector <int> &globalDims = this->tpGlobalDims.empty() ? this->dims : this->tpGlobalDims;
+        printf("shape: ");
+        PrintDimsInline(globalDims);
+        printf("\n");
+
+        if (this->tpLayout == TP_LAYOUT_REPLICATED) {
+            printf("distribution: replicated\n");
+        } else if (this->tpLayout == TP_LAYOUT_SHARDED) {
+            int axis = NormalizePrintAxis(this->tpAxis, (int)globalDims.size());
+            printf("distribution: sharded(axis=%d)\n", axis);
+        } else {
+            printf("distribution: multi-device\n");
+        }
+
+        printf("device layout:\n");
+        if (this->multiDeviceDatas.empty()) {
+            printf("  (empty)\n");
+            PrintBorderLine('=');
+            return;
+        }
+        for (auto &it : this->multiDeviceDatas) {
+            int deviceId = it.first;
+            printf("  device %d -> ", deviceId);
+            if (this->tpLayout == TP_LAYOUT_REPLICATED) {
+                printf("full replica");
+            } else if (this->tpLayout == TP_LAYOUT_SHARDED) {
+                auto rangesIt = this->tpRanges.find(deviceId);
+                if (rangesIt == this->tpRanges.end()) {
+                    printf("(no range)");
+                } else {
+                    PrintRangesInline(rangesIt->second);
                 }
+            } else {
+                printf("local tensor");
             }
             printf("\n");
         }
+
+        for (auto &it : this->multiDeviceDatas) {
+            int deviceId = it.first;
+            Data *local = it.second;
+            PrintBorderLine('-');
+            printf("device %d local", deviceId);
+            if (this->tpLayout == TP_LAYOUT_REPLICATED) {
+                printf(" | replica");
+            } else if (this->tpLayout == TP_LAYOUT_SHARDED) {
+                auto rangesIt = this->tpRanges.find(deviceId);
+                printf(" | range: ");
+                if (rangesIt == this->tpRanges.end()) {
+                    printf("(no range)");
+                } else {
+                    PrintRangesInline(rangesIt->second);
+                }
+            }
+            printf("\n");
+            if (local == nullptr) {
+                printf("  (null)\n");
+                continue;
+            }
+            local->ToDevice(DataDevice::CPU);
+            PrintSingleTensor(*local, local->dims, "  ");
+        }
+        PrintBorderLine('=');
     }
 
     void Data::CalcWeightSum() {
@@ -1537,24 +2238,28 @@ namespace fastllm {
         } 
     }
 
-    void Data::ToDevice(void *device) {
+    void Data::ToDevice(void *device, bool copyData) {
         BaseDevice *dev = (BaseDevice*)device;
         if (dev->deviceType == "cuda" || dev->deviceType == "multicuda") {
-            this->ToDevice(DataDevice::CUDA, dev->deviceIds);
+            this->ToDevice(DataDevice::CUDA, dev->deviceIds, copyData);
         } else {
-            this->ToDevice(DataDevice::CPU, dev->deviceIds);
+            this->ToDevice(DataDevice::CPU, dev->deviceIds, copyData);
         }
     }
 
-    void Data::ToDevice(fastllm::DataDevice device) {
+    void Data::ToDevice(fastllm::DataDevice device, bool copyData) {
         if (device == DataDevice::CUDA) {
-            ToDevice(device, curExecutor->GetDeviceIds("cuda"));
+            ToDevice(device, curExecutor->GetDeviceIds("cuda"), copyData);
         } else {
-            ToDevice(device, {0});
+#ifdef USE_CUDA
+            ToDevice(device, {FastllmCudaGetDevice()}, copyData);
+#else
+            ToDevice(device, {0}, copyData);
+#endif
         }
     }
 
-    void Data::ToDevice(fastllm::DataDevice device, const std::vector <int> &deviceIds) {
+    void Data::ToDevice(fastllm::DataDevice device, const std::vector <int> &deviceIds, bool copyData) {
         // TODO: 同一个Weight切分到不同 Device 上
         // NOTICE: 目前还不支持，暂时只切到deviceIds[0]上
 
@@ -1565,8 +2270,19 @@ namespace fastllm {
         // TODO: 这里先直接跳过了
         return;
 #endif
-        if (this->dataDevice == device &&
-            (this->dataDevice == DataDevice::CPU || deviceIds.size() == 0 || this->dataDeviceIds == deviceIds)) {
+        bool alreadyOnTarget = this->dataDevice == device &&
+            (this->dataDevice == DataDevice::CPU || deviceIds.size() == 0 || this->dataDeviceIds == deviceIds);
+#ifdef USE_CUDA
+        if (alreadyOnTarget && this->dataDevice == DataDevice::CUDA &&
+            this->cudaData != nullptr && deviceIds.size() > 0) {
+            int targetDevice = deviceIds.size() == 0 ? FastllmCudaGetDevice() : deviceIds[0];
+            int realDevice = GetPointerDeviceId(this->cudaData);
+            if (realDevice >= 0 && realDevice != targetDevice) {
+                alreadyOnTarget = false;
+            }
+        }
+#endif
+        if (alreadyOnTarget) {
             return;
         }
 
@@ -1574,37 +2290,107 @@ namespace fastllm {
 #ifdef USE_CUDA
             if (this->dataDevice == DataDevice::CPU) {
                 if (device == DataDevice::CUDA) {
-                    uint8_t *cpuData = this->cpuData;
+                    int destDevice = deviceIds.size() == 0 ? FastllmCudaGetDevice() : deviceIds[0];
+                    FastllmCudaSetDevice(destDevice);
+                    if (this->cudaData != nullptr) {
+                        bool needRealloc = true;
+                        int ptrDevice = GetPointerDeviceId(this->cudaData);
+                        if (ptrDevice >= 0) {
+                            needRealloc = (ptrDevice != destDevice);
+                        }
+                        if (needRealloc) {
+                            CudaFreeForData(*this, this->cudaData);
+                            this->cudaData = nullptr;
+                            this->cudaDataBorrowed = false;
+                        }
+                    }
+                    if (copyData) {
+                        uint8_t *cpuData = this->cpuData;
+                        bool ownedCpuDataCopy = false;
 #ifdef USE_MMAP
-                    cpuData = new uint8_t[expansionBytes];
-                    memcpy(cpuData, this->cpuData, expansionBytes);
+                        if (this->cpuData != nullptr && this->mapFile != nullptr) {
+                            cpuData = new uint8_t[expansionBytes];
+                            memcpy(cpuData, this->cpuData, expansionBytes);
+                            ownedCpuDataCopy = true;
+                        }
 #endif
-                    // FastllmCudaSetDevice(deviceIds.size() == 0 ? 0 : deviceIds[0]);
-                    this->cudaData = FastllmCudaMalloc(expansionBytes);
-                    FastllmCudaCopyFromHostToDevice(this->cudaData, cpuData, expansionBytes);
+                        if (this->cudaData == nullptr) {
+                            this->cudaData = CudaMallocForData(*this, expansionBytes);
+                            this->cudaDataBorrowed = false;
+                        }
+
+                        if (cpuData != nullptr) {
+                            FastllmCudaCopyFromHostToDevice(this->cudaData, cpuData, expansionBytes);
+                        } else if (!this->numasData.empty() && this->dims.size() == 2) {
+                            int numaCnt = this->numasData.size();
+                            int k = this->dims[0], m = this->dims[1];
+                            int kPerNuma = k / numaCnt;
+                            size_t bytesPerRow = GetDataBytes(this->dataType, 1, m);
+                            if (this->dataType == DataType::DATA_GGUF_FORMAT) {
+                                bytesPerRow = GetDataBytes((DataType)((int)this->dataType + this->ggmlType), 1, m);
+                            }
+                            for (int i = 0; i < numaCnt; i++) {
+                                FastllmCudaCopyFromHostToDevice(
+                                    (uint8_t*)this->cudaData + (size_t)i * kPerNuma * bytesPerRow,
+                                    this->numasData[i], (size_t)kPerNuma * bytesPerRow);
+                            }
+                        } else {
+                            ErrorInFastLLM("ToDevice Error: no CPU data to copy to CUDA.");
+                        }
 #ifdef USE_MMAP
-                    delete[] cpuData;
+                        if (ownedCpuDataCopy) {
+                            delete[] cpuData;
+                        }
+                        if ((this->isModelWeight || this->isKVCache) && this->mapFile == nullptr) {
+                            delete[] this->cpuData;
+                            this->cpuData = nullptr;
+                        }
 #else
-                    delete[] this->cpuData;
-                    this->cpuData = nullptr;
+                        if (this->isModelWeight || this->isKVCache) {
+                            delete[] this->cpuData;
+                            this->cpuData = nullptr;
+                        }
 #endif
+                    } else {
+                        if (this->cudaData == nullptr) {
+                            this->cudaData = CudaMallocForData(*this, expansionBytes);
+                            this->cudaDataBorrowed = false;
+                        }
+                    }
                 }
             } else if (this->dataDevice == DataDevice::CUDA) {
                 if (device == DataDevice::CPU) {
-                    this->cpuData = new uint8_t[expansionBytes];
-                    FastllmCudaCopyFromDeviceToHost(this->cpuData, this->cudaData, expansionBytes);
-                    FastllmCudaFree(this->cudaData);
-                    this->cudaData = nullptr;
+                    if (this->cpuData == nullptr) {
+                        this->cpuData = new uint8_t[expansionBytes];
+                    }
+                    if (copyData) {
+                        FastllmCudaCopyFromDeviceToHost(this->cpuData, this->cudaData, expansionBytes);
+                    }
+
+                    if (this->isModelWeight || this->isKVCache) {
+                        CudaFreeForData(*this, this->cudaData);
+                        this->cudaData = nullptr;
+                        this->cudaDataBorrowed = false;
+                    }
                 } else if (device == DataDevice::CUDA) {
                     int sourceDevice = this->dataDeviceIds.size() == 0 ? 0 : this->dataDeviceIds[0];
+                    if (this->cudaData != nullptr) {
+                        int realSourceDevice = GetPointerDeviceId(this->cudaData);
+                        if (realSourceDevice >= 0) {
+                            sourceDevice = realSourceDevice;
+                        }
+                    }
                     int destDevice = deviceIds.size() == 0 ? 0 : deviceIds[0];
                     if (sourceDevice != destDevice) {
                                         FastllmCudaSetDevice(destDevice);
-                                        void *newCudaData = FastllmCudaMalloc(expansionBytes);
-                                        FastllmCudaMemcpyBetweenDevices(destDevice, newCudaData, sourceDevice, this->cudaData, expansionBytes);
+                                        void *newCudaData = CudaMallocForData(*this, expansionBytes);
+                                        if (copyData) {
+                                            FastllmCudaMemcpyBetweenDevices(destDevice, newCudaData, sourceDevice, this->cudaData, expansionBytes);
+                                        }
                                         FastllmCudaSetDevice(sourceDevice);
-                                        FastllmCudaFree(this->cudaData);
+                                        CudaFreeForData(*this, this->cudaData);
                                         this->cudaData = newCudaData;
+                                        this->cudaDataBorrowed = false;
                                         FastllmCudaSetDevice(destDevice);
                     }
                 }
@@ -1612,14 +2398,106 @@ namespace fastllm {
 #endif
         }
         if (deviceIds.size() == 0) {
+#ifdef USE_CUDA
+            this->dataDeviceIds = {FastllmCudaGetDevice()};
+#else
             this->dataDeviceIds = {0};
+#endif
         } else {
             this->dataDeviceIds = deviceIds;
         };
         this->dataDevice = device;
     }
 
-    extern CPUInstructInfo cpuInstructInfo;
+    // 临时移动到cuda 
+    void Data::ToCudaTemporary(const std::vector <int> &deviceIds, bool copyData, void *stream) { 
+#ifdef USE_CUDA
+        AssertInFastLLM(deviceIds.size() <= 0, "ToCudaTemporary Error: can't set deviceids\n");
+        this->dataDevice = DataDevice::CUDA;
+        size_t bytes = this->GetBytes();
+
+        if (this->cudaData == nullptr) {
+            this->cudaData = (uint8_t*)FastllmCudaMalloc(bytes);
+            this->cudaDataBorrowed = false;
+        }
+
+        if (copyData) {
+            if (this->cpuData != nullptr) {
+                if (stream) {
+                    if (this->isPinned) {
+                        FastllmCudaCopyFromPinnedHostToDeviceAsync(this->cudaData, this->cpuData, bytes, stream);
+                    } else {
+                        FastllmCudaCopyFromHostToDeviceAsync(this->cudaData, this->cpuData, bytes, stream);
+                    }
+                } else {
+                    if (this->isPinned) {
+                        FastllmCudaCopyFromPinnedHostToDevice(this->cudaData, this->cpuData, bytes);
+                    } else {
+                        FastllmCudaCopyFromHostToDevice(this->cudaData, this->cpuData, bytes);
+                    }
+                }
+            } else {
+                int numaCnt = this->numasData.size();
+                int k = this->dims[0], m = this->dims[1];
+                int kPerNuma = k / numaCnt;
+                size_t bytesPerRow = GetDataBytes(this->dataType, 1, m);
+                if (this->dataType == DataType::DATA_GGUF_FORMAT) {
+                    bytesPerRow = GetDataBytes((DataType)((int)this->dataType + this->ggmlType), 1, m);
+                }
+                if (stream) {
+                    if (this->isPinned) {
+                        for (int i = 0; i < numaCnt; i++) {
+                            FastllmCudaCopyFromPinnedHostToDeviceAsync((uint8_t*)this->cudaData + (size_t)i * kPerNuma * bytesPerRow, 
+                                this->numasData[i], (size_t)kPerNuma * bytesPerRow, stream);
+                        }
+                    } else {
+                        for (int i = 0; i < numaCnt; i++) {
+                            FastllmCudaCopyFromHostToDeviceAsync((uint8_t*)this->cudaData + (size_t)i * kPerNuma * bytesPerRow, 
+                                this->numasData[i], (size_t)kPerNuma * bytesPerRow, stream);
+                        }
+                    }
+                } else {
+                    if (this->isPinned) {
+                        for (int i = 0; i < numaCnt; i++) {
+                            FastllmCudaCopyFromPinnedHostToDevice((uint8_t*)this->cudaData + (size_t)i * kPerNuma * bytesPerRow, 
+                                this->numasData[i], (size_t)kPerNuma * bytesPerRow);
+                        }
+                    } else {
+                        for (int i = 0; i < numaCnt; i++) {
+                            FastllmCudaCopyFromHostToDevice((uint8_t*)this->cudaData + (size_t)i * kPerNuma * bytesPerRow, 
+                                this->numasData[i], (size_t)kPerNuma * bytesPerRow);
+                        }
+                    }
+                }
+            }
+        }
+#else
+        ErrorInFastLLM("ToCudaTemporary Error: don't support.");
+#endif
+    }
+
+    // 销毁临时移动到cuda的数据
+    void Data::FreeCudaTemporary(const std::vector <int> &deviceIds, bool copyData) {
+#ifdef USE_CUDA
+        AssertInFastLLM(deviceIds.size() <= 0, "ToCudaTemporary Error: can't set deviceids\n");
+        this->dataDevice = DataDevice::CPU;
+        size_t bytes = this->GetBytes();
+
+        if (copyData) {
+            FastllmCudaCopyFromDeviceToHost(this->cpuData, this->cudaData, bytes);
+        }
+
+        if (this->isModelWeight) {
+            if (!this->cudaDataBorrowed) {
+                FastllmCudaFree(this->cudaData);
+            }
+            this->cudaData = nullptr;
+            this->cudaDataBorrowed = false;
+        }
+#else
+        ErrorInFastLLM("FreeCudaTemporary Error: don't support.");
+#endif
+    }
 
     void Data::Repack() {
         if (this->IsRepacked || this->dataType != DATA_GGUF_FORMAT) {
@@ -1663,7 +2541,15 @@ namespace fastllm {
         } 
         uint64_t ret = 0;
         ret += sizeof(int) * 2;
-        if (this->dataType == FP8_E4M3) {
+        bool compactNVFP4 = this->dataType == NVFP4 && this->scales.empty() &&
+                             this->dims.size() == 2 && this->blockK > 0 && this->blockM > 0;
+        if (this->dataType == NVFP4 && this->scales.empty() && !compactNVFP4) {
+            ErrorInFastLLM("ExportFastllmFormat Error: invalid compact NVFP4 metadata.");
+        }
+        if (compactNVFP4) {
+            ret += sizeof(int) * 3;
+            ret += this->GetBytes();
+        } else if (this->dataType == FP8_E4M3 || this->dataType == NVFP4) {
             ret += sizeof(int) * 3;
             ret += this->scales.size() * sizeof(float);
             ret += this->GetBytes();
@@ -1682,6 +2568,8 @@ namespace fastllm {
         } else if (this->dataType == DATA_GGUF_FORMAT) {
             ret += sizeof(int);
             ret += this->GetBytes();
+        } else if (this->dataType == INT32 || this->dataType == INT32PARAM) {
+            ret += this->GetBytes();
         } else {
             ErrorInFastLLM("ExportFastllmFormat Error: data type error.");
         }
@@ -1695,9 +2583,19 @@ namespace fastllm {
             writer.WriteBytes(this->cpuData, GetBytes());
             return;
         } 
-        writer.WriteInt(1); // 版本号
+        bool compactNVFP4 = this->dataType == NVFP4 && this->scales.empty() &&
+                             this->dims.size() == 2 && this->blockK > 0 && this->blockM > 0;
+        if (this->dataType == NVFP4 && this->scales.empty() && !compactNVFP4) {
+            ErrorInFastLLM("ExportFastllmFormat Error: invalid compact NVFP4 metadata.");
+        }
+        writer.WriteInt(compactNVFP4 ? 2 : 1); // 版本号
         writer.WriteInt((int)this->dataType);
-        if (this->dataType == FP8_E4M3) {
+        if (compactNVFP4) {
+            writer.WriteInt(this->blockK);
+            writer.WriteInt(this->blockM);
+            writer.WriteInt((int)GetNVFP4ScaleBytes(this->dims[0], this->dims[1], this->blockK, this->blockM));
+            writer.WriteBytes(this->cpuData, this->GetBytes());
+        } else if (this->dataType == FP8_E4M3 || this->dataType == NVFP4) {
             writer.WriteInt(this->blockK);
             writer.WriteInt(this->blockM);
             writer.WriteInt((int)this->scales.size());
@@ -1728,6 +2626,8 @@ namespace fastllm {
         } else if (this->dataType == DATA_GGUF_FORMAT) {
             writer.WriteInt(this->ggmlType);
             writer.WriteBytes(this->cpuData, this->GetBytes());
+        } else if (this->dataType == INT32 || this->dataType == INT32PARAM) {
+            writer.WriteBytes(this->cpuData, this->GetBytes());
         } else {
             ErrorInFastLLM("ExportFastllmFormat Error: data type error.");
         }
@@ -1748,7 +2648,7 @@ namespace fastllm {
             if (this->dataType == FLOAT16 || this->dataType == FLOAT32 || this->dataType == BFLOAT16) {
                 reader.ReadBytes(this->cpuData, len);
                 return;
-            } else if (this->dataType == FP8_E4M3) {
+            } else if (this->dataType == FP8_E4M3 || this->dataType == NVFP4) {
                 this->blockK = reader.ReadInt();
                 this->blockM = reader.ReadInt();
                 this->scales.resize(reader.ReadInt());
@@ -1801,9 +2701,27 @@ namespace fastllm {
                 reader.ReadBytes(this->cpuData, this->GetBytes());
             } else if (this->dataType == DATA_GGUF_FORMAT) {
                 reader.ReadBytes(this->cpuData, this->GetBytes());
+            } else if (this->dataType == INT32 || this->dataType == INT32PARAM) {
+                reader.ReadBytes(this->cpuData, this->GetBytes());
             } else {
                 ErrorInFastLLM("CreateFromFastllmFormat Error: data type error.");
             }
+        } else if (version == 2) {
+            this->dataType = (DataType)reader.ReadInt();
+            if (this->dataType != NVFP4) {
+                ErrorInFastLLM("CreateFromFastllmFormat error: version 2 only supports NVFP4.");
+            }
+            this->blockK = reader.ReadInt();
+            this->blockM = reader.ReadInt();
+            int scaleLen = reader.ReadInt();
+            AssertInFastLLM(this->blockK > 0 && this->blockM > 0 && this->dims.size() == 2,
+                            "CreateFromFastllmFormat error: invalid compact NVFP4 metadata.");
+            this->scales.clear();
+            this->Resize(this->dims);
+            this->Allocate(false);
+            AssertInFastLLM(scaleLen == (int)GetNVFP4ScaleBytes(this->dims[0], this->dims[1], this->blockK, this->blockM),
+                            "CreateFromFastllmFormat error: NVFP4 scale length mismatch.");
+            reader.ReadBytes(this->cpuData, this->GetBytes());
         } else {
             ErrorInFastLLM("CreateFromFastllmFormat error: unsupport version " + std::to_string(version));
         }
@@ -1826,6 +2744,10 @@ namespace fastllm {
             }
         } else if (this->dataType == DataType::FLOAT16) {
             return DataType::FLOAT32;
+        } else if (this->dataType == DataType::NVFP4 ||
+                   this->dataType == DataType::NVFP4_BLOCK_16 ||
+                   this->dataType == DataType::NVFP4_BLOCK_16_E8M0) {
+            return batchSize > 31 ? DataType::BFLOAT16 : DataType::FLOAT32;
         } else if (this->dataType == DataType::INT4_PERCHANNEL ||
                     this->dataType == DataType::INT8_PERCHANNEL) {
             return DataType::INF_INT8_PERCHANNEL;
@@ -1909,16 +2831,51 @@ namespace fastllm {
             }
         }
         float invTemp = 1.0f / config.temperature;
-        std::vector <std::pair <float, int> > v;
-        for (int i = 0; i < vocabSize; i++) {
-            v.push_back(std::make_pair(-base[i] * invTemp, i));
-        }
         int topk = std::min(vocabSize, config.top_k);
-        std::partial_sort(v.begin(), v.begin() + topk, v.end());
-        float psum = 0.0, maxValue = -v.begin()->first;
+        if (topk <= 0) {
+            topk = 1;
+        }
+        std::vector <std::pair <float, int> > v;
+        if (topk <= 64) {
+            v.reserve(topk);
+            auto betterThan = [](const std::pair<float, int> &a,
+                                  const std::pair<float, int> &b) {
+                return a.first > b.first || (a.first == b.first && a.second < b.second);
+            };
+            std::priority_queue<
+                std::pair<float, int>,
+                std::vector<std::pair<float, int> >,
+                decltype(betterThan)> heap(betterThan);
+            for (int i = 0; i < vocabSize; i++) {
+                std::pair<float, int> cur = std::make_pair(base[i] * invTemp, i);
+                if ((int)heap.size() < topk) {
+                    heap.push(cur);
+                    continue;
+                }
+                if (betterThan(cur, heap.top())) {
+                    heap.pop();
+                    heap.push(cur);
+                }
+            }
+            while (!heap.empty()) {
+                v.push_back(heap.top());
+                heap.pop();
+            }
+            std::sort(v.begin(), v.end(), betterThan);
+        } else {
+            v.reserve(vocabSize);
+            for (int i = 0; i < vocabSize; i++) {
+                v.push_back(std::make_pair(-base[i] * invTemp, i));
+            }
+            std::partial_sort(v.begin(), v.begin() + topk, v.end());
+            for (int i = 0; i < topk; i++) {
+                v[i].first = -v[i].first;
+            }
+        }
+        float psum = 0.0, maxValue = v.begin()->first;
         std::vector <float> ps;
         for (int i = 0; i < topk; i++) {
-            ps.push_back(expf(-v[i].first - maxValue));
+            ps.push_back(expf(v[i].first - maxValue));
             psum += ps.back();
         }
         float curSum = 0.0;
@@ -2056,7 +3013,7 @@ namespace fastllm {
             if (lowMemMode && this->embeddingNames.find(name) != this->embeddingNames.end()) {
                 if (dataType == DataType::FLOAT32 || dataType == DataType::BFLOAT16 || dataType == DataType::FLOAT16) {
                     weight[name].fileName = fileName;
-#if defined(_WIN32) || defined(_WIN64)
+#if defined(_WIN32) or defined(_WIN64)
                     weight[name].filePos = _ftelli64(buffer.f);
 #else
 #ifdef USE_MMAP
@@ -2076,7 +3033,7 @@ namespace fastllm {
             } else {
 #ifdef USE_MMAP
                 weight[name].SetMapFile(mapped_file);
-                weight[name].expansionBytes = (weight[name].Count(0) * weight[name].unitSize - 1) / weight[name].unitSizeDiv + 1;
+                weight[name].expansionBytes = weight[name].GetBytes();
 #else
                 weight[name].Allocate();
 #endif
@@ -2151,24 +3108,11 @@ namespace fastllm {
                 }
             }
 
-            if (GetLogCallback()) {
-                LogData log;
-                log.event = LogEvent::ModelLoadProgress;
-                log.level = LogLevel::Info;
-                log.tag = "model";
-                log.data.current = i + 1;
-                log.data.total = len;
-                EmitLog(log);
-            }
+            printf("Load (%d / %d) \r", (i + 1), len);
+            fflush(stdout);
         }
-        if (GetLogCallback()) {
-            LogData log;
-            log.event = LogEvent::ModelLoadComplete;
-            log.level = LogLevel::Info;
-            log.tag = "model";
-            log.data.total = len;
-            EmitLog(log);
-        }
+        printf("\n");
+        fflush(stdout);
         return;
     }
 
@@ -2437,11 +3381,13 @@ namespace fastllm {
     void WeightMap::AddEmptyWeight(const std::string &key, const std::vector<int> &dims, fastllm::DataType dataType) {
         this->weight[key] = Data(dataType, dims);
         this->weight[key].name = std::string(key);
+        this->weight[key].isModelWeight = true;
     }
 
     void WeightMap::AddEmptyGGMLWeight(const std::string &key, const std::vector<int> &dims, fastllm::DataType dataType, int ggmlType) {
         this->weight[key] = Data(dataType, ggmlType, dims);
         this->weight[key].name = std::string(key);
+        this->weight[key].isModelWeight = true;
     }
 
     void WeightMap::AddWeight(const std::string &key, const std::vector<int> &dims, fastllm::DataType dataType,
@@ -2604,6 +3550,10 @@ namespace fastllm {
             curExecutor->Run("ToFloat16", {
                     {"input", (Data*)&input}
             }, {}, {});
+        } else if (dataType == DataType::BFLOAT16) {
+            curExecutor->Run("ToBFloat16", {
+                    {"input", (Data*)&input}
+            }, {}, {});
         } else {
             ErrorInFastLLM("ToDataType: Unsupport data type.\n");
         }
@@ -2618,8 +3568,33 @@ namespace fastllm {
             curExecutor->Run("ConvertToFloat16", {
                 {"input", (Data*)&input}, {"output", (Data*)&output}
             }, {}, {});
+        } else if (dataType == DataType::BFLOAT16) {
+            curExecutor->Run("ConvertToBFloat16", {
+                {"input", (Data*)&input}, {"output", (Data*)&output}
+            }, {}, {});
         } else {
             ErrorInFastLLM("ToDataType: Unsupport data type.\n");
+        }
+    }
+
+    void ToDataTypeForceCPU(const Data &input, DataType dataType) {
+        if (input.dataType == dataType) {
+            return;
+        }
+        if (dataType == DataType::FLOAT32) {
+            curExecutor->RunOnDevice("cpu", "ToFloat32", {
+                    {"input", (Data*)&input}
+            }, {}, {});
+        } else if (dataType == DataType::FLOAT16) {
+            curExecutor->RunOnDevice("cpu", "ToFloat16", {
+                    {"input", (Data*)&input}
+            }, {}, {});
+        } else if (dataType == DataType::BFLOAT16) {
+            curExecutor->RunOnDevice("cpu", "ToBFloat16", {
+                    {"input", (Data*)&input}
+            }, {}, {});
+        } else {
+            ErrorInFastLLM("ToDataTypeForceCPU: Unsupport data type.\n");
         }
     }
 
@@ -2635,23 +3610,40 @@ namespace fastllm {
         return curExecutor->CanRunOnFirstDevice("MergeMOE", {{"input", (Data*)&input}, {"biass", (Data*)biass.data()}}, {}, {});
     }
 
-    void MergeMOE(const Data &input, const Data &logits, Data &gateBias, std::vector <Data*> &weights, std::vector <Data*> &biass, 
+    void MergeMOE(const Data &input, const Data &index, const Data &score, std::vector <Data*> &weights, std::vector <Data*> &biass, 
                 Data &w1, Data &w2, Data &w3, Data &curInput, Data &curOutput,
-                float routeScale, float sharedScale, int topk, bool needNorm, Data &output) {
+                float sharedScale, Data &output, int layer, MoeGateType gateType) {
         curExecutor->Run("MergeMOE", {
-                {"input", (Data*)&input}, {"logits", (Data*)&logits}, {"gateBias", (Data*)&gateBias},
+                {"input", (Data*)&input}, {"index", (Data*)&index}, {"score", (Data*)&score},
                 {"weights", (Data*)weights.data()}, {"biass", (Data*)biass.data()},
                 {"w1", (Data*)&w1}, {"w2", (Data*)&w2}, {"w3", (Data*)&w3},
                 {"curInput", &curInput}, {"curOutput", &curOutput},
                 {"output", (Data*)&output}
-        }, {{"sharedScale", sharedScale}, {"routeScale", routeScale}}, {{"topk", topk}, {"needNorm", needNorm}, 
-                                        {"weights___batch", (int)weights.size()}, {"biass___batch", (int)biass.size()}});
+        }, {{"sharedScale", sharedScale}}, 
+                                        {{"weights___batch", (int)weights.size()}, {"biass___batch", (int)biass.size()}, {"layer", layer}, {"gateType", (int)gateType}});
+    }
+
+    void FusedMOE(const Data &input, const Data &index, const Data &score,
+                Data &gate, Data &up, Data &down, Data &w1,
+                Data &output, int layer, MoeGateType gateType, float swigluLimit) {
+        curExecutor->Run("FusedMOE", {
+                {"input", (Data*)&input}, {"index", (Data*)&index}, {"score", (Data*)&score},
+                {"gate", (Data*)&gate}, {"up", (Data*)&up}, {"down", (Data*)&down},
+                {"w1", (Data*)&w1}, {"output", (Data*)&output}
+        }, {{"swigluLimit", swigluLimit}}, {{"layer", layer}, {"gateType", (int)gateType}});
     }
 
     void MergeMLA(Data &qNope, Data &qPe, Data &kvCache, Data &peCache, const Data &mask, Data &output, float softmaxScale) {
         curExecutor->Run("MergeMLA", {
             {"qNope", (Data*)&qNope}, {"qPe", (Data*)&qPe}, {"kvCache", (Data*)&kvCache}, {"peCache", (Data*)&peCache},
             {"mask", (Data*)&mask}, {"output", (Data*)&output}
+        }, {{"softmaxScale", softmaxScale}}, {});
+    }
+
+    void MergeMLAPaged(Data &qNope, Data &qPe, Data &kvCachePaged, Data &peCachePaged, Data &output, float softmaxScale) {
+        curExecutor->Run("MergeMLAPaged", {
+            {"qNope", (Data*)&qNope}, {"qPe", (Data*)&qPe}, {"kvCachePaged", (Data*)&kvCachePaged}, {"peCachePaged", (Data*)&peCachePaged},
+            {"output", (Data*)&output}
         }, {{"softmaxScale", softmaxScale}}, {});
     }
 
@@ -2692,10 +3684,22 @@ namespace fastllm {
         }, {}, {});
     }
 
+    void EmbeddingDirect(const Data &input, Data &weight, Data &output) {
+        curExecutor->Run("EmbeddingDirect", {
+                {"input", (Data*)&input}, {"weight", &weight}, {"output", &output}
+        }, {}, {});
+    }
+
     void RMSNorm(const Data &input, const Data &weight, float eps, Data &output) {
         curExecutor->Run("RMSNorm", {
                 {"input", (Data*)&input}, {"weight", (Data*)&weight}, {"output", &output}
         }, {{"eps", eps}}, {});
+    }
+
+    void RMSNormPart(const Data &input, const Data &weight, float eps, int start, int end, Data &output) {
+        curExecutor->Run("RMSNormPart", {
+                {"input", (Data*)&input}, {"weight", (Data*)&weight}, {"output", &output}
+        }, {{"eps", eps}}, {{"start", start}, {"end", end}});
     }
 
     void LayerNorm(Data &input, Data &gamma, Data &beta, int axis, Data &output) {
@@ -2704,10 +3708,34 @@ namespace fastllm {
         }, {}, {{"axis", axis}});
     }
 
-    void Linear(Data &input, Data &weight, const Data &bias, Data &output) {
+    void Linear(Data &input, Data &weight, const Data &bias, Data &output, bool keepTpReplicated) {
+        IntDict intParams;
+        if (keepTpReplicated) {
+            intParams["keepTpReplicated"] = 1;
+        }
         curExecutor->Run("Linear", {
                 {"input", &input}, {"weight", &weight}, {"bias", (Data*)&bias}, {"output", &output}
+        }, {}, intParams);
+    }
+
+    void LinearAdd(const Data &input, const Data &weight, const Data &bias, Data &middle, Data &output) {
+        curExecutor->Run("LinearAdd", 
+            {{"input", (Data*)&input}, {"weight", (Data*)&weight}, {"bias", (Data*)&bias}, {"middle", (Data*)&middle}, {"output", (Data*)&output}}, 
+        {}, {});
+    }
+
+    bool CanRunLinearAdd(const Data &input, const Data &weight, const Data &bias, const Data &output) {
+        return curExecutor->CanRunOnFirstDevice("LinearAdd", {{"input", (Data*)&input}, {"weight", (Data*)&weight}, {"bias", (Data*)&bias}, {"output", (Data*)&output}}, {}, {});
+    }
+
+    void LinearSwiglu(const Data &input, const Data &weight, const Data &bias, Data &middle, Data &output) {
+        curExecutor->Run("LinearSwiglu", {
+            {"input", (Data*)&input}, {"weight", (Data*)&weight}, {"bias", (Data*)&bias}, {"middle", (Data*)&middle}, {"output", (Data*)&output}
         }, {}, {});
+    }
+
+    bool CanRunLinearSwiglu(const Data &input, const Data &weight) {
+        return curExecutor->CanRunOnFirstDevice("LinearSwiglu", {{"input", (Data*)&input}, {"weight", (Data*)&weight}}, {}, {});
     }
 
     bool CanRunLinearEx(LinearExType exType) {
@@ -2740,7 +3768,8 @@ namespace fastllm {
     }
 
     void MergeAttention(Data &input, Data &weight0, Data &bias0, Data &weight1, Data &bias1, 
-        Data &qkv, Data &q, Data &k, Data &v, Data &curInput, Data &curOutput,
+        bool doQKNorm, Data &qNorm, Data &kNorm, float eps,
+        Data &qkv, Data &q, Data &k, Data &v,
         int qNum, int kvNum, int headDim, int rotDim, float attentionScale,
         const Data &positionIds, Data &sinData, Data &cosData,
         std::vector <Data*> &keys, std::vector <Data*> &values, std::vector <Data*> &masks, 
@@ -2749,15 +3778,15 @@ namespace fastllm {
                 {"input", &input}, 
                 {"weight0", &weight0}, {"bias0", &bias0}, 
                 {"weight1", &weight1}, {"bias1", &bias1}, 
+                {"qNorm", &qNorm}, {"kNorm", &kNorm}, 
                 {"qkv", &qkv}, {"q", &q}, {"k", &k}, {"v", &v}, 
-                {"curInput", &curInput}, {"curOutput", &curOutput},
                 {"positionIds", (Data*)&positionIds},
                 {"sinData", (Data*)&sinData},
                 {"cosData", (Data*)&cosData},
                 {"keys", (Data*)keys.data()}, {"values", (Data*)values.data()}, {"masks", (Data*)masks.data()},
                 {"output", &output}
-        }, {{"attentionScale", attentionScale}}, 
-        {{"qNum", qNum}, {"kvNum",kvNum}, {"headDim", headDim}, {"rotDim", rotDim},
+        }, {{"attentionScale", attentionScale}, {"eps", eps}}, 
+        {{"doQKNorm", doQKNorm}, {"qNum", qNum}, {"kvNum",kvNum}, {"headDim", headDim}, {"rotDim", rotDim},
         {"keys___batch", (int)keys.size()}, {"values___batch", (int)values.size()}, {"masks___batch", (int)masks.size()}});
     }
 
@@ -2773,10 +3802,87 @@ namespace fastllm {
         }, {}, {{"axis", axis}, {"repeatTimes", repeatTimes}});
     }
 
+    void Copy(const Data &input, Data &output) {
+        curExecutor->Run("Copy", {
+                {"input", (Data*)&input}, {"output", &output}
+        }, {}, {});
+    }
+
+    void DeepSeekV4HcPre(const Data &input, Data &hcFn, Data &hcScale, Data &hcBase,
+                         int hcMult, int sinkhornIters, float eps, float normEps,
+                         Data &output, Data &post, Data &comb) {
+        curExecutor->Run("DeepSeekV4HcPre", {
+                {"input", (Data*)&input}, {"hcFn", &hcFn}, {"hcScale", &hcScale}, {"hcBase", &hcBase},
+                {"output", &output}, {"post", &post}, {"comb", &comb}
+        }, {{"eps", eps}, {"normEps", normEps}}, {{"hcMult", hcMult}, {"sinkhornIters", sinkhornIters}});
+    }
+
+    void DeepSeekV4HcPost(const Data &input, const Data &residual, const Data &post, const Data &comb, Data &output) {
+        curExecutor->Run("DeepSeekV4HcPost", {
+                {"input", (Data*)&input}, {"residual", (Data*)&residual},
+                {"post", (Data*)&post}, {"comb", (Data*)&comb}, {"output", &output}
+        }, {}, {});
+    }
+
+    void ScaleQRatory(Data &q, float eps, int ropeDim, float ropeBase, int startPos,
+                      int originalSeqLen, float ropeFactor, int betaFast, int betaSlow) {
+        curExecutor->Run("ScaleQRatory", {
+                {"q", &q}
+        }, {{"eps", eps}, {"ropeBase", ropeBase}, {"ropeFactor", ropeFactor}},
+           {{"ropeDim", ropeDim}, {"startPos", startPos}, {"originalSeqLen", originalSeqLen},
+            {"betaFast", betaFast}, {"betaSlow", betaSlow}});
+    }
+
+    void DeepSeekV4RotaryQuant(Data &x, int ropeDim, float ropeBase, int startPos,
+                               int originalSeqLen, float ropeFactor, int betaFast, int betaSlow,
+                               int quantDim, int blockSize, int posStep) {
+        curExecutor->Run("DeepSeekV4RotaryQuant", {
+                {"input", &x}
+        }, {{"ropeBase", ropeBase}, {"ropeFactor", ropeFactor}},
+           {{"ropeDim", ropeDim}, {"startPos", startPos}, {"originalSeqLen", originalSeqLen},
+            {"betaFast", betaFast}, {"betaSlow", betaSlow}, {"quantDim", quantDim},
+            {"blockSize", blockSize}, {"posStep", posStep}});
+    }
+
+    void DeepSeekV4WoA(Data &o, Data &woA, int groups, int oRank, Data &output) {
+        curExecutor->Run("DeepSeekV4WoA", {
+                {"input", &o}, {"weight", &woA}, {"output", &output}
+        }, {}, {{"groups", groups}, {"oRank", oRank}});
+    }
+
+    void DeepSeekV4BuildCompressedKVFromRaw(const Data &kv, const Data &score,
+                                            Data &ape, Data &normWeight,
+                                            int rawTokenBase, int rawLen,
+                                            int blockStart, int blockCount,
+                                            int compressRatio, int headDim,
+                                            int ropeDim, float ropeBase,
+                                            float ropeFactor, int betaFast,
+                                            int betaSlow, int originalSeqLen,
+                                            bool overlap, bool preferCudaOutput,
+                                            Data &cache) {
+        curExecutor->Run("DeepSeekV4BuildCompressedKVFromRaw", {
+                {"kv", (Data*)&kv}, {"score", (Data*)&score},
+                {"ape", &ape}, {"normWeight", &normWeight}, {"cache", &cache}
+        }, {{"ropeBase", ropeBase}, {"ropeFactor", ropeFactor}},
+           {{"rawTokenBase", rawTokenBase}, {"rawLen", rawLen},
+            {"blockStart", blockStart}, {"blockCount", blockCount},
+            {"compressRatio", compressRatio}, {"headDim", headDim},
+            {"ropeDim", ropeDim}, {"betaFast", betaFast},
+            {"betaSlow", betaSlow}, {"originalSeqLen", originalSeqLen},
+            {"overlap", overlap ? 1 : 0},
+            {"preferCudaOutput", preferCudaOutput ? 1 : 0}});
+    }
+
     void Cat(const Data &input0, const Data &input1, int axis, Data &output) {
         curExecutor->Run("Cat", {
                 {"input0", (Data*)&input0}, {"input1", (Data*)&input1}, {"output", &output}
         }, {}, {{"axis", axis}});
+    }
+
+    void Pad(const Data &input, int axis, int padSize, Data &output) {
+        curExecutor->Run("Pad", {
+                {"input", (Data*)&input}, {"output", &output}
+        }, {}, {{"axis", axis}, {"padSize", padSize}});
     }
 
     void CatDirect(Data &input0, const Data &input1, int axis) {
@@ -2851,6 +3957,12 @@ namespace fastllm {
         }, {}, {});
     }
 
+    void Geglu(const fastllm::Data &input, fastllm::Data &output) {
+        curExecutor->Run("Geglu", {
+                {"input", (Data*)&input}, {"output", &output}
+        }, {}, {});
+    }
+
     void Swiglu(const fastllm::Data &input, fastllm::Data &output) {
         curExecutor->Run("Swiglu", {
                 {"input", (Data*)&input}, {"output", &output}
@@ -2860,6 +3972,13 @@ namespace fastllm {
     void MambaSoftplus(const Data &input, Data &aLog, Data &dtBias, Data &output) {
         curExecutor->Run("MambaSoftplus", {
                 {"input", (Data*)&input}, {"aLog", &aLog}, {"dtBias", &dtBias}, {"output", &output}
+        }, {}, {});
+    }
+
+    void SigmoidMambaSoftplus(Data &sigmoidInputOutput, const Data &softplusInput, Data &aLog, Data &dtBias, Data &softplusOutput) {
+        curExecutor->Run("SigmoidMambaSoftplus", {
+                {"sigmoidInputOutput", &sigmoidInputOutput}, {"softplusInput", (Data*)&softplusInput},
+                {"aLog", &aLog}, {"dtBias", &dtBias}, {"softplusOutput", &softplusOutput}
         }, {}, {});
     }
 
@@ -2894,11 +4013,21 @@ namespace fastllm {
     }
 
     void RecurrentGatedDeltaRule(Data &q, Data &k, Data &v, Data &g, Data &b, 
-                                Data &last_recurrent_state, Data &core_attn_out) {
+                                Data &last_recurrent_state, Data &core_attn_out, float qScale) {
         curExecutor->Run("RecurrentGatedDeltaRule", {
             {"q", &q}, {"k", &k}, {"v", &v}, {"g", &g}, {"b", &b}, 
             {"last_recurrent_state", &last_recurrent_state}, {"core_attn_out", &core_attn_out}
-        }, {}, {});                 
+        }, {{"qScale", qScale}}, {});                 
+    }
+
+    void ChunkGatedDeltaRulePrefill(Data &q, Data &k, Data &v, Data &g,
+                                Data &attn, Data &k_cumdecay,
+                                Data &last_recurrent_state, Data &core_attn_out) {
+        curExecutor->Run("ChunkGatedDeltaRulePrefill", {
+            {"q", &q}, {"k", &k}, {"v", &v}, {"g", &g},
+            {"attn", &attn}, {"k_cumdecay", &k_cumdecay},
+            {"last_recurrent_state", &last_recurrent_state}, {"core_attn_out", &core_attn_out}
+        }, {}, {});
     }
 
     void AddTo(Data &input0, const Data &input1, float alpha) {
@@ -2953,6 +4082,16 @@ namespace fastllm {
         }, {}, {{"topk", topk}});
     };
 
+    void SelectExpert(const Data &logits, Data &index, Data &score, int topk, bool needNorm, float routeScale, const Data *gateBias) {
+        DataDict datas = {{"logits", (Data*)&logits}, {"index", &index}, {"score", &score}};
+        if (gateBias != nullptr) {
+            datas["gateBias"] = (Data*)gateBias;
+        }
+        curExecutor->Run("SelectExpert", datas, 
+            {{"routeScale", routeScale}}, 
+            {{"topk", topk}, {"needNorm", needNorm ? 1 : 0}});
+    };
+
     void RotatePosition2D(Data &input, const Data &positionIds, Data &sinData, Data &cosData, int rotaryDim) {
         curExecutor->Run("RotatePosition2D", {
                 {"input", &input}, {"positionIds", (Data*)&positionIds}, {"sin", &sinData}, {"cos", &cosData}
@@ -2977,6 +4116,99 @@ namespace fastllm {
         }, {}, {{"rotaryDim", rotaryDim}, {"part", part}});
     }
 
+    void RopeEncoding(Data &input, const Data &positionIds, int rotaryDim, float ropeTheta, float ropeScale) {
+        curExecutor->Run("RopeEncoding", {
+            {"input", &input}, {"positionIds", (Data*)&positionIds}
+        }, {{"ropeTheta", ropeTheta}, {"ropeScale", ropeScale}}, {{"rotaryDim", rotaryDim}});
+    }
+
+    void Llama3RopeEncoding(Data &input, const Data &positionIds, int rotaryDim, float ropeTheta,
+                            float factor, float originalMaxPosition,
+                            float lowFreqFactor, float highFreqFactor) {
+        curExecutor->Run("Llama3RopeEncoding", {
+            {"input", &input}, {"positionIds", (Data*)&positionIds}
+        }, {{"ropeTheta", ropeTheta}, {"factor", factor},
+            {"originalMaxPosition", originalMaxPosition},
+            {"lowFreqFactor", lowFreqFactor}, {"highFreqFactor", highFreqFactor}},
+           {{"rotaryDim", rotaryDim}});
+    }
+
+    void Qwen35InterleavedRope(Data &input, const Data &positionIds, int rotaryDim,
+                               int sectionT, int sectionH, int sectionW,
+                               float ropeTheta, float ropeScale) {
+        curExecutor->Run("Qwen35InterleavedRope", {
+                {"input", &input}, {"positionIds", (Data*)&positionIds}
+        }, {{"ropeTheta", ropeTheta}, {"ropeScale", ropeScale}},
+        {{"rotaryDim", rotaryDim}, {"sectionT", sectionT}, {"sectionH", sectionH}, {"sectionW", sectionW}});
+    }
+
+    void QKVRMSNormRope(Data &qkv, Data &qNormWeight, Data &kNormWeight,
+                        const Data &positionIds, int q_heads, int k_heads, int head_dim,
+                        int rotaryDim, float eps, float ropeTheta, float ropeScale) {
+        curExecutor->Run("QKVRMSNormRope", {
+                {"qkv", &qkv}, {"qNormWeight", &qNormWeight}, {"kNormWeight", &kNormWeight},
+                {"positionIds", (Data*)&positionIds}
+        }, {{"eps", eps}, {"ropeTheta", ropeTheta}, {"ropeScale", ropeScale}},
+           {{"q_heads", q_heads}, {"k_heads", k_heads}, {"head_dim", head_dim}, {"rotaryDim", rotaryDim}});
+    }
+
+    void QKVRMSNormRopeSplitAppendPagedCache(
+        Data &qkv, Data &qNormWeight, Data &kNormWeight,
+        const Data &positionIds,
+        Data &qOutput,
+        Data &pagedKCacheData, Data &pagedVCacheData,
+        Data &insertIndexs, Data &insertPositions,
+        int q_heads, int k_heads, int head_dim,
+        int rotaryDim, float eps, float ropeTheta, float ropeScale,
+        int pageLen, int batch, bool doQKNorm, Data *lastPageLens) {
+        DataDict datas = {
+                {"qkv", &qkv}, {"qNormWeight", &qNormWeight}, {"kNormWeight", &kNormWeight},
+                {"positionIds", (Data*)&positionIds},
+                {"qOutput", &qOutput},
+                {"pagedKCacheData", &pagedKCacheData}, {"pagedVCacheData", &pagedVCacheData},
+                {"insertIndexs", &insertIndexs}, {"insertPositions", &insertPositions}
+        };
+        if (lastPageLens != nullptr) {
+            datas["lastPageLens"] = lastPageLens;
+        }
+        curExecutor->Run("QKVRMSNormRopeSplitAppendPagedCache", datas, {{"eps", eps}, {"ropeTheta", ropeTheta}, {"ropeScale", ropeScale}},
+           {{"q_heads", q_heads}, {"k_heads", k_heads}, {"head_dim", head_dim}, {"rotaryDim", rotaryDim}, {"pageLen", pageLen}, {"batch", batch}, {"doQKNorm", (int)doQKNorm}});
+    }
+
+    void Step3p5QKVRMSNormRopeSplitAppendPagedCache(
+        Data &qkv, Data &qNormWeight, Data &kNormWeight,
+        const Data &positionIds,
+        Data &qOutput,
+        Data &pagedKCacheData, Data &pagedVCacheData,
+        Data &insertIndexs, Data &insertPositions,
+        int q_heads, int k_heads, int head_dim,
+        int rotaryDim, float eps, float ropeTheta,
+        bool useLlama3, float llama3Factor,
+        float llama3OriginalMaxPosition,
+        float llama3LowFreqFactor,
+        float llama3HighFreqFactor,
+        int pageLen, int batch, Data *lastPageLens) {
+        DataDict datas = {
+                {"qkv", &qkv}, {"qNormWeight", &qNormWeight}, {"kNormWeight", &kNormWeight},
+                {"positionIds", (Data*)&positionIds},
+                {"qOutput", &qOutput},
+                {"pagedKCacheData", &pagedKCacheData}, {"pagedVCacheData", &pagedVCacheData},
+                {"insertIndexs", &insertIndexs}, {"insertPositions", &insertPositions}
+        };
+        if (lastPageLens != nullptr) {
+            datas["lastPageLens"] = lastPageLens;
+        }
+        curExecutor->Run("Step3p5QKVRMSNormRopeSplitAppendPagedCache", datas,
+            {{"eps", eps}, {"ropeTheta", ropeTheta}, {"ropeScale", 1.0f},
+             {"llama3Factor", llama3Factor},
+             {"llama3OriginalMaxPosition", llama3OriginalMaxPosition},
+             {"llama3LowFreqFactor", llama3LowFreqFactor},
+             {"llama3HighFreqFactor", llama3HighFreqFactor}},
+            {{"q_heads", q_heads}, {"k_heads", k_heads}, {"head_dim", head_dim},
+             {"rotaryDim", rotaryDim}, {"pageLen", pageLen}, {"batch", batch},
+             {"doQKNorm", 1}, {"useLlama3", useLlama3 ? 1 : 0}});
+    }
+
     void RepeatPenalty(Data &input, const Data &penalty, const Data &penaltyScale) {
         curExecutor->Run("RepeatPenalty", {
                 {"input", &input}, {"penalty", (Data*)&penalty}, {"penaltyScale", (Data*)&penaltyScale}
@@ -2998,6 +4230,12 @@ namespace fastllm {
     void MakeDecayMask(Data &input, Data &output) {
         curExecutor->Run("MakeDecayMask", {
             {"input", &input}, {"output", &output}
+        }, {}, {});
+    }
+
+    void ApplyChunkDecayByLastLogG(Data &input, const Data &g) {
+        curExecutor->Run("ApplyChunkDecayByLastLogG", {
+            {"input", &input}, {"g", (Data*)&g}
         }, {}, {});
     }
 
@@ -3070,6 +4308,235 @@ namespace fastllm {
         });
     }
 
+    static std::unordered_map<int, PagedCacheManager*> layerPagedCacheManagers;
+    static std::mutex layerPagedCacheManagersMutex;
+
+    PagedCacheManager* GetPagedCacheManager(int layerIndex) {
+        std::lock_guard<std::mutex> guard(layerPagedCacheManagersMutex);
+        auto it = layerPagedCacheManagers.find(layerIndex);
+        if (it == layerPagedCacheManagers.end()) {
+            return nullptr;
+        }
+        return it->second;
+    }
+
+    static bool IsMultiCudaShardedPagedCacheDesc(const Data &cacheData) {
+#ifdef USE_CUDA
+        return cacheData.dataDevice == DataDevice::CUDA &&
+               cacheData.dataDeviceIds.size() > 1 &&
+               cacheData.IsTensorParallelSharded();
+#else
+        return false;
+#endif
+    }
+
+    PagedCacheManager* AllocatePagedCacheManager(int layerIndex, 
+        PagedCacheManager::PagedCacheManagerType type, 
+        const Data &cacheData, 
+        int pageLen, 
+        int maxPages) {
+        int oriDevice = -1;
+        int targetDevice = -1;
+#ifdef USE_CUDA
+        if (cacheData.dataDevice == DataDevice::CUDA && !cacheData.dataDeviceIds.empty()) {
+            oriDevice = FastllmCudaGetDevice();
+            targetDevice = cacheData.dataDeviceIds[0];
+            if (oriDevice != targetDevice) {
+                FastllmCudaSetDevice(targetDevice);
+            }
+        }
+#endif
+        if (pageLen <= 0) {
+            pageLen = GetPageLen();
+        }
+        bool metadataOnlyMultiCudaRoot = IsMultiCudaShardedPagedCacheDesc(cacheData);
+        {
+            std::lock_guard<std::mutex> guard(layerPagedCacheManagersMutex);
+            auto it = layerPagedCacheManagers.find(layerIndex);
+            if (it != layerPagedCacheManagers.end()) {
+                PagedCacheManager *manager = it->second;
+#ifdef USE_CUDA
+                if (targetDevice >= 0 && manager->cudaData != nullptr && !metadataOnlyMultiCudaRoot) {
+                    int ptrDevice = GetPointerDeviceId(manager->cudaData);
+                    if (ptrDevice >= 0 && ptrDevice != targetDevice) {
+                        ((Data*)manager)->ToDevice(cacheData.dataDevice, cacheData.dataDeviceIds, false);
+                    }
+                }
+                if (oriDevice >= 0 && oriDevice != targetDevice) {
+                    FastllmCudaSetDevice(oriDevice);
+                }
+#endif
+                return manager;
+            }
+        }
+
+        // 创建新的 PagedCacheManager
+        PagedCacheManager *manager = new PagedCacheManager();
+
+        // 设置基本属性
+        manager->type = type;
+
+        // 从 cacheData 中提取信息
+        // cacheData 的尺寸应该是 [numHeads, seqLen, headDim] 或类似的形状
+        AssertInFastLLM(cacheData.dims.size() >= 2, 
+            "AllocatePagedCacheManager: cacheData should have at least 2 dimensions.\n");
+        int numHeads = cacheData.dims[0];
+        int headDim = cacheData.dims.back();
+        DataType dataType = cacheData.dataType;
+
+        // 设置 Data 的基本属性（PagedCacheManager 继承自 Data）
+        ((Data*)manager)->dataType = dataType;
+        ((Data*)manager)->UpdateUnitSize();
+
+        // 根据设备类型设置默认 maxPages
+        if (maxPages <= 0) {
+            int globalMaxTokens = GetMaxTokens();
+            if (globalMaxTokens > 0 && pageLen > 0) {
+                maxPages = (globalMaxTokens + pageLen - 1) / pageLen;
+            } else {
+                maxPages = 300;
+            }
+        }
+
+        // 初始化 pagedKVCacheData
+        ((Data*)manager)->directMemory = true;
+        ((Data*)manager)->ToDevice(cacheData.dataDevice, cacheData.dataDeviceIds, false);
+
+        // Resize manager: [maxPages, pageLen, numHeads, headDim]
+        ((Data*)manager)->Resize({maxPages, pageLen, numHeads, headDim});
+        if (!metadataOnlyMultiCudaRoot) {
+            ((Data*)manager)->Allocate();
+        }
+
+        // 初始化 pageLen 和 unusedPageIndex
+        manager->pageLen = pageLen;
+        manager->SetMaxPages(maxPages);
+
+        // 记录到静态 map 中
+        {
+            std::lock_guard<std::mutex> guard(layerPagedCacheManagersMutex);
+            auto it = layerPagedCacheManagers.find(layerIndex);
+            if (it != layerPagedCacheManagers.end()) {
+                PagedCacheManager *existing = it->second;
+                manager->FreeSpace();
+                delete manager;
+#ifdef USE_CUDA
+                if (oriDevice >= 0 && oriDevice != targetDevice) {
+                    FastllmCudaSetDevice(oriDevice);
+                }
+#endif
+                return existing;
+            }
+            layerPagedCacheManagers[layerIndex] = manager;
+        }
+
+#ifdef USE_CUDA
+        if (oriDevice >= 0 && oriDevice != targetDevice) {
+            FastllmCudaSetDevice(oriDevice);
+        }
+#endif
+
+        return manager;
+    }
+
+    void ClearAllPagedCacheManagers() {
+        std::lock_guard<std::mutex> guard(layerPagedCacheManagersMutex);
+        for (auto &it : layerPagedCacheManagers) {
+            it.second->FreeSpace();
+            delete it.second;
+        }
+        layerPagedCacheManagers.clear();
+    }
+
+    void AppendPagedCache(PagedCacheManager &pagedCacheManager, Data &cache, const Data &input) {
+        curExecutor->Run("AppendPagedCache", {
+                {"pagedCacheManager", (Data*)&pagedCacheManager}, {"cache", &cache}, {"input", (Data*)&input}
+        }, {}, {});
+    }
+
+    void GenerateAppendPagedCacheBatchParams(PagedCacheManager &pagedCacheManager,
+        const std::vector<Data*> &pastKeys, int batch,
+        Data &insertIndexs, Data &insertPositions) {
+        curExecutor->Run("GenerateAppendPagedCacheBatchParams", {
+            {"pagedCacheManager", (Data*)&pagedCacheManager},
+            {"pastKeys", (Data*)pastKeys.data()},
+            {"insertIndexs", &insertIndexs},
+            {"insertPositions", &insertPositions}
+        }, {}, {
+            {"batch", batch},
+            {"pastKeys___batch", (int)pastKeys.size()},
+        });
+    }
+
+    // 将input中的数据插入到pagedCacheManager中, 用于decode，每个batch的seqlen都是1
+    // pagedCacheManager: PagedCacheManager
+    // currentCaches: batch个caches的列表，每个元素是一个Data*
+    // input: 输入数据，维度为[batch, num_heads, head_dim]
+    // insertIndexs: 是INT32PARAM，长度为(batch), 第i个询问的插入的page id为insertIndexs[i]
+    // insertPositions: 是INT32PARAM，长度为(batch), 第i个询问的插入位置为insertPositions[i]
+    void AppendPagedCacheBatch(PagedCacheManager &pagedCacheManager, const std::vector<Data*> &currentCaches, const Data &input, 
+        Data &insertIndexs, Data &insertPositions) {
+        curExecutor->Run("AppendPagedCacheBatch", {
+            {"pagedCacheManager", (Data*)&pagedCacheManager},
+            {"currentCaches", (Data*)currentCaches.data()},
+            {"input", (Data*)&input},
+            {"insertIndexs", &insertIndexs},
+            {"insertPositions", &insertPositions}
+        }, {}, {
+            {"currentCaches___batch", (int)currentCaches.size()}
+        });
+    }
+
+    void AttentionPaged(const Data &q, const Data &k, const Data &v, Data &output,
+        int group, float scale, int attentionType, bool inited) {
+        curExecutor->Run("AttentionPaged", {
+                {"q", (Data*)&q}, {"k", (Data*)&k}, {"v", (Data*)&v}, {"output", &output}
+        }, {{"scale", scale}}, {{"group", group}, {"attentionType", attentionType}, {"inited", (int)inited}});
+    }
+
+    // 这里一般都是Decode部分，q中所有batch的seqlen都是1
+    // kCaches, vCaches: 总的PagedKVCache
+    // qSizes: 是INT32PARAM，长度为(batch + 1), 第i个询问位于q的[qSizes[i], qSizes[i+1])范围内
+    // pageSizes: 是INT32PARAM，长度为(batch + 1), 第i个询问缓存于pageIndexs[pageSizes[i] : pageSizes[i + 1]]
+    // pageIndexs: 是INT32PARAM，长度为所有询问使用的pages数目之和
+    // lastPageLens: 是INT32PARAM，长度为(batch), 第i个询问的最后一个page的长度为lastPageLens[i]
+    void AttentionPagedBatch(const Data &q, const Data &kCaches, const Data &vCaches, 
+        const Data &qSizes, const Data &pageSizes, const Data &pageIndexs, const Data &lastPageLens, 
+        Data &output, int group, float scale, int attentionType, bool inited, bool sync) {
+        curExecutor->Run("AttentionPagedBatch", {
+            {"q", (Data*)&q}, {"kCaches", (Data*)&kCaches}, {"vCaches", (Data*)&vCaches}, {"output", &output},
+            {"qSizes", (Data*)&qSizes}, {"pageSizes", (Data*)&pageSizes}, {"pageIndexs", (Data*)&pageIndexs}, {"lastPageLens", (Data*)&lastPageLens}
+        }, {{"scale", scale}}, {{"group", group}, {"attentionType", attentionType}, {"inited", (int)inited}, {"sync", (int)sync}});
+    }
+
+    // 从batch个pastKey中生成AttentionPagedBatch所需要的qSizes, pageSizes, pageIndexs, lastPageLens
+    // pastKeys: batch个pastKey的列表，每个元素是一个Data*
+    // q: query数据，维度为[num_heads, batch, head_dim]
+    // batch: 批量大小
+    // qSizes, pageSizes, pageIndexs, lastPageLens: 输出的参数
+    void GeneratePagedBatchParams(const Data &q, const std::vector<Data*> &pastKeys, 
+        int batch, Data &qSizes, Data &pageSizes, Data &pageIndexs, Data &lastPageLens,
+        const std::vector<int> &seqLens, bool lastPageLensOnDevice) {
+        std::map<std::string, int> intParams = {
+            {"batch", batch}, 
+            {"pastKeys___batch", (int)pastKeys.size()},
+            {"lastPageLensOnDevice", (int)lastPageLensOnDevice}
+        };
+        // 将 seqLens 编码到 intParams 中，供设备端实现使用
+        intParams["seqLens___size"] = (int)seqLens.size();
+        for (int i = 0; i < (int)seqLens.size(); i++) {
+            intParams["seqLens___" + std::to_string(i)] = seqLens[i];
+        }
+        curExecutor->Run("GeneratePagedBatchParams", {
+            {"q", (Data*)&q}, 
+            {"pastKeys", (Data*)pastKeys.data()}, 
+            {"qSizes", &qSizes}, 
+            {"pageSizes", &pageSizes}, 
+            {"pageIndexs", &pageIndexs}, 
+            {"lastPageLens", &lastPageLens}
+        }, {}, intParams);
+    }
+
     void LoraLayer(Data &input, Data &weight, Data &loraA, Data &loraB, const Data &bias, Data &output, 
                    std::map <std::string, std::string> loraConfig) {
         float r = std::atof(loraConfig["r"].c_str());
@@ -3140,6 +4607,14 @@ namespace fastllm {
         return (void*)curExecutor;
     }
 
+    void SetCurrentThreadExecutor(void *executor) {
+        curExecutor = executor == nullptr ? &defaultExecutor : (Executor*)executor;
+    }
+
+    bool HasDeviceType(const std::string &deviceType) {
+        return curExecutor->HasDevice(deviceType);
+    }
+
     void ClearProfiler() {
         curExecutor->ClearProfiler();
     }
@@ -3148,9 +4623,9 @@ namespace fastllm {
         curExecutor->PrintProfiler();
     }
 
-    void ApplyDeviceMap(const std::map <std::string, int> &deviceMap, int current, int total) {
-        if (deviceMap.size() == 0) {
-            return;
+    std::string SelectDeviceFromMap(const std::map <std::string, int> &deviceMap, int current, int total) {
+        if (deviceMap.size() == 0 || total <= 0) {
+            return "";
         }
         int sum = 0, cur = 0;
         for (auto &it : deviceMap) {
@@ -3164,6 +4639,14 @@ namespace fastllm {
                 curDevice = it.first;
                 break;
             }
+        }
+        return curDevice;
+    }
+
+    void ApplyDeviceMap(const std::map <std::string, int> &deviceMap, int current, int total) {
+        std::string curDevice = SelectDeviceFromMap(deviceMap, current, total);
+        if (curDevice.empty()) {
+            return;
         }
         curExecutor->SetFirstDevice(curDevice);
     }
@@ -3182,5 +4665,343 @@ namespace fastllm {
 
     std::map <std::string, int> GetMoeDeviceMap() {
         return defaultMoeDeviceMap;
+    }
+
+    void SetLayeredMoeDeviceMap(const std::map <std::string, int> &deviceMap) {
+        defaultLayeredMoeDeviceMap = deviceMap;
+    }
+
+    std::map <std::string, int> GetLayeredMoeDeviceMap() {
+        return defaultLayeredMoeDeviceMap;
+    }
+
+    void SetMoeDeviceLayers(int layers) {
+        defaultMoeDeviceLayers = layers;
+    }
+
+    int GetMoeDeviceLayers() {
+        return defaultMoeDeviceLayers;
+    }
+
+    void PagedCacheManager::SetMaxPages(int maxPages) {
+        std::lock_guard<std::mutex> guard(this->pageIndexLocker);
+        this->maxPages = maxPages;
+        this->freePages.clear();
+        this->triePages.clear();
+        this->freePagesSet.clear();
+        this->triePagesSet.clear();
+        this->freePages.reserve(maxPages);
+        this->freePagesSet.reserve(maxPages);
+        for (int i = 0; i < maxPages; i++) {
+            this->freePages.push_back(i);
+            this->freePagesSet.insert(i);
+        }
+        this->pageTimestamp.assign(maxPages, 0);
+        this->pageRefCount.assign(maxPages, 0);
+        this->currentTimestamp = 0;
+        this->pageToTrieNode.clear();
+        if (this->trieRoot) {
+            // 简单起见，不递归删除旧树节点（在生命周期内 SetMaxPages 通常只调用一次）
+        }
+        this->trieRoot = new CacheTrieNode();
+    }
+
+    // 从 Trie 中移除一个叶子节点，断开父子关系并清理映射
+    static void RemoveTrieLeaf(CacheTrieNode *node, int pageIndex,
+                               std::unordered_map<int, CacheTrieNode*> &pageToTrieNode) {
+        if (node->parent) {
+            node->parent->children.erase(node->edgeHash);
+        }
+        pageToTrieNode.erase(pageIndex);
+        delete node;
+    }
+
+    // 递归删除 Trie 子树中所有节点，将其关联的页面迁移回 freePages
+    void PagedCacheManager::EvictTrieSubtree(CacheTrieNode *node) {
+        // 先递归处理所有子节点
+        for (auto &kv : node->children) {
+            EvictTrieSubtree(kv.second);
+        }
+        int pid = node->pageId;
+        if (pid >= 0) {
+            this->pageToTrieNode.erase(pid);
+            // 如果页面空闲（在 triePagesSet 中），迁移到 freePages
+            if (this->triePagesSet.erase(pid)) {
+                this->freePagesSet.insert(pid);
+                this->freePages.push_back(pid);
+            }
+        }
+        delete node;
+    }
+
+    int PagedCacheManager::GetUnusedPageIndex(bool pick) {
+        std::lock_guard<std::mutex> guard(this->pageIndexLocker);
+
+        // 尝试将 triePages 中已不在 Trie 中的 stale 条目迁移到 freePages
+        while (this->freePages.empty() && !this->triePages.empty()) {
+            int candidate = this->triePages.back();
+            auto it = this->pageToTrieNode.find(candidate);
+            if (it == this->pageToTrieNode.end()) {
+                // 页面已不在 Trie 中，迁移到 freePages
+                this->triePages.pop_back();
+                this->triePagesSet.erase(candidate);
+                this->freePages.push_back(candidate);
+                this->freePagesSet.insert(candidate);
+            } else {
+                break;
+            }
+        }
+
+        if (this->freePages.empty() && this->triePages.empty()) {
+            ErrorInFastLLM("PagedCacheManager::GetUnusedPageIndex: no page can be use.\n");
+        }
+
+        int pageIndex;
+        if (!this->freePages.empty()) {
+            pageIndex = this->freePages.back();
+            if (pick) {
+                this->freePages.pop_back();
+                this->freePagesSet.erase(pageIndex);
+                this->pageRefCount[pageIndex] = 1;
+            }
+        } else {
+            if (!pick) {
+                pageIndex = this->triePages.back();
+                return pageIndex;
+            }
+
+            // pick 模式：从 triePages 中淘汰，优先选叶子节点
+            pageIndex = -1;
+            for (int i = (int)this->triePages.size() - 1; i >= 0; i--) {
+                int candidate = this->triePages[i];
+                auto it = this->pageToTrieNode.find(candidate);
+                if (it == this->pageToTrieNode.end()) {
+                    // stale 条目：页面已不在 Trie 中，直接用
+                    pageIndex = candidate;
+                    this->triePages[i] = this->triePages.back();
+                    this->triePages.pop_back();
+                    this->triePagesSet.erase(pageIndex);
+                    break;
+                }
+                if (it->second->children.empty()) {
+                    pageIndex = candidate;
+                    this->triePages[i] = this->triePages.back();
+                    this->triePages.pop_back();
+                    this->triePagesSet.erase(pageIndex);
+                    RemoveTrieLeaf(it->second, pageIndex, this->pageToTrieNode);
+                    break;
+                }
+            }
+
+            if (pageIndex == -1) {
+                // 没有叶子可淘汰，选一个非叶子，递归清理其整个子树
+                pageIndex = this->triePages.back();
+                this->triePages.pop_back();
+                this->triePagesSet.erase(pageIndex);
+                auto it = this->pageToTrieNode.find(pageIndex);
+                if (it != this->pageToTrieNode.end()) {
+                    CacheTrieNode *node = it->second;
+                    for (auto &childKv : node->children) {
+                        EvictTrieSubtree(childKv.second);
+                    }
+                    node->children.clear();
+                    if (node->parent) {
+                        node->parent->children.erase(node->edgeHash);
+                    }
+                    this->pageToTrieNode.erase(it);
+                    delete node;
+                }
+                // EvictTrieSubtree 可能将子树页面从 triePages 迁移到 freePages，
+                // 过滤 triePages 中已不在 triePagesSet 的脏条目
+                int w = 0;
+                for (int i = 0; i < (int)this->triePages.size(); i++) {
+                    if (this->triePagesSet.count(this->triePages[i])) {
+                        this->triePages[w++] = this->triePages[i];
+                    }
+                }
+                this->triePages.resize(w);
+            }
+
+            this->pageRefCount[pageIndex] = 1;
+        }
+        return pageIndex;
+    }
+
+    void PagedCacheManager::ReleasePageIndex(int pageIndex) {
+        std::lock_guard<std::mutex> guard(this->pageIndexLocker);
+        this->pageRefCount[pageIndex]--;
+        if (this->pageRefCount[pageIndex] <= 0) {
+            this->pageRefCount[pageIndex] = 0;
+            if (this->pageToTrieNode.find(pageIndex) != this->pageToTrieNode.end()) {
+                if (this->triePagesSet.find(pageIndex) == this->triePagesSet.end()) {
+                    this->triePages.push_back(pageIndex);
+                    this->triePagesSet.insert(pageIndex);
+                }
+            } else {
+                if (this->freePagesSet.find(pageIndex) == this->freePagesSet.end()) {
+                    this->freePages.push_back(pageIndex);
+                    this->freePagesSet.insert(pageIndex);
+                }
+            }
+        }
+    }
+
+    void PagedCacheManager::ReleasePageIndices(const std::vector<int> &pageIndices) {
+        std::lock_guard<std::mutex> guard(this->pageIndexLocker);
+        for (int pageIndex : pageIndices) {
+            this->pageRefCount[pageIndex]--;
+            if (this->pageRefCount[pageIndex] <= 0) {
+                this->pageRefCount[pageIndex] = 0;
+                if (this->pageToTrieNode.find(pageIndex) != this->pageToTrieNode.end()) {
+                    if (this->triePagesSet.find(pageIndex) == this->triePagesSet.end()) {
+                        this->triePages.push_back(pageIndex);
+                        this->triePagesSet.insert(pageIndex);
+                    }
+                } else {
+                    if (this->freePagesSet.find(pageIndex) == this->freePagesSet.end()) {
+                        this->freePages.push_back(pageIndex);
+                        this->freePagesSet.insert(pageIndex);
+                    }
+                }
+            }
+        }
+    }
+
+    void PagedCacheManager::Pick(std::vector<int> &pageIds) {
+        std::lock_guard<std::mutex> guard(this->pageIndexLocker);
+        bool needRebuildFree = false, needRebuildTrie = false;
+        for (int pageIndex : pageIds) {
+            this->pageRefCount[pageIndex]++;
+            if (this->freePagesSet.erase(pageIndex)) {
+                needRebuildFree = true;
+            } else if (this->triePagesSet.erase(pageIndex)) {
+                needRebuildTrie = true;
+            }
+        }
+        if (needRebuildFree) {
+            int w = 0;
+            for (int i = 0; i < (int)this->freePages.size(); i++) {
+                if (this->freePagesSet.count(this->freePages[i])) {
+                    this->freePages[w++] = this->freePages[i];
+                }
+            }
+            this->freePages.resize(w);
+        }
+        if (needRebuildTrie) {
+            int w = 0;
+            for (int i = 0; i < (int)this->triePages.size(); i++) {
+                if (this->triePagesSet.count(this->triePages[i])) {
+                    this->triePages[w++] = this->triePages[i];
+                }
+            }
+            this->triePages.resize(w);
+        }
+    }
+
+    uint64_t PagedCacheManager::HashTokenPage(const int *tokens, int len) {
+        uint64_t hash = 0;
+        const uint64_t P = 1000000007ULL;
+        for (int i = 0; i < len; i++) {
+            hash = hash * P + (uint64_t)tokens[i];
+        }
+        return hash;
+    }
+
+    void PagedCacheManager::Record(const std::vector<int> &tokens, const std::vector<int> &pages) {
+        std::lock_guard<std::mutex> guard(this->pageIndexLocker);
+        this->currentTimestamp++;
+        long long ts = this->currentTimestamp;
+
+        int numPages = (int)tokens.size() / this->pageLen;
+        if ((int)pages.size() < numPages) {
+            numPages = (int)pages.size();
+        }
+
+        CacheTrieNode *cur = this->trieRoot;
+        for (int i = 0; i < numPages; i++) {
+            uint64_t h = HashTokenPage(tokens.data() + i * this->pageLen, this->pageLen);
+            int pid = pages[i];
+
+            auto it = cur->children.find(h);
+            CacheTrieNode *child;
+            if (it == cur->children.end()) {
+                child = new CacheTrieNode();
+                child->parent = cur;
+                child->edgeHash = h;
+                cur->children[h] = child;
+            } else {
+                child = it->second;
+                if (child->pageId != -1 && child->pageId != pid) {
+                    int oldPid = child->pageId;
+                    this->pageToTrieNode.erase(oldPid);
+                    // 旧页面如果空闲，从 triePages 迁移到 freePages
+                    if (this->triePagesSet.erase(oldPid)) {
+                        for (int j = (int)this->triePages.size() - 1; j >= 0; j--) {
+                            if (this->triePages[j] == oldPid) {
+                                this->triePages[j] = this->triePages.back();
+                                this->triePages.pop_back();
+                                break;
+                            }
+                        }
+                        this->freePages.push_back(oldPid);
+                        this->freePagesSet.insert(oldPid);
+                    }
+                }
+            }
+
+            // 新页面加入 Trie：如果它在 freePages 中（空闲且不在 Trie 中），迁移到 triePages
+            if (this->pageToTrieNode.find(pid) == this->pageToTrieNode.end()) {
+                if (this->freePagesSet.erase(pid)) {
+                    for (int j = (int)this->freePages.size() - 1; j >= 0; j--) {
+                        if (this->freePages[j] == pid) {
+                            this->freePages[j] = this->freePages.back();
+                            this->freePages.pop_back();
+                            break;
+                        }
+                    }
+                    if (this->pageRefCount[pid] <= 0) {
+                        this->triePages.push_back(pid);
+                        this->triePagesSet.insert(pid);
+                    }
+                }
+            }
+
+            child->pageId = pid;
+            child->timestamp = ts;
+            this->pageTimestamp[pid] = ts;
+            this->pageToTrieNode[pid] = child;
+
+            cur = child;
+        }
+    }
+
+    void PagedCacheManager::Query(const std::vector<int> &tokens, std::vector<int> &cachedPageIds) {
+        std::lock_guard<std::mutex> guard(this->pageIndexLocker);
+        cachedPageIds.clear();
+
+        int numPages = (int)tokens.size() / this->pageLen;
+        CacheTrieNode *cur = this->trieRoot;
+
+        for (int i = 0; i < numPages; i++) {
+            uint64_t h = HashTokenPage(tokens.data() + i * this->pageLen, this->pageLen);
+
+            auto it = cur->children.find(h);
+            if (it == cur->children.end()) {
+                break;
+            }
+
+            CacheTrieNode *child = it->second;
+            if (child->pageId == -1) {
+                break;
+            }
+
+            // 验证时间戳：页面未被覆盖
+            if (this->pageTimestamp[child->pageId] != child->timestamp) {
+                break;
+            }
+
+            cachedPageIds.push_back(child->pageId);
+            cur = child;
+        }
     }
 }

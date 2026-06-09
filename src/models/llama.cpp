@@ -205,11 +205,13 @@ namespace fastllm {
                 keys.push_back(&pastKeyValues[i].first);
                 values.push_back(&pastKeyValues[i].second);
                 masks.push_back((Data*)&attentionMask);
+                Data empty;
                 MergeAttention (
                     attenInput, 
                     weight[mergeQkvWeightName], weight[mergeQkvBiasName], 
                     weight[oWeightName], weight[oBiasName],
-                    qkv, q, k, v, curInput, curOutput, 
+                    false, empty, empty, 1e-5, 
+                    qkv, q, k, v, 
                     num_attention_heads, num_key_value_heads, head_dim, rotary_dim, 1.0 / sqrt(head_dim),
                     positionIds, *sinDataPtr, *cosDataPtr, 
                     keys, values, masks, w1
@@ -513,11 +515,13 @@ namespace fastllm {
                     values.push_back(pastKeyValues[b * block_cnt + i].second);
                     masks.push_back(attentionMask[b]);
                 }
+                Data empty;
                 MergeAttention (
                     attenInput, 
                     weight[mergeQkvWeightName], weight[mergeQkvBiasName], 
                     weight[oWeightName], weight[oBiasName],
-                    qkv, q, k, v, curInput, curOutput, 
+                    false, empty, empty, 1e-5, 
+                    qkv, q, k, v, 
                     num_attention_heads, num_key_value_heads, head_dim, rotary_dim, 1.0 / sqrt(head_dim),
                     allPositionIds, *sinDataPtr, *cosDataPtr, 
                     keys, values, masks, w1
@@ -975,15 +979,15 @@ namespace fastllm {
     }
 
     void LlamaModel::WarmUp() {
-        EmitWarmUpLog();
+        printf("Warmup...\n");
         Data inputIds = Data(DataType::FLOAT32, {1, 1}, {1});
-        Data attentionMask = Data(DataType::FLOAT32, {1, 1}, {0});
-        Data positionIds = Data(DataType::FLOAT32, {1, 1}, {0, 0});
+        Data attentionMask = Data(this->dataType, {1, 1}, {0});
+        Data positionIds = Data(this->dataType, {1, 1}, {0, 0});
 
         std::vector <std::pair <Data, Data> > pastKeyValues;
         for (int i = 0; i < block_cnt; i++) {
-            pastKeyValues.push_back(std::make_pair(Data(DataType::FLOAT32),
-                                                   Data(DataType::FLOAT32)));
+            pastKeyValues.push_back(std::make_pair(Data(this->dataType),
+                                                   Data(this->dataType)));
         }
         if (this->weight.weight.find("lm_head.weight") == this->weight.weight.end()) {
             this->weight["lm_head.weight"] = Data();
@@ -993,5 +997,6 @@ namespace fastllm {
         elementsInKVCachePerToken = (long long)block_cnt * 
             (pastKeyValues[0].first.dims[0] * pastKeyValues[0].first.dims[2] + 
              pastKeyValues[0].second.dims[0] * pastKeyValues[0].second.dims[2]);
+        printf("finish.\n");
     }
 }

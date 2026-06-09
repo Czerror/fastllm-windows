@@ -941,20 +941,21 @@ namespace fastllm {
     }
 
     void ChatGLMModel::WarmUp() {
-    	EmitWarmUpLog();
+    	printf("Warmup...\n");
 	    Data inputIds = Data(DataType::FLOAT32, {1, 1}, {(float)bos_token_id});
-	    Data attentionMask = Data(DataType::FLOAT32, {1, 1}, {0});
-	    Data positionIds = Data(DataType::FLOAT32, {2, 1}, {0, 0});
+	    Data attentionMask = Data(this->dataType, {1, 1}, {0});
+	    Data positionIds = Data(this->dataType, {2, 1}, {0, 0});
 
 	    std::vector <std::pair <Data, Data> > pastKeyValues;
 	    for (int i = 0; i < block_cnt; i++) {
-		    pastKeyValues.push_back(std::make_pair(Data(DataType::FLOAT32),
-		                                           Data(DataType::FLOAT32)));
+		    pastKeyValues.push_back(std::make_pair(Data(this->dataType),
+		                                           Data(this->dataType)));
 	    }
 	    Forward(inputIds, attentionMask, positionIds, pastKeyValues);
         elementsInKVCachePerToken = (long long)block_cnt * 
             (pastKeyValues[0].first.dims[0] * pastKeyValues[0].first.dims[2] + 
              pastKeyValues[0].second.dims[0] * pastKeyValues[0].second.dims[2]);
+	    printf("finish.\n");
     }
 
     std::string ChatGLMModel::MakeInput(const std::string &history, int round, const std::string &input) {
@@ -966,8 +967,8 @@ namespace fastllm {
             if (round == 0 && GetVersion() == 1) {
                 return input;
             } else {
-#if defined(_WIN32) || defined(_WIN64)
-                return history + ("[Round " + std::to_string(round) + std::string(reinterpret_cast<const char*>(u8"]\n\n问：")) + input + std::string(reinterpret_cast<const char*>(u8"\n\n答：")));
+#if defined(_WIN32) or defined(_WIN64)
+                return history + ("[Round " + std::to_string(round) + u8"]\n\n问：" + input + u8"\n\n答：");
 #else
                 return history + ("[Round " + std::to_string(round) + "]\n\n问：" + input + "\n\n答：");
 #endif
@@ -982,8 +983,8 @@ namespace fastllm {
 
 		if (GetVersion() == 2)
 			round++;
-#if defined(_WIN32) || defined(_WIN64)
-        return (history + ("[Round " + std::to_string(round) + std::string(reinterpret_cast<const char*>(u8"]\n\n问：")) + input + std::string(reinterpret_cast<const char*>(u8"\n\n答：")) + output + "\n"));
+#if defined(_WIN32) or defined(_WIN64)
+        return (history + ("[Round " + std::to_string(round) + u8"]\n\n问：" + input + u8"\n\n答：" + output + "\n"));
 #else
         return (history + ("[Round " + std::to_string(round) + "]\n\n问：" + input + "\n\n答：" + output + "\n\n"));
 #endif

@@ -14,16 +14,6 @@
 #include <cstring>
 #include <cstdlib>
 
-// Cross-platform aligned memory allocation
-#if defined(_WIN32) || defined(_WIN64)
-#include <malloc.h>
-#define fastllm_aligned_alloc(alignment, size) _aligned_malloc(size, alignment)
-#define fastllm_aligned_free(ptr) _aligned_free(ptr)
-#else
-#define fastllm_aligned_alloc(alignment, size) aligned_alloc(alignment, size)
-#define fastllm_aligned_free(ptr) free(ptr)
-#endif
-
 // AMX tile 配置
 #define TILE_M 16       // tile 行数 (Batch Size / Sequence Length 方向)
 #define TILE_N 16       // tile 列数 (Output Feature 方向)
@@ -44,32 +34,41 @@ typedef struct __tile_config {
 } __tilecfg;
 
 #include "fastllm.h"
-
-// AMX is primarily supported on Linux; Windows AMX support requires different approach
-#if !defined(_WIN32) && !defined(_WIN64)
+#include "utils.h"
 // ARCH_REQ_XCOMP_PERM 系统调用
 #define ARCH_GET_XCOMP_PERM     0x1022
 #define ARCH_REQ_XCOMP_PERM     0x1023
 #define XFEATURE_XTILECFG       17
 #define XFEATURE_XTILEDATA      18
 #include <sys/syscall.h>
-#endif
 
 namespace fastllm {
+    extern CPUInstructInfo cpuInstructInfo;
     extern void AddBiasAVX512(float *outputData, float *biasData, int n, int k, int st, int end);
 
+    static void AddBiasAMX(float *outputData, float *biasData, int n, int k, int st, int end) {
+        if (biasData == nullptr) {
+            return;
+        }
+        if (cpuInstructInfo.hasAVX512F) {
+            AddBiasAVX512(outputData, biasData, n, k, st, end);
+            return;
+        }
+        for (int i = 0; i < n; i++) {
+            for (int j = st; j < end; j++) {
+                outputData[i * k + j] += biasData[j];
+            }
+        }
+    }
+
     void InitAMX() {
-#if defined(__AMX_TILE__) && !defined(_WIN32) && !defined(_WIN64)
+#if defined(__AMX_TILE__)
         if (syscall(SYS_arch_prctl, ARCH_REQ_XCOMP_PERM, XFEATURE_XTILEDATA) != 0) {
             printf("init amx failed.\n");
             exit(0);
         } else {
             printf("enable amx finish.\n");
         }
-#elif defined(_WIN32) || defined(_WIN64)
-        // AMX initialization on Windows is handled differently
-        // Windows 11 24H2+ supports AMX but requires different API
-        printf("AMX on Windows: not supported yet.\n");
 #else
         printf("enable amx failed.\n");
 #endif
@@ -113,8 +112,8 @@ namespace fastllm {
         _tile_loadconfig(&tile_cfg);
 
         // 预分配 A 和 C 的临时块
-        uint16_t *A_block = (uint16_t *)fastllm_aligned_alloc(64, TILE_M * TILE_K * sizeof(uint16_t));
-        float *C_block = (float *)fastllm_aligned_alloc(64, TILE_M * TILE_N * sizeof(float));
+        uint16_t *A_block = (uint16_t *)aligned_alloc(64, TILE_M * TILE_K * sizeof(uint16_t));
+        float *C_block = (float *)aligned_alloc(64, TILE_M * TILE_N * sizeof(float));
         
         int width_k = end - st;
         int num_m_blocks = ceil_div(M, TILE_K); // 用于计算 PackedB 的偏移
@@ -168,8 +167,8 @@ namespace fastllm {
         }
         
         _tile_release();
-        fastllm_aligned_free(A_block);
-        fastllm_aligned_free(C_block);
+        free(A_block);
+        free(C_block);
 #else
         printf("Unsupport AMX.\n");
         exit(0);
@@ -503,7 +502,7 @@ namespace fastllm {
 
         // 2. 分配对齐的内存 (用于Packed B)
         // 实际场景中，这里应该检查 input Weight 是否已经是 Packing 过的格式
-        uint16_t *packedB = (uint16_t *)fastllm_aligned_alloc(64, packed_size_bytes);
+        uint16_t *packedB = (uint16_t *)aligned_alloc(64, packed_size_bytes);
         if (!packedB) return false;
 
         // 3. 调用 Repack
@@ -520,10 +519,10 @@ namespace fastllm {
 
 
         // 5. 添加偏置
-        AddBiasAVX512(outputData, biasData, n, k, st, end);
+        AddBiasAMX(outputData, biasData, n, k, st, end);
 
         // 6. 释放临时 buffer
-        fastllm_aligned_free(packedB);
+        free(packedB);
         
         return true;
 #else

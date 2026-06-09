@@ -5,12 +5,6 @@
 #ifndef TEST_FASTLLM_H
 #define TEST_FASTLLM_H
 
-#if defined(_WIN32) || defined(_WIN64)
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#endif
-
 #define _USE_MATH_DEFINES
 #include <vector>
 #include <cstdint>
@@ -25,6 +19,7 @@
 #include <iostream>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <locale>
 #include <codecvt>
 #include "devices/cpu/alivethreadpool.h"
@@ -35,12 +30,41 @@
 #endif
 
 namespace fastllm {
+    class Data;
+
+    class FastllmEnv {
+    public:
+        FastllmEnv();
+
+        bool activateNuma = false;
+        int numaThreads = -1;
+        int numas = -1;
+        bool cudaSync = false;
+        bool printLogits = false;
+        bool printProfile = false;
+        bool skipWarmup = false;
+        bool cudaGraph = false;
+        bool cudaMemCheck = false;
+        bool cudaTriton = false;
+        bool useFusedTransferAttn = true;
+        bool useFusedGdnPrefill = true;
+        std::string debugTokenId;
+    };
+
+    const FastllmEnv &GetFastllmEnv();
+
     void SetDeviceMap(const std::map <std::string, int> &deviceMap);
     void SetMoeDeviceMap(const std::map <std::string, int> &moeDeviceMap);
+    void SetLayeredMoeDeviceMap(const std::map <std::string, int> &moeDeviceMap);
+    void SetMoeDeviceLayers(int layers);
 
     std::map <std::string, int> GetDeviceMap();
     std::map <std::string, int> GetMoeDeviceMap();
+    std::map <std::string, int> GetLayeredMoeDeviceMap();
+    int GetMoeDeviceLayers();
+    std::string SelectDeviceFromMap(const std::map <std::string, int> &deviceMap, int current, int total);
 
+    Data *GetEmptyData();
     void PrintInstructionInfo();
     void SetThreads(int t);
     void SetLowMemMode(bool m);
@@ -51,11 +75,19 @@ namespace fastllm {
     bool GetLowMemMode();
     void SetCudaEmbedding(bool v);
     bool GetCudaEmbedding();
+    void SetCudaSlabMB(int mb);
+    int GetCudaSlabMB();
     int GetThreads();
     bool GetKVCacheInCPU();
     bool GetHistoryCacheInCPU();
     void EnableAMX(bool enable);
     bool GetEnableAMX();
+    void SetMaxTokens(int maxTokens);
+    int GetMaxTokens();
+    void SetPageLen(int pageLen);
+    int GetPageLen();
+    void SetGpuMemRatio(float ratio);
+    float GetGpuMemRatio();
     AliveThreadPool *GetAlivePool();
 
     template<typename T, std::size_t Alignment>
@@ -241,6 +273,8 @@ namespace fastllm {
         FP8_E4M3 = 10,
         INT2_GROUP = 11, // 不用zeroPoint的int2, floatValue = min + uint2Value * scale, 且使用分组量化
         BASE3_GROUP = 12, // 三元量化，-1 0 1
+        INT32 = 13, // int32
+        NVFP4 = 14, // packed fp4 e2m1 + compact e8m0 block scales
         INT32PARAM = 100, // int32的参数，这种类型的数据永远存在CPU上
         FP8_E4M3_BLOCK_128 = 1000, // fp8e4m3, block = 128
         AWQ_4BIT_128 = 1001, // awq, bits = 4, group = 128
@@ -248,6 +282,8 @@ namespace fastllm {
         FP8_E4M3_PERCHANNEL = 1003, // fp8, per channel量化
         INT4_GROUP128 = 1004, // int4, per group量化，group = 128
         INT8_PERCHANNEL = 1005, // int8, per channel量化
+        NVFP4_BLOCK_16 = 1006, // packed fp4 e2m1, blockM = 16, inline float scale per block
+        NVFP4_BLOCK_16_E8M0 = 1007, // packed fp4 e2m1, blockM = 16, inline e8m0 scale per block
         INF_INT8_PERCHANNEL = 2000, // 推理用的int8, per channel量化
         INF_INT8_GROUP128 = 2001, // 推理用的int8, per group量化，group = 128
         DATA_GGUF_FORMAT = 9999, DATA_GGUF_FORMAT_END = 19999, // [DATA_GGUF_FORMAT, DATA_GGUF_FORMAT_END]之间为GGUF格式的数据，ggml_type = type - DATA_FFUF_FORMAT
@@ -257,13 +293,47 @@ namespace fastllm {
     std::string GetDataTypeName(DataType type);
 
     size_t GetDataBytes(DataType type, size_t rows, size_t columns);
+    size_t GetNVFP4WeightBytes(size_t rows, size_t columns);
+    size_t GetNVFP4ScaleBytes(size_t rows, size_t columns, int blockK, int blockM);
+    size_t GetNVFP4StorageBytes(size_t rows, size_t columns, int blockK, int blockM);
+    uint8_t *GetNVFP4ScaleData(Data &data);
+    const uint8_t *GetNVFP4ScaleData(const Data &data);
+    float NVFP4E8M0ScaleToFloat(uint8_t v);
 
     enum DataDevice {
         CPU = 0, CUDA = 1
     };
 
+    struct DiskWeightPart {
+        std::string fileName;
+        long long fileOffset = 0;
+        uint64_t bytes = 0;
+        DataType sourceDataType = DataType::FLOAT32;
+        std::vector <int> dims;
+        bool isScalePart = false;
+        uint64_t scaleOffset = 0;
+    };
+
     enum WeightType {
         NONE = 0, LINEAR = 1, EMBEDDING = 2, CONV2D = 3, CONV1D = 4, AUTO = 99999
+    };
+
+    enum TensorParallelLayoutType {
+        TP_LAYOUT_NONE = 0,       // 不使用 tensor parallel 布局，按普通单份张量处理
+        TP_LAYOUT_REPLICATED = 1, // 多卡各持有一份完整副本
+        TP_LAYOUT_SHARDED = 2     // 多卡沿 tpAxis 切分，每卡只持有部分数据
+    };
+
+    enum TensorParallelLinearType {
+        TP_LINEAR_NONE = 0,
+        TP_LINEAR_ROW = 1,
+        TP_LINEAR_COLUMN = 2
+    };
+
+    enum TensorParallelPackType {
+        TP_PACK_NONE = 0,
+        TP_PACK_GATEUP = 1,
+        TP_PACK_QKV = 2
     };
 
     struct FileMmap {
@@ -299,6 +369,8 @@ namespace fastllm {
         const char *ptr;
     };
 
+    class PagedCacheManager;
+
     class Data {
     public:
         bool isFake = false; // 没有创建空间，指向别的data（无需销毁）
@@ -306,6 +378,15 @@ namespace fastllm {
         long long cacheUid = 0; // 用来标注Cache id
         bool isKVCache = false; // 是否是KV Cache TODO: 做一些KVCache的管理
         bool isLinearAttention = false; // 是否是线性attention的缓存（永远保持同样的形状）
+        bool isLinearAttentionTransposed = false; // 线性attention recurrent state是否物理存成[V,K]
+
+        // Paged KV Cache的相关信息
+        // 当isKVCache = true且isPagedKVCache = true时，下面这些信息才有意义
+        bool isPagedKVCache = false; // 是否是分片的KV Cache
+        int pageLen = 128; // 每个page的长度（token数）
+        PagedCacheManager *pagedKVCacheData = nullptr; // 存储kv cached的数据，shape为 [maxPages, pageLen, numHeads, headDim]
+        std::vector <int> pageIndex; // 目前使用的Index编号
+        int lastPageLen; // 最后一个Page中使用了多少长度
 
         bool lockInCPU = false; // 如果lock在CPU上，那么不允许移动到其余设备
         WeightType weightType = WeightType::NONE; // 权重类型，NONE代表非权重（或未知权重）
@@ -322,6 +403,7 @@ namespace fastllm {
         uint8_t *cpuData = nullptr; // 数据指针
 
 	    void *cudaData = nullptr;
+        bool cudaDataBorrowed = false; // cudaData points into another owner and should not be freed directly
         std::vector <void*> extraCudaData;
         std::vector <void*> extraCudaHalfData;
 
@@ -349,15 +431,28 @@ namespace fastllm {
 
         std::vector <uint16_t> halfScales; // 某些量化方式使用float16的scales
 
+        bool isModelWeight = false; // 是否是模型权重
         std::string name; // weightName
         std::string fileName;
         long long filePos;
         std::shared_ptr<FileMmap> mapFile;
+        bool isDiskWeight = false; // 权重仅保留磁盘位置，计算时按需读取
+        std::vector <DiskWeightPart> diskWeightParts;
 
         bool directMemory = false; // 直接分配/释放Memory，不经过缓存
 
         bool multiDeviceData = false;
         std::map <int, Data*> multiDeviceDatas;
+
+        TensorParallelLayoutType tpLayout = TP_LAYOUT_NONE;
+        int tpAxis = -1;
+        std::vector <int> tpGlobalDims;
+        std::map <int, std::vector <std::pair <int, int> > > tpRanges;
+        TensorParallelLinearType tpLinearType = TP_LINEAR_NONE;
+        TensorParallelPackType tpPackType = TP_PACK_NONE;
+        int tpQHeads = 0;
+        int tpKVHeads = 0;
+        int tpHeadDim = 0;
 
         int weightId;
         bool isRegistered = false;
@@ -368,6 +463,9 @@ namespace fastllm {
         bool IsRepacked = false;
 
         std::vector <uint8_t*> numasData; // numa数据
+        bool isPinned = false; // 是否使用pinned memory (page-locked)
+
+        std::vector <int> cpuIntDatas; // 锁定在cpu上的int数据
         
         Data () {};
 
@@ -398,11 +496,13 @@ namespace fastllm {
 
         void Allocate(); // 分配内存
 
+        void Allocate(bool zero); // 分配内存，zero=false 时跳过清零
+
         void Allocate(float v); // 分配内存并初始化
 
         void Expansion(const std::vector <int> &dims); // 预扩容到相应尺寸
 
-        void MallocSpace(uint64_t size); // 在设备上分配
+        void MallocSpace(uint64_t size, bool zero = true); // 在设备上分配
 
         void FreeSpace(); // 回收设备上的内存
 
@@ -418,15 +518,19 @@ namespace fastllm {
 
         std::vector<int> Shape() const; 
 
-        void Print() const; // 输出
+        void Print(const std::string &name = "") const; // 输出
 
         void CalcWeightSum(); // 计算WeightSum
 
-        void ToDevice(DataDevice device); // 移动到指定device
+        void ToDevice(DataDevice device, bool copyData = true); // 移动到指定device
 
-        void ToDevice(DataDevice device, const std::vector <int> &deviceIds); // 移动到指定device
+        void ToDevice(DataDevice device, const std::vector <int> &deviceIds, bool copyData = true); // 移动到指定device
 
-        void ToDevice(void *device);
+        void ToDevice(void *device, bool copyData = true);
+
+        void ToCudaTemporary(const std::vector <int> &deviceIds, bool copyData, void *stream = nullptr); // 临时移动到cuda
+
+        void FreeCudaTemporary(const std::vector <int> &deviceIds, bool copyData); // 销毁临时移动到cuda的数据
 
         void Repack(); // 重新打包数据，便于计算
 
@@ -450,6 +554,69 @@ namespace fastllm {
 
         // 当前权重作为linear的weight时，输入应该是什么类型
         DataType GetLinearActDataType(int batchSize);
+
+        bool IsTensorParallel() const;
+        bool IsTensorParallelReplicated() const;
+        bool IsTensorParallelSharded() const;
+        void ClearTensorParallelLayout();
+        void ResetMultiDeviceState();
+    };
+
+    struct CacheTrieNode {
+        int pageId = -1;
+        long long timestamp = 0;
+        std::unordered_map<uint64_t, CacheTrieNode*> children;
+        CacheTrieNode *parent = nullptr;
+        uint64_t edgeHash = 0;
+    };
+
+    // 一个带PageCache功能的Data，可以管理多个PageCache
+    class PagedCacheManager : public Data {
+        public:
+            enum PagedCacheManagerType {
+                PAGED_CACHE_MANAGER_TYPE_KV_CACHE = 0,
+                PAGED_CACHE_MANAGER_TYPE_MLP_CACHE = 1
+            };
+
+            // 类型
+            PagedCacheManagerType type;
+
+            // 页长
+            int pageLen;
+
+            // 最大页数
+            int maxPages;
+
+            // 空闲页双池：freePages 不在 Trie 中，triePages 在 Trie 中但未被引用
+            std::vector<int> freePages;
+            std::vector<int> triePages;
+            std::unordered_set<int> freePagesSet;
+            std::unordered_set<int> triePagesSet;
+            std::mutex pageIndexLocker;
+
+            int FreePageCount() const { return (int)freePages.size() + (int)triePages.size(); }
+
+            // 每个页面的使用时间戳
+            std::vector<long long> pageTimestamp;
+            long long currentTimestamp = 0;
+
+            // 每个页面的引用计数
+            std::vector<int> pageRefCount;
+
+            // Trie树缓存管理
+            CacheTrieNode *trieRoot = nullptr;
+            std::unordered_map<int, CacheTrieNode*> pageToTrieNode;
+
+            void SetMaxPages(int maxPages);
+            int GetUnusedPageIndex(bool pick);
+            void EvictTrieSubtree(CacheTrieNode *node);
+            void ReleasePageIndex(int pageIndex);
+            void ReleasePageIndices(const std::vector<int> &pageIndices);
+            void Pick(std::vector<int> &pageIds);
+
+            static uint64_t HashTokenPage(const int *tokens, int len);
+            void Record(const std::vector<int> &tokens, const std::vector<int> &pages);
+            void Query(const std::vector<int> &tokens, std::vector<int> &cachedPageIds);
     };
 
     struct PartitionLinkNode {
@@ -628,6 +795,10 @@ namespace fastllm {
 
     void *GetExecutor();
 
+    void SetCurrentThreadExecutor(void *executor);
+
+    bool HasDeviceType(const std::string &deviceType);
+
     void ClearProfiler();
 
     void PrintProfiler();
@@ -642,14 +813,29 @@ namespace fastllm {
     void ToDataType(const Data &input, DataType dataType);
     void ToDataType(const Data &input, Data &output, DataType dataType);
 
+    // 与 ToDataType(input, dataType) 行为相同，但强制只在 CPU device 上完成转换。
+    // 适用于希望权重保留在 CPU 上、避免被算子派发逻辑迁移到 GPU 的场景（例如不开 cuda_embedding 时的 embedding 权重）。
+    void ToDataTypeForceCPU(const Data &input, DataType dataType);
+
     void CopyKVCache(Data &oldCache, Data &newCache, int oldBsStart, int newBsStart, int bs, int offset);
 
     bool CanRunMergeMOE(const Data &input, std::vector <Data*> &biass);
-    void MergeMOE(const Data &input, const Data &logits, Data &gateBias, std::vector <Data*> &weights, std::vector <Data*> &biass, 
+    enum MoeGateType {
+        MoeGateSwiglu = 0,
+        MoeGateGeglu = 1
+    };
+    void MergeMOE(const Data &input, const Data &index, const Data &score, std::vector <Data*> &weights, std::vector <Data*> &biass, 
                 Data &w1, Data &w2, Data &w3, Data &curInput, Data &curOutput,
-                float routeScale, float sharedScale, int topk, bool needNorm, Data &output);
+                float sharedScale, Data &output, int layer = 0, MoeGateType gateType = MoeGateSwiglu);
+
+    void FusedMOE(const Data &input, const Data &index, const Data &score,
+                Data &gate, Data &up, Data &down, Data &w1,
+                Data &output, int layer = 0, MoeGateType gateType = MoeGateSwiglu, float swigluLimit = 0.0f);
     
     void MergeMLA(Data &qNope, Data &qPe, Data &kvCache, Data &peCache, const Data &mask, Data &output, float softmaxScale);
+
+    // MLA with paged KV cache: kvCache (kpe) and peCache (ckv) are stored in paged form (isPagedKVCache, pageIndex, lastPageLen, pagedKVCacheData).
+    void MergeMLAPaged(Data &qNope, Data &qPe, Data &kvCachePaged, Data &peCachePaged, Data &output, float softmaxScale);
 
     void Attention(const Data &q, const Data &k, const Data &v, const Data &mask, Data &output,
                    int group, float scale, int attentionType);
@@ -665,11 +851,23 @@ namespace fastllm {
 
     void Embedding(const Data &input, Data &weight, Data &output);
 
+    void EmbeddingDirect(const Data &input, Data &weight, Data &output);
+
     void RMSNorm(const Data &input, const Data &weight, float eps, Data &output);
+
+    void RMSNormPart(const Data &input, const Data &weight, float eps, int start, int end, Data &output);
 
     void LayerNorm(Data &input, Data &gamma, Data &beta, int axis, Data &output);
 
-    void Linear(Data &input, Data &weight, const Data &bias, Data &output);
+    void Linear(Data &input, Data &weight, const Data &bias, Data &output, bool keepTpReplicated = false);
+
+    void LinearAdd(const Data &input, const Data &weight, const Data &bias, Data &middle, Data &output);
+
+    bool CanRunLinearAdd(const Data &input, const Data &weight, const Data &bias, const Data &output);
+
+    void LinearSwiglu(const Data &input, const Data &weight, const Data &bias, Data &middle, Data &output);
+
+    bool CanRunLinearSwiglu(const Data &input, const Data &weight);
 
     enum LinearExType {
         ExTypeNone = 0,
@@ -683,11 +881,12 @@ namespace fastllm {
     bool CanRunMergeAttention();
     
     void MergeAttention(Data &input, Data &weight0, Data &bias0, Data &weight1, Data &bias1, 
-                        Data &qkv, Data &q, Data &k, Data &v, Data &curInput, Data &curOutput,
-                        int qNum, int kvNum, int headDim, int rotDim, float attentionScale,
-                        const Data &positionIds, Data &sinData, Data &cosData,
-                        std::vector <Data*> &keys, std::vector <Data*> &values, std::vector <Data*> &masks, 
-                        Data &output);
+        bool doQKNorm, Data &qNorm, Data &kNorm, float eps,
+        Data &qkv, Data &q, Data &k, Data &v,
+        int qNum, int kvNum, int headDim, int rotDim, float attentionScale,
+        const Data &positionIds, Data &sinData, Data &cosData,
+        std::vector <Data*> &keys, std::vector <Data*> &values, std::vector <Data*> &masks, 
+        Data &output);
 
     bool CanRunMLP();
 
@@ -701,7 +900,37 @@ namespace fastllm {
 
     void Repeat(const Data &input, int axis, int repeatTimes, Data &output);
 
+    void Copy(const Data &input, Data &output);
+
+    void DeepSeekV4HcPre(const Data &input, Data &hcFn, Data &hcScale, Data &hcBase,
+                         int hcMult, int sinkhornIters, float eps, float normEps,
+                         Data &output, Data &post, Data &comb);
+
+    void DeepSeekV4HcPost(const Data &input, const Data &residual, const Data &post, const Data &comb, Data &output);
+
+    void ScaleQRatory(Data &q, float eps, int ropeDim, float ropeBase, int startPos,
+                      int originalSeqLen, float ropeFactor, int betaFast, int betaSlow);
+
+    void DeepSeekV4RotaryQuant(Data &x, int ropeDim, float ropeBase, int startPos,
+                               int originalSeqLen, float ropeFactor, int betaFast, int betaSlow,
+                               int quantDim, int blockSize, int posStep = 1);
+
+    void DeepSeekV4WoA(Data &o, Data &woA, int groups, int oRank, Data &output);
+
+    void DeepSeekV4BuildCompressedKVFromRaw(const Data &kv, const Data &score,
+                                            Data &ape, Data &normWeight,
+                                            int rawTokenBase, int rawLen,
+                                            int blockStart, int blockCount,
+                                            int compressRatio, int headDim,
+                                            int ropeDim, float ropeBase,
+                                            float ropeFactor, int betaFast,
+                                            int betaSlow, int originalSeqLen,
+                                            bool overlap, bool preferCudaOutput,
+                                            Data &cache);
+
     void Cat(const Data &input0, const Data &input1, int axis, Data &output);
+
+    void Pad(const Data &input, int axis, int padSize, Data &output);
 
     void CatDirect(Data &input0, const Data &input1, int axis); // 直接把input1的数据拷贝到input0后面（需要input0提前扩容了足够的空间）
 
@@ -727,11 +956,15 @@ namespace fastllm {
     
     void GeluNew(const Data &input, Data &output);
 
+    void Geglu(const fastllm::Data &input, fastllm::Data &output);
+
     void Swiglu(const fastllm::Data &input, fastllm::Data &output);
 
     void SwigluGptOss(const fastllm::Data &input, fastllm::Data &output);
 
     void MambaSoftplus(const Data &input, Data &aLog, Data &dtBias, Data &output);
+
+    void SigmoidMambaSoftplus(Data &sigmoidInputOutput, const Data &softplusInput, Data &aLog, Data &dtBias, Data &softplusOutput);
 
     void Mul(const Data &input, float v, Data &output);
 
@@ -742,6 +975,10 @@ namespace fastllm {
     void TransferAttn(Data &input);
 
     void RecurrentGatedDeltaRule(Data &q, Data &k, Data &v, Data &g, Data &b, 
+                                Data &last_recurrent_state, Data &core_attn_out, float qScale = 1.0f);
+
+    void ChunkGatedDeltaRulePrefill(Data &q, Data &k, Data &v, Data &g,
+                                Data &attn, Data &k_cumdecay,
                                 Data &last_recurrent_state, Data &core_attn_out);
 
     void AddTo(Data &input0, const Data &input1, float alpha = 1.0); // input0 += input1 * alpha
@@ -758,6 +995,8 @@ namespace fastllm {
 
     void TopK(const Data &input, Data &output, int topK); // 求topk
 
+    void SelectExpert(const Data &logits, Data &index, Data &score, int topk, bool needNorm = false, float routeScale = 1.0f, const Data *gateBias = nullptr); // MOE专家选择
+
     void RotatePosition2D(Data &input, const Data &positionIds, Data &sinData, Data &cosData, int rotaryDim); // 2D position
 
     void NearlyRotatePosition2D(Data &input, const Data &positionIds, Data &sinData, Data &cosData, int rotaryDim, int positionStride = 1); // 2D position embedding, 相邻的维度旋转
@@ -766,6 +1005,51 @@ namespace fastllm {
 
     void LlamaRotatePosition2DPart(Data &input, const Data &positionIds, Data &sinData, Data &cosData, int rotaryDim, int part); // 2D position embedding for llama，前后各一半的维度旋转
 
+    void RopeEncoding(Data &input, const Data &positionIds, int rotaryDim, float ropeTheta, float ropeScale); // RoPE encoding，直接用rope_theta和rope_scale计算，无需sin/cos缓存
+
+    void Llama3RopeEncoding(Data &input, const Data &positionIds, int rotaryDim, float ropeTheta,
+                            float factor, float originalMaxPosition,
+                            float lowFreqFactor, float highFreqFactor);
+
+    void Qwen35InterleavedRope(Data &input, const Data &positionIds, int rotaryDim,
+                               int sectionT, int sectionH, int sectionW,
+                               float ropeTheta, float ropeScale); // Qwen3.5 interleaved MRoPE
+
+    // 在 qkv 拼接张量上融合执行 RMSNorm + RoPE（仅对 q 和 k 部分），v 不处理
+    void QKVRMSNormRope(Data &qkv, Data &qNormWeight, Data &kNormWeight,
+                        const Data &positionIds, int q_heads, int k_heads, int head_dim,
+                        int rotaryDim, float eps, float ropeTheta, float ropeScale);
+
+    // 融合 QKVRMSNormRope + Split KV + AppendPagedCacheBatch（K/V直接写入paged cache，Q单独输出）
+    // qkv: [bs, seqlen, (q_heads + k_heads + v_heads) * head_dim]
+    // qOutput: 输出Q，布局为 [bs * q_heads, seqlen, head_dim]（已做Permute）
+    // pagedKCacheData / pagedVCacheData: paged cache manager (作为Data传入)
+    // insertIndexs / insertPositions: 每个batch对应的page idx和page offset
+    // batch: 逻辑batch数（= insertIndexs长度，decode时每个token对应一个batch）
+    void QKVRMSNormRopeSplitAppendPagedCache(
+        Data &qkv, Data &qNormWeight, Data &kNormWeight,
+        const Data &positionIds, 
+        Data &qOutput,
+        Data &pagedKCacheData, Data &pagedVCacheData,
+        Data &insertIndexs, Data &insertPositions,
+        int q_heads, int k_heads, int head_dim,
+        int rotaryDim, float eps, float ropeTheta, float ropeScale,
+        int pageLen, int batch, bool doQKNorm = true, Data *lastPageLens = nullptr);
+
+    void Step3p5QKVRMSNormRopeSplitAppendPagedCache(
+        Data &qkv, Data &qNormWeight, Data &kNormWeight,
+        const Data &positionIds,
+        Data &qOutput,
+        Data &pagedKCacheData, Data &pagedVCacheData,
+        Data &insertIndexs, Data &insertPositions,
+        int q_heads, int k_heads, int head_dim,
+        int rotaryDim, float eps, float ropeTheta,
+        bool useLlama3, float llama3Factor,
+        float llama3OriginalMaxPosition,
+        float llama3LowFreqFactor,
+        float llama3HighFreqFactor,
+        int pageLen, int batch, Data *lastPageLens = nullptr);
+
     void RepeatPenalty(Data &input, const Data &penalty, const Data &penaltyScale); // 重复惩罚
 
     void ApplyLognAttn(Data &input, const Data &lognAttn, const Data &positionIds);
@@ -773,6 +1057,8 @@ namespace fastllm {
     void CumSumLastDim(Data &input);
 
     void MakeDecayMask(Data &input, Data &output);
+
+    void ApplyChunkDecayByLastLogG(Data &input, const Data &g);
 
     void MulBatch(std::vector <Data*> &input, float v, std::vector <Data*> &output);
 
@@ -795,6 +1081,59 @@ namespace fastllm {
 
     void IA3Layer(Data &input, Data &weight, Data &ia3_l, Data &bias, Data &output,
                   std::map <std::string, std::string> ia3Config);
+
+    PagedCacheManager* AllocatePagedCacheManager(int layerIndex, 
+        PagedCacheManager::PagedCacheManagerType type, 
+        const Data &cacheData, 
+        int pageLen =  -1, 
+        int maxPages = -1);
+
+    PagedCacheManager* GetPagedCacheManager(int layerIndex);
+
+    void ClearAllPagedCacheManagers();
+
+    void AppendPagedCache(PagedCacheManager &pagedCacheManager, Data &cache, const Data &input);
+    
+    // 从batch个pastKey中生成AppendPagedCacheBatch所需要的insertIndexs和insertPositions
+    // pastKeys: batch个pastKey的列表，每个元素是一个Data*
+    // batch: 批量大小
+    // insertIndexs: 是INT32PARAM，长度为(batch), 第i个询问的插入的page id为insertIndexs[i]
+    // insertPositions: 是INT32PARAM，长度为(batch), 第i个询问的插入位置为insertPositions[i]
+    void GenerateAppendPagedCacheBatchParams(PagedCacheManager &pagedCacheManager, 
+        const std::vector<Data*> &pastKeys, int batch, 
+        Data &insertIndexs, Data &insertPositions);
+
+    // 将input中的数据插入到pagedCacheManager中, 用于decode，每个batch的seqlen都是1
+    // pagedCacheManager: PagedCacheManager
+    // currentCaches: batch个caches的列表，每个元素是一个Data*
+    // input: 输入数据，维度为[batch, num_heads, head_dim]
+    // insertIndexs: 是INT32PARAM，长度为(batch), 第i个询问的插入的page id为insertIndexs[i]
+    // insertPositions: 是INT32PARAM，长度为(batch), 第i个询问的插入位置为insertPositions[i]
+    void AppendPagedCacheBatch(PagedCacheManager &pagedCacheManager, const std::vector<Data*> &currentCaches, const Data &input, 
+        Data &insertIndexs, Data &insertPositions);
+
+    void AttentionPaged(const Data &q, const Data &k, const Data &v, Data &output,
+        int group, float scale, int attentionType, bool inited = false);
+
+    // 这里一般都是Decode部分，q中所有batch的seqlen都是1
+    // kCaches, vCaches: 总的PagedKVCache
+    // qSizes: 是INT32PARAM，长度为(batch + 1), 第i个询问位于q的[qSizes[i], qSizes[i+1])范围内
+    // pageSizes: 是INT32PARAM，长度为(batch + 1), 第i个询问缓存于pageIndexs[pageSizes[i] : pageSizes[i + 1]]
+    // pageIndexs: 是INT32PARAM，长度为所有询问使用的pages数目之和
+    // lastPageLens: 是INT32PARAM，长度为(batch), 第i个询问的最后一个page的长度为lastPageLens[i]
+    void AttentionPagedBatch(const Data &q, const Data &kCaches, const Data &vCaches, 
+        const Data &qSizes, const Data &pageSizes, const Data &pageIndexs, const Data &lastPageLens, 
+        Data &output, int group, float scale, int attentionType, bool inited = false, bool sync = true);
+
+    // 从batch个pastKey中生成AttentionPagedBatch所需要的qSizes, pageSizes, pageIndexs, lastPageLens
+    // pastKeys: batch个pastKey的列表，每个元素是一个Data*
+    // q: query数据，维度为[num_heads, batch, head_dim]
+    // batch: 批量大小
+    // qSizes, pageSizes, pageIndexs, lastPageLens: 输出的参数
+    // seqLens: 可选，每个batch的seqLen（prefill时使用）。为空时每个batch的seqLen默认为1（decode）
+    void GeneratePagedBatchParams(const Data &q, const std::vector<Data*> &pastKeys, 
+        int batch, Data &qSizes, Data &pageSizes, Data &pageIndexs, Data &lastPageLens,
+        const std::vector<int> &seqLens = {}, bool lastPageLensOnDevice = false);
 }
 
 #endif //TEST_FASTLLM_H
