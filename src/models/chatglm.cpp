@@ -968,7 +968,7 @@ namespace fastllm {
                 return input;
             } else {
 #if defined(_WIN32) or defined(_WIN64)
-                return history + ("[Round " + std::to_string(round) + u8"]\n\n问：" + input + u8"\n\n答：");
+                return history + "[Round " + std::to_string(round) + "]\n\n" + reinterpret_cast<const char*>(u8"问：") + input + reinterpret_cast<const char*>(u8"\n\n答：");
 #else
                 return history + ("[Round " + std::to_string(round) + "]\n\n问：" + input + "\n\n答：");
 #endif
@@ -984,7 +984,7 @@ namespace fastllm {
 		if (GetVersion() == 2)
 			round++;
 #if defined(_WIN32) or defined(_WIN64)
-        return (history + ("[Round " + std::to_string(round) + u8"]\n\n问：" + input + u8"\n\n答：" + output + "\n"));
+        return history + "[Round " + std::to_string(round) + "]\n\n" + reinterpret_cast<const char*>(u8"问：") + input + reinterpret_cast<const char*>(u8"\n\n答：") + output + "\n";
 #else
         return (history + ("[Round " + std::to_string(round) + "]\n\n问：" + input + "\n\n答：" + output + "\n\n"));
 #endif

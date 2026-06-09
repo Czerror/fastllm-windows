@@ -2116,7 +2116,8 @@ namespace fastllm {
         
         // 为每个线程分配任务状态
         for (int i = 0; i < numThreads; i++) {
-            taskStates[i] = new (std::align_val_t{64}) TaskState();
+            taskStates[i] = (TaskState*)_aligned_malloc(sizeof(TaskState), 64);
+            new (taskStates[i]) TaskState();
             taskStates[i]->curr.store(0, std::memory_order_relaxed);
             taskStates[i]->end = 0;
             taskStates[i]->completed.store(false, std::memory_order_relaxed);

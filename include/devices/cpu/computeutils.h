@@ -35,6 +35,36 @@ namespace fastllm {
         void Run();
     };
 
+    // GateUp GEMM + CrossSwiglu 融合算子
+    // GEMM 输出是交错的 [gate, up] 布局 (k = interDim * 2)
+    // 在 GEMM 写出 [st, end) 列后，立即做 CrossSwiglu，并转换为 dstOutputDataType 写出到 dstOutputData
+    struct MultiThreadGemmAndCrossSwigluOp : MultiThreadBaseOp {
+        uint8_t *inputData;       // [n * m]
+        uint8_t *weightData;      // [k * m], k = interDim * 2
+        uint8_t *gateUpOutputData; // [n * k], 用于暂存 GEMM 结果
+        float *swigluOutputData;  // [n * interDim], Swiglu 中间结果（仅当 dstOutputData 非 nullptr 时用作临时缓冲）
+        uint8_t *dstOutputData;   // [n * interDim] 目标类型缓冲区，swiglu 后直接转换写出；nullptr 时行为同旧版
+        DataType inputDataType, weightDataType, gateUpOutputDataType, dstOutputDataType;
+        int n, m, k;              // k = interDim * 2
+        int st, end;              // GEMM 列范围 [st, end), 在当前 NUMA 分片内的局部偏移
+        int globalColOffset;      // 当前 NUMA 分片在全局 k 维度的起始列
+
+        MultiThreadGemmAndCrossSwigluOp(
+            uint8_t *inputData, DataType inputDataType,
+            uint8_t *weightData, DataType weightDataType,
+            uint8_t *gateUpOutputData, DataType gateUpOutputDataType,
+            float *swigluOutputData,
+            int n, int m, int k, int st, int end, int globalColOffset,
+            uint8_t *dstOutputData = nullptr, DataType dstOutputDataType = DataType::FLOAT32) :
+            inputData(inputData), inputDataType(inputDataType),
+            weightData(weightData), weightDataType(weightDataType),
+            gateUpOutputData(gateUpOutputData), gateUpOutputDataType(gateUpOutputDataType),
+            swigluOutputData(swigluOutputData),
+            dstOutputData(dstOutputData), dstOutputDataType(dstOutputDataType),
+            n(n), m(m), k(k), st(st), end(end), globalColOffset(globalColOffset) {}
+        void Run();
+    };
+
     struct MultiThreadReduceBatchOp : MultiThreadBaseOp {
         uint8_t *downOutData;
         DataType downOutDataType;
@@ -202,6 +232,44 @@ namespace fastllm {
         void Run();
     };
 
+    struct MultiThreadLinearBFloat16NVFP4Op : MultiThreadBaseOp {
+        uint16_t *inputData;
+        uint8_t *weightData;
+        float *biasData, *outputData;
+        int n, m, k, st, end;
+        int blockK, blockM;
+        float *scales;
+        uint8_t *scaleBytes;
+
+        MultiThreadLinearBFloat16NVFP4Op(uint16_t *inputData, uint8_t *weightData, float *biasData, float *outputData,
+                int n, int m, int k, int st, int end,
+                float *scales, uint8_t *scaleBytes, int blockK, int blockM) :
+            inputData(inputData), weightData(weightData), biasData(biasData), outputData(outputData),
+            n(n), m(m), k(k), st(st), end(end),
+            scales(scales), scaleBytes(scaleBytes), blockK(blockK), blockM(blockM) {}
+
+        void Run();
+    };
+
+    struct MultiThreadLinearFloat32NVFP4Op : MultiThreadBaseOp {
+        float *inputData;
+        uint8_t *weightData;
+        float *biasData, *outputData;
+        int n, m, k, st, end;
+        int blockK, blockM;
+        float *scales;
+        uint8_t *scaleBytes;
+
+        MultiThreadLinearFloat32NVFP4Op(float *inputData, uint8_t *weightData, float *biasData, float *outputData,
+                int n, int m, int k, int st, int end,
+                float *scales, uint8_t *scaleBytes, int blockK, int blockM) :
+            inputData(inputData), weightData(weightData), biasData(biasData), outputData(outputData),
+            n(n), m(m), k(k), st(st), end(end),
+            scales(scales), scaleBytes(scaleBytes), blockK(blockK), blockM(blockM) {}
+
+        void Run();
+    };
+
     struct MultiThreadLinearInt8Int8Op : MultiThreadBaseOp {
         uint8_t *a;
         uint8_t *b;
@@ -270,6 +338,12 @@ namespace fastllm {
     void LaunchLinearBFloat16FP8E4M3(uint16_t *inputData, Data &weight, float *outputData, float *biasData, 
                                 int n, int m, int k, 
                                 std::vector<fastllm::MultiThreadBaseOp*> &ops, AliveThreadPool *pool, int startTid, int threadNum);
+    void LaunchLinearBFloat16NVFP4(uint16_t *inputData, Data &weight, float *outputData, float *biasData,
+                                int n, int m, int k,
+                                std::vector<fastllm::MultiThreadBaseOp*> &ops, AliveThreadPool *pool, int startTid, int threadNum);
+    void LaunchLinearFloat32NVFP4(float *inputData, Data &weight, float *outputData, float *biasData,
+                                int n, int m, int k,
+                                std::vector<fastllm::MultiThreadBaseOp*> &ops, AliveThreadPool *pool, int startTid, int threadNum);
     void LaunchLinearBFloat16BFloat16(uint16_t *inputData, Data &weight, float *outputData, float *biasData, 
                                 int n, int m, int k, 
                                 std::vector<fastllm::MultiThreadBaseOp*> &ops, AliveThreadPool *pool, int startTid, int threadNum);
@@ -292,6 +366,12 @@ namespace fastllm {
     void RunLinearBFloat16BFloat16(uint16_t *inputData, uint16_t *weightData, float *outputData, float *biasData, 
                                 int n, int m, int k, 
                                 AliveThreadPool *pool, int startTid, int threadNum);
+    void RunLinearBFloat16FP8E4M3(uint16_t *inputData, Data &weight, float *outputData, float *biasData,
+                                int n, int m, int k,
+                                AliveThreadPool *pool, int startTid, int threadNum);
+    void RunLinearBFloat16NVFP4(uint16_t *inputData, Data &weight, float *outputData, float *biasData,
+                                int n, int m, int k,
+                                AliveThreadPool *pool, int startTid, int threadNum);
     void RunLinearInt8Int8(uint8_t *a, uint8_t *b, float *c, int n, int m, int k, 
                             int *weightSums, int *weightZeros, float *scales, float *bias,
                             float *inputSums, float *iscales, float *izeros,
@@ -305,6 +385,9 @@ namespace fastllm {
                             AliveThreadPool *pool, int startTid, int threadNum);
     void RunLinearFloat32FP8E4M3(float *inputData, Data &weight, float *outputData, float *biasData, 
                             int n, int m, int k, 
+                            AliveThreadPool *pool, int startTid, int threadNum);
+    void RunLinearFloat32NVFP4(float *inputData, Data &weight, float *outputData, float *biasData,
+                            int n, int m, int k,
                             AliveThreadPool *pool, int startTid, int threadNum);
     void RunLinearFloat32Int4Group(float *inputData, Data &weight, float *outputData, float *biasData, 
                             int n, int m, int k, int group, int groupCnt,
@@ -327,6 +410,9 @@ namespace fastllm {
                             AliveThreadPool *pool, int startTid, int threadNum);
     void RunLinearFloat16FP8E4M3(uint16_t *inputData, Data &weight, uint16_t *outputData, float *biasData, 
                             int n, int m, int k, 
+                            AliveThreadPool *pool, int startTid, int threadNum);
+    void RunLinearFloat16NVFP4(uint16_t *inputData, Data &weight, uint16_t *outputData, float *biasData,
+                            int n, int m, int k,
                             AliveThreadPool *pool, int startTid, int threadNum);
     void RunLinearFloat16GGUF(uint16_t *inputData, uint8_t *weightData, uint16_t *outputData, float *biasData, 
                             Data *weight, int n, int m, int k, 

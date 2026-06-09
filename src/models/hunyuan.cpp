@@ -118,8 +118,8 @@ namespace fastllm {
                     WeightMergeRule({WeightMergeRuleSingle({w1WeightName, w3WeightName}, swigluWeightName, std::string("linearSwiglu"))})
                 );
 
-                this->specialWeights[swigluWeightName] = "linearSwiglu";
-                this->specialWeights[downWeightName] = "linearColumn";
+                this->AddSpecialWeight(swigluWeightName, "linearSwiglu", i);
+                this->AddSpecialWeight(downWeightName, "linearColumn", i);
                 
                 this->moeLinears.insert(w1WeightName);
                 this->moeLinears.insert(w3WeightName);
@@ -229,11 +229,13 @@ namespace fastllm {
                 keys.push_back(&pastKeyValues[i].first);
                 values.push_back(&pastKeyValues[i].second);
                 masks.push_back((Data*)&attentionMask);
+                Data empty;
                 MergeAttention (
                     attenInputTemp, 
                     weight[mergeQkvWeightName], weight[mergeQkvBiasName], 
                     weight[oWeightName], weight[oBiasName],
-                    qkv, q, k, v, curInput, curOutput,
+                    false, empty, empty, 1e-5, 
+                    qkv, q, k, v,
                     num_attention_heads, num_key_value_heads, head_dim, rotary_dim, 1.0 / sqrt(head_dim),
                     positionIds, *sinDataPtr, *cosDataPtr, 
                     keys, values, masks, w1
@@ -351,16 +353,21 @@ namespace fastllm {
                 bool needNorm = true;
                 Softmax(routerLogits, routerLogits, -1);
 
-                ApplyDeviceMap(this->moeDeviceMap, i + 1, block_cnt);
+                Data expertIndex, expertScore;
+                if (weight.weight.find("model.layers." + std::to_string(i) + ".mlp.experts.0.gateup_proj.weight") != weight.weight.end() 
+                    && CanRunMergeMOE(attenInput, biass[i])) {
+                    SelectExpert(routerLogits, expertIndex, expertScore, this->num_experts_per_tok, needNorm, 
+                                this->routed_scaling_factor, weight.weight.find(gateBiasName) != weight.weight.end() ? &weight[gateBiasName] : nullptr);
+                }
+                this->ApplyMoeDeviceMapForLayer(i);
                 if (weight.weight.find("model.layers." + std::to_string(i) + ".mlp.experts.0.gateup_proj.weight") != weight.weight.end() 
                     && CanRunMergeMOE(attenInput, biass[i])) {
                     MergeMOE (
-                        attenInput, routerLogits, weight[gateBiasName],
+                        attenInput, expertIndex, expertScore,
                         weights[i], biass[i],
                         w1, w2, w3, tempInput, tempOutput,
-                        this->routed_scaling_factor, 1.0f,
-                        this->num_experts_per_tok, needNorm,
-                        moeFinal
+                        1.0f,
+                        moeFinal, i
                     );           
                 } else {
                     ErrorInFastLLM("Unsupport moe.\n");
@@ -738,16 +745,21 @@ namespace fastllm {
                 bool needNorm = true;
                 Softmax(routerLogits, routerLogits, -1);
 
-                ApplyDeviceMap(this->moeDeviceMap, i + 1, block_cnt);
+                Data expertIndex, expertScore;
+                if (weight.weight.find("model.layers." + std::to_string(i) + ".mlp.experts.0.gateup_proj.weight") != weight.weight.end() 
+                    && CanRunMergeMOE(attenInput, biass[i])) {
+                    SelectExpert(routerLogits, expertIndex, expertScore, this->num_experts_per_tok, needNorm, 
+                                this->routed_scaling_factor, weight.weight.find(gateBiasName) != weight.weight.end() ? &weight[gateBiasName] : nullptr);
+                }
+                this->ApplyMoeDeviceMapForLayer(i);
                 if (weight.weight.find("model.layers." + std::to_string(i) + ".mlp.experts.0.gateup_proj.weight") != weight.weight.end() 
                     && CanRunMergeMOE(attenInput, biass[i])) {
                     MergeMOE (
-                        attenInput, routerLogits, weight[gateBiasName],
+                        attenInput, expertIndex, expertScore,
                         weights[i], biass[i],
                         w1, w2, w3, tempInput, tempOutput,
-                        this->routed_scaling_factor, 1.0f,
-                        this->num_experts_per_tok, needNorm,
-                        moeFinal
+                        1.0f,
+                        moeFinal, i
                     );
                 } else {
                     ErrorInFastLLM("error\n");
@@ -891,18 +903,18 @@ namespace fastllm {
     }
 
     void HunyuanModel::WarmUp() {
-        EmitWarmUpLog();
+        printf("Warmup...\n");
         int oldTopk = this->num_experts_per_tok;
         this->num_experts_per_tok = this->num_experts;
 
         Data inputIds = Data(DataType::FLOAT32, {1, 1}, {1});
-        Data attentionMask = Data(DataType::FLOAT32, {1, 1}, {0});
-        Data positionIds = Data(DataType::FLOAT32, {1, 1}, {0, 0});
+        Data attentionMask = Data(this->dataType, {1, 1}, {0});
+        Data positionIds = Data(this->dataType, {1, 1}, {0, 0});
 
         std::vector <std::pair <Data, Data> > pastKeyValues;
         for (int i = 0; i < block_cnt; i++) {
-            pastKeyValues.push_back(std::make_pair(Data(DataType::FLOAT32),
-                                                   Data(DataType::FLOAT32)));
+            pastKeyValues.push_back(std::make_pair(Data(this->dataType),
+                                                   Data(this->dataType)));
         }
         if (this->weight.weight.find("lm_head.weight") == this->weight.weight.end()) {
             this->weight["lm_head.weight"] = Data();
@@ -913,5 +925,6 @@ namespace fastllm {
         elementsInKVCachePerToken = (long long)block_cnt * 
             (pastKeyValues[0].first.dims[0] * pastKeyValues[0].first.dims[2] + 
              pastKeyValues[0].second.dims[0] * pastKeyValues[0].second.dims[2]);
+        printf("finish.\n");
     }
 }

@@ -7,10 +7,23 @@
 #include <cctype>
 #include <cstring>
 #include <cstdlib>
+#ifdef _WIN32
 #include <fcntl.h>
+#include <io.h>
+#include <sys/types.h>
+using ssize_t = long long;
+static inline int pread(int fd, void *buf, size_t count, long long offset) {
+    _lseeki64(fd, offset, SEEK_SET);
+    return _read(fd, buf, (unsigned int)count);
+}
+#define open _open
+#define close _close
+#else
+#include <fcntl.h>
+#include <unistd.h>
+#endif
 #include <mutex>
 #include <set>
-#include <unistd.h>
 #include <unordered_map>
 #include <unordered_set>
 

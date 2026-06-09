@@ -24,13 +24,13 @@ namespace fastllm {
         this->canDoBatchForward = false;
         this->model_type = "qwen3_next";
         this->model_struct = "qwen3_next";
+        this->defaultChunkedPrefillSize = 2048;
 
-        // 使用Qwen/ChatML格式的提示词模板
-        // <|im_start|>system\n{system}<|im_end|>\n<|im_start|>user\n{user}<|im_end|>\n<|im_start|>assistant\n{assistant}<|im_end|>
-        this->pre_prompt = "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n";
-        this->user_role = "<|im_start|>user\n";
-        this->bot_role = "<|im_end|>\n<|im_start|>assistant\n";
-        this->history_sep = "<|im_end|>\n";
+        // 默认使用alpaca的提示词和instruction
+        this->pre_prompt = "Below is an instruction that describes a task. Write a response that appropriately completes the request.\n\n";
+        this->user_role = "### Instruction:\n";
+        this->bot_role = "\n\n### Response:";
+        this->history_sep = "</s>";
 
         block_cnt = 32;
         rotary_dim = 128;
@@ -141,8 +141,8 @@ namespace fastllm {
                 );
 
                 if (j != -1) {
-                    this->specialWeights[swigluWeightName] = "linearSwiglu";
-                    this->specialWeights[downWeightName] = "linearColumn";
+                    this->AddSpecialWeight(swigluWeightName, "linearSwiglu", i);
+                    this->AddSpecialWeight(downWeightName, "linearColumn", i);
                 }
                 
                 if (j != -1) {
@@ -189,18 +189,22 @@ namespace fastllm {
         return ForwardBatch(1, inputIds, attentionMask, positionIds, pastKeyValues, generationConfig, lastTokens, &batchLogits)[0];
     }
 
-    void FakePad(Data &input, Data &output, int axis, int dim) {
-        if (dim == 0) {
-            Mul(input, 1.0f, output);
-            return;
+    static DataType Qwen3NextLinearAttentionCacheDataType(DataType modelType) {
+        if (modelType == DataType::FLOAT32 ||
+            modelType == DataType::FLOAT16 ||
+            modelType == DataType::BFLOAT16) {
+            return modelType;
         }
-        Data temp;
-        std::vector <int> dims = input.dims;
-        dims[axis] = dim;
-        temp.Resize(dims);
-        temp.Allocate(0.0f);
-        ToDataType(temp, input.dataType);
-        Cat(input, temp, axis, output);
+        return DataType::FLOAT16;
+    }
+
+    static void Qwen3NextPrepareLinearAttentionCache(Data &cache, DataType cacheType) {
+        cache.isKVCache = true;
+        cache.isLinearAttention = true;
+        if (cache.dims.empty() && cache.dataType != cacheType) {
+            cache.dataType = cacheType;
+            cache.UpdateUnitSize();
+        }
     }
 
     void Add1(Data &input) {
@@ -278,7 +282,7 @@ namespace fastllm {
             if (GetKVCacheInCPU()) {
                 pastKey.lockInCPU = true;
                 pastValue.lockInCPU = true;
-            }
+            } 
 
             if (weight.weight.find("model.layers." + std::to_string(i) + ".self_attn.o_proj.weight") != weight.weight.end()) {
                 std::string qWeightName = "model.layers." + std::to_string(i) + ".self_attn.q_proj.weight";
@@ -379,7 +383,9 @@ namespace fastllm {
                 Linear(qkv, weight[oWeightName], oBias, attenInput);
             } else {
                 Data &pastKey = pastKeyValues[i].first, &pastValue = pastKeyValues[i].second;
-                pastKey.isLinearAttention = pastValue.isLinearAttention = true;
+                DataType linearCacheType = Qwen3NextLinearAttentionCacheDataType(this->dataType);
+                Qwen3NextPrepareLinearAttentionCache(pastKey, linearCacheType);
+                Qwen3NextPrepareLinearAttentionCache(pastValue, linearCacheType);
                 std::string qkvzWeightName = "model.layers." + std::to_string(i) + ".linear_attn.in_proj_qkvz.weight";
                 std::string qkvzBiasName = "model.layers." + std::to_string(i) + ".linear_attn.in_proj_qkvz.bias";
                 std::string baWeightName = "model.layers." + std::to_string(i) + ".linear_attn.in_proj_ba.weight";
@@ -537,11 +543,11 @@ namespace fastllm {
                     Data qtemp, qq, kk, vv, bb, gg, decayMask;
                     {
                         // pad 
-                        FakePad(q, qtemp, 2, pad_size); // query = F.pad(query, (0, 0, 0, pad_size))
-                        FakePad(k, kk, 2, pad_size); // key = F.pad(key, (0, 0, 0, pad_size))
-                        FakePad(v, vv, 2, pad_size); // value = F.pad(value, (0, 0, 0, pad_size))
-                        FakePad(b, bb, 2, pad_size); // beta = F.pad(beta, (0, pad_size))
-                        FakePad(g, gg, 2, pad_size); // g = F.pad(g, (0, pad_size))
+                        Pad(q, 2, pad_size, qtemp); // query = F.pad(query, (0, 0, 0, pad_size))
+                        Pad(k, 2, pad_size, kk); // key = F.pad(key, (0, 0, 0, pad_size))
+                        Pad(v, 2, pad_size, vv); // value = F.pad(value, (0, 0, 0, pad_size))
+                        Pad(b, 2, pad_size, bb); // beta = F.pad(beta, (0, pad_size))
+                        Pad(g, 2, pad_size, gg); // g = F.pad(g, (0, pad_size))
                     }
 
                     int tot_heads = seq + pad_size;
@@ -709,14 +715,16 @@ namespace fastllm {
                     MulTo(moeFinal2, sharedGate);
                 }
                 
-                ApplyDeviceMap(this->moeDeviceMap, i + 1, block_cnt);
+                Data expertIndex, expertScore;
+                SelectExpert(routerLogits, expertIndex, expertScore, this->num_experts_per_tok, needNorm, 
+                            this->routed_scaling_factor, weight.weight.find(gateBiasName) != weight.weight.end() ? &weight[gateBiasName] : nullptr);
+                this->ApplyMoeDeviceMapForLayer(i);
                 MergeMOE (
-                        attenInput, routerLogits, weight[gateBiasName],
+                        attenInput, expertIndex, expertScore,
                         weights[i], biass[i],
                         w1, w2, w3, tempInput, tempOutput,
-                        this->routed_scaling_factor, 1.0f,
-                        this->num_experts_per_tok, needNorm,
-                        moeFinal
+                        1.0f,
+                        moeFinal, i
                 );
 
                 moeFinal.Reshape(hiddenStates.dims);
@@ -1111,16 +1119,21 @@ namespace fastllm {
                 bool needNorm = true;
                 Softmax(routerLogits, routerLogits, -1);
 
-                ApplyDeviceMap(this->moeDeviceMap, i + 1, block_cnt);
+                Data expertIndex, expertScore;
+                if (weight.weight.find("model.layers." + std::to_string(i) + ".mlp.experts.0.gateup_proj.weight") != weight.weight.end() 
+                    && CanRunMergeMOE(attenInput, biass[i])) {
+                    SelectExpert(routerLogits, expertIndex, expertScore, this->num_experts_per_tok, needNorm, 
+                                this->routed_scaling_factor, weight.weight.find(gateBiasName) != weight.weight.end() ? &weight[gateBiasName] : nullptr);
+                }
+                this->ApplyMoeDeviceMapForLayer(i);
                 if (weight.weight.find("model.layers." + std::to_string(i) + ".mlp.experts.0.gateup_proj.weight") != weight.weight.end() 
                     && CanRunMergeMOE(attenInput, biass[i])) {
                     MergeMOE (
-                        attenInput, routerLogits, weight[gateBiasName],
+                        attenInput, expertIndex, expertScore,
                         weights[i], biass[i],
                         w1, w2, w3, tempInput, tempOutput,
-                        this->routed_scaling_factor, 1.0f,
-                        this->num_experts_per_tok, needNorm,
-                        moeFinal
+                        1.0f,
+                        moeFinal, i
                     );
                 } else {
                     Data &bias = weight[gateBiasName];                  
@@ -1335,18 +1348,18 @@ namespace fastllm {
     }
 
     void Qwen3NextModel::WarmUp() {
-        EmitWarmUpLog();        
+        printf("Warmup...\n");
         int oldTopk = this->num_experts_per_tok;
         this->num_experts_per_tok = this->num_experts;
 
         Data inputIds = Data(DataType::FLOAT32, {1, 4}, {0, 1, 2, 3});
-        Data attentionMask = Data(DataType::FLOAT32, {4, 4});
-        Data positionIds = Data(DataType::FLOAT32, {1, 4}, {0, 1, 2, 3});
+        Data attentionMask = Data(this->dataType, {4, 4});
+        Data positionIds = Data(this->dataType, {1, 4}, {0, 1, 2, 3});
 
         std::vector <std::pair <Data, Data> > pastKeyValues;
         for (int i = 0; i < block_cnt; i++) {
-            pastKeyValues.push_back(std::make_pair(Data(DataType::FLOAT32),
-                                                   Data(DataType::FLOAT32)));
+            pastKeyValues.push_back(std::make_pair(Data(this->dataType),
+                                                   Data(this->dataType)));
         }
         Forward(inputIds, attentionMask, positionIds, pastKeyValues);
         this->num_experts_per_tok = oldTopk;
@@ -1362,6 +1375,7 @@ namespace fastllm {
                     pastKeyValues[i].second.dims[0] * pastKeyValues[i].second.dims[2]);
             }
         }
+        printf("finish.\n");
     }
 }
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            
+

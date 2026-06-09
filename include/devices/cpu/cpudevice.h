@@ -12,6 +12,8 @@ namespace fastllm {
     void DoCpuLinearReshape(Data &input, Data &weight, Data &output);
     void DoCpuLinear(Data &input, Data &weight, const Data &bias, Data &output);
 
+    void DoCpuGegluReshape(Data &input, Data &output);
+    void DoCpuGeglu(Data &input, Data &output);
     void DoCpuSwigluReshape(Data &input, Data &output);
     void DoCpuSwiglu(Data &input, Data &output);
     
@@ -82,11 +84,71 @@ namespace fastllm {
         void Run();
     };
 
+    struct MultiThreadGegluOp : MultiThreadBaseOp {
+        float *input, *output;
+        int mid, len, n, inputStride, outputStride;
+
+        MultiThreadGegluOp (float *input, int mid, int len, float *output,
+                            int n, int inputStride, int outputStride) :
+            input(input), mid(mid), len(len), output(output),
+            n(n), inputStride(inputStride), outputStride(outputStride) {}
+
+        void Run();
+    };
+
+    struct MultiThreadCrossSwigluOp : MultiThreadBaseOp {
+        float *input, *output;
+        int mid, len, n, inputStride, outputStride;
+
+        MultiThreadCrossSwigluOp (float *input, int mid, int len, float *output,
+                             int n, int inputStride, int outputStride) :
+            input(input), mid(mid), len(len), output(output),
+            n(n), inputStride(inputStride), outputStride(outputStride) {}
+
+        void Run();
+    };
+
     struct MultiThreadSwigluFloat16Op : MultiThreadBaseOp {
         uint16_t *input, *output;
         int mid, len, n, inputStride, outputStride;
 
         MultiThreadSwigluFloat16Op (uint16_t *input, int mid, int len, uint16_t *output,
+                             int n, int inputStride, int outputStride) :
+            input(input), mid(mid), len(len), output(output),
+            n(n), inputStride(inputStride), outputStride(outputStride) {}
+
+        void Run();
+    };
+
+    struct MultiThreadGegluFloat16Op : MultiThreadBaseOp {
+        uint16_t *input, *output;
+        int mid, len, n, inputStride, outputStride;
+
+        MultiThreadGegluFloat16Op (uint16_t *input, int mid, int len, uint16_t *output,
+                             int n, int inputStride, int outputStride) :
+            input(input), mid(mid), len(len), output(output),
+            n(n), inputStride(inputStride), outputStride(outputStride) {}
+
+        void Run();
+    };
+
+    struct MultiThreadSwigluBFloat16Op : MultiThreadBaseOp {
+        uint16_t *input, *output;
+        int mid, len, n, inputStride, outputStride;
+
+        MultiThreadSwigluBFloat16Op (uint16_t *input, int mid, int len, uint16_t *output,
+                             int n, int inputStride, int outputStride) :
+            input(input), mid(mid), len(len), output(output),
+            n(n), inputStride(inputStride), outputStride(outputStride) {}
+
+        void Run();
+    };
+
+    struct MultiThreadGegluBFloat16Op : MultiThreadBaseOp {
+        uint16_t *input, *output;
+        int mid, len, n, inputStride, outputStride;
+
+        MultiThreadGegluBFloat16Op (uint16_t *input, int mid, int len, uint16_t *output,
                              int n, int inputStride, int outputStride) :
             input(input), mid(mid), len(len), output(output),
             n(n), inputStride(inputStride), outputStride(outputStride) {}
@@ -171,7 +233,17 @@ namespace fastllm {
     void SoftmaxMultiThread(float *input, int n, int m, int lastlen, AliveThreadPool *pool);
     void SwigluMultiThread(float *input, int mid, int len, float *output,
         int n, int inputStride, int outputStride, AliveThreadPool *pool);
+    void GegluMultiThread(float *input, int mid, int len, float *output,
+        int n, int inputStride, int outputStride, AliveThreadPool *pool);
     void SwigluMultiThreadFloat16(uint16_t *input, int mid, int len, uint16_t *output,
+        int n, int inputStride, int outputStride, AliveThreadPool *pool);
+    void GegluMultiThreadFloat16(uint16_t *input, int mid, int len, uint16_t *output,
+        int n, int inputStride, int outputStride, AliveThreadPool *pool);
+    void SwigluMultiThreadBFloat16(uint16_t *input, int mid, int len, uint16_t *output,
+        int n, int inputStride, int outputStride, AliveThreadPool *pool);
+    void GegluMultiThreadBFloat16(uint16_t *input, int mid, int len, uint16_t *output,
+        int n, int inputStride, int outputStride, AliveThreadPool *pool);
+    void CrossSwigluMultiThread(float *input, int mid, int len, float *output,
         int n, int inputStride, int outputStride, AliveThreadPool *pool);
     void SwigluGptOssMultiThread(float *input, int mid, int len, float *output,
         int n, int inputStride, int outputStride, AliveThreadPool *pool);
@@ -217,6 +289,15 @@ namespace fastllm {
         void Run(const std::string &opType, const DataDict &datas, const FloatDict &floatParams, const IntDict &intParams);
     };
 
+    class CpuToBFloat16 : BaseOperator {
+        void Run(const std::string &opType, const DataDict &datas, const FloatDict &floatParams, const IntDict &intParams);
+    };
+
+    class CpuConvertToBFloat16 : BaseOperator {
+        void Reshape(const std::string &opType, const DataDict &datas, const FloatDict &floatParams, const IntDict &intParams);
+        void Run(const std::string &opType, const DataDict &datas, const FloatDict &floatParams, const IntDict &intParams);
+    };
+
     class CpuAttention : BaseOperator {
         void Reshape(const std::string &opType, const DataDict &datas, const FloatDict &floatParams, const IntDict &intParams);
     protected:
@@ -233,7 +314,17 @@ namespace fastllm {
         void Run(const std::string &opType, const DataDict &datas, const FloatDict &floatParams, const IntDict &intParams);
     };
 
+    class CpuMergeMLAPaged : BaseOperator {
+        void Reshape(const std::string &opType, const DataDict &datas, const FloatDict &floatParams, const IntDict &intParams);
+        void Run(const std::string &opType, const DataDict &datas, const FloatDict &floatParams, const IntDict &intParams);
+    };
+
     class CpuEmbedding : BaseOperator {
+        void Reshape(const std::string &opType, const DataDict &datas, const FloatDict &floatParams, const IntDict &intParams);
+        void Run(const std::string &opType, const DataDict &datas, const FloatDict &floatParams, const IntDict &intParams);
+    };
+
+    class CpuEmbeddingDirect : BaseOperator {
         void Reshape(const std::string &opType, const DataDict &datas, const FloatDict &floatParams, const IntDict &intParams);
         void Run(const std::string &opType, const DataDict &datas, const FloatDict &floatParams, const IntDict &intParams);
     };
@@ -247,6 +338,10 @@ namespace fastllm {
     };
 
     class CpuRMSNormExOp : BaseOperator {
+        void Run(const std::string &opType, const DataDict &datas, const FloatDict &floatParams, const IntDict &intParams);
+    };
+
+    class CpuRMSNormPartOp : BaseOperator {
         void Run(const std::string &opType, const DataDict &datas, const FloatDict &floatParams, const IntDict &intParams);
     };
 
@@ -283,8 +378,51 @@ namespace fastllm {
         void Run(const std::string &opType, const DataDict &datas, const FloatDict &floatParams, const IntDict &intParams);
     };
 
+    class CpuPadOp : BaseOperator {
+        void Reshape(const std::string &opType, const DataDict &datas, const FloatDict &floatParams, const IntDict &intParams);
+        void Run(const std::string &opType, const DataDict &datas, const FloatDict &floatParams, const IntDict &intParams);
+    };
+
     class CpuRepeatOp : BaseOperator {
         void Reshape(const std::string &opType, const DataDict &datas, const FloatDict &floatParams, const IntDict &intParams);
+        void Run(const std::string &opType, const DataDict &datas, const FloatDict &floatParams, const IntDict &intParams);
+    };
+
+    class CpuCopyOp : BaseOperator {
+        void Run(const std::string &opType, const DataDict &datas, const FloatDict &floatParams, const IntDict &intParams);
+    };
+
+    class CpuDeepSeekV4HcPreOp : BaseOperator {
+        void Reshape(const std::string &opType, const DataDict &datas, const FloatDict &floatParams, const IntDict &intParams);
+        void Run(const std::string &opType, const DataDict &datas, const FloatDict &floatParams, const IntDict &intParams);
+    };
+
+    class CpuDeepSeekV4HcPostOp : BaseOperator {
+        void Reshape(const std::string &opType, const DataDict &datas, const FloatDict &floatParams, const IntDict &intParams);
+        void Run(const std::string &opType, const DataDict &datas, const FloatDict &floatParams, const IntDict &intParams);
+    };
+
+    class CpuScaleQRatoryOp : BaseOperator {
+        void Run(const std::string &opType, const DataDict &datas, const FloatDict &floatParams, const IntDict &intParams);
+    };
+
+    class CpuDeepSeekV4RotaryQuantOp : BaseOperator {
+        void Run(const std::string &opType, const DataDict &datas, const FloatDict &floatParams, const IntDict &intParams);
+    };
+
+    class CpuDeepSeekV4WoAOp : BaseOperator {
+        void Run(const std::string &opType, const DataDict &datas, const FloatDict &floatParams, const IntDict &intParams);
+    };
+
+    class CpuDeepSeekV4BuildCompressedKVFromRawOp : BaseOperator {
+        void Run(const std::string &opType, const DataDict &datas, const FloatDict &floatParams, const IntDict &intParams);
+    };
+
+    class CpuDeepSeekV4StoreWindowKVCacheOp : BaseOperator {
+        void Run(const std::string &opType, const DataDict &datas, const FloatDict &floatParams, const IntDict &intParams);
+    };
+
+    class CpuDeepSeekV4UpdateWindowKVCacheOp : BaseOperator {
         void Run(const std::string &opType, const DataDict &datas, const FloatDict &floatParams, const IntDict &intParams);
     };
 
@@ -339,7 +477,17 @@ namespace fastllm {
         void Run(const std::string &opType, const DataDict &datas, const FloatDict &floatParams, const IntDict &intParams);
     };
 
+    class CpuGegluOp : BaseOperator {
+        void Reshape(const std::string &opType, const DataDict &datas, const FloatDict &floatParams, const IntDict &intParams);
+        void Run(const std::string &opType, const DataDict &datas, const FloatDict &floatParams, const IntDict &intParams);
+    };
+
     class CpuSwigluOp : BaseOperator {
+        void Reshape(const std::string &opType, const DataDict &datas, const FloatDict &floatParams, const IntDict &intParams);
+        void Run(const std::string &opType, const DataDict &datas, const FloatDict &floatParams, const IntDict &intParams);
+    };
+
+    class CpuCrossSwigluOp : BaseOperator {
         void Reshape(const std::string &opType, const DataDict &datas, const FloatDict &floatParams, const IntDict &intParams);
         void Run(const std::string &opType, const DataDict &datas, const FloatDict &floatParams, const IntDict &intParams);
     };
@@ -373,6 +521,10 @@ namespace fastllm {
         void Run(const std::string &opType, const DataDict &datas, const FloatDict &floatParams, const IntDict &intParams);
     };
 
+    class CpuApplyChunkDecayByLastLogGOp : BaseOperator {
+        void Run(const std::string &opType, const DataDict &datas, const FloatDict &floatParams, const IntDict &intParams);
+    };
+
     class CpuRecurrentGatedDeltaRuleOp : BaseOperator {
         void Reshape(const std::string &opType, const DataDict &datas, const FloatDict &floatParams, const IntDict &intParams);
         void Run(const std::string &opType, const DataDict &datas, const FloatDict &floatParams, const IntDict &intParams);
@@ -399,6 +551,11 @@ namespace fastllm {
         void Run(const std::string &opType, const DataDict &datas, const FloatDict &floatParams, const IntDict &intParams);
     };
 
+    class CpuSelectExpertOp : BaseOperator {
+        void Reshape(const std::string &opType, const DataDict &datas, const FloatDict &floatParams, const IntDict &intParams);
+        void Run(const std::string &opType, const DataDict &datas, const FloatDict &floatParams, const IntDict &intParams);
+    };
+
     class CpuPermuteOp : BaseOperator {
         void Reshape(const std::string &opType, const DataDict &datas, const FloatDict &floatParams, const IntDict &intParams);
         void Run(const std::string &opType, const DataDict &datas, const FloatDict &floatParams, const IntDict &intParams);
@@ -421,6 +578,26 @@ namespace fastllm {
     };
 
     class CpuLlamaRotatePosition2DPartOp : BaseOperator {
+        void Run(const std::string &opType, const DataDict &datas, const FloatDict &floatParams, const IntDict &intParams);
+    };
+
+    class CpuRopeEncodingOp : BaseOperator {
+        void Run(const std::string &opType, const DataDict &datas, const FloatDict &floatParams, const IntDict &intParams);
+    };
+
+    class CpuLlama3RopeEncodingOp : BaseOperator {
+        void Run(const std::string &opType, const DataDict &datas, const FloatDict &floatParams, const IntDict &intParams);
+    };
+
+    class CpuQwen35InterleavedRopeOp : BaseOperator {
+        void Run(const std::string &opType, const DataDict &datas, const FloatDict &floatParams, const IntDict &intParams);
+    };
+
+    class CpuQKVRMSNormRopeOp : BaseOperator {
+        void Run(const std::string &opType, const DataDict &datas, const FloatDict &floatParams, const IntDict &intParams);
+    };
+
+    class CpuQKVRMSNormRopeSplitAppendPagedCacheOp : BaseOperator {
         void Run(const std::string &opType, const DataDict &datas, const FloatDict &floatParams, const IntDict &intParams);
     };
 
@@ -483,6 +660,43 @@ namespace fastllm {
     };
 
     class CpuAttentionBatchOp : BaseBatchOperator {
+        void Reshape(const std::string &opType, const DataDict &datas, const FloatDict &floatParams, const IntDict &intParams);
+        void Run(const std::string &opType, const DataDict &datas, const FloatDict &floatParams, const IntDict &intParams);
+    };
+
+    // 分页注意力
+    class CpuAttentionPagedOp : BaseOperator {
+        friend class CpuAttentionPagedBatchOp;
+        void Reshape(const std::string &opType, const DataDict &datas, const FloatDict &floatParams, const IntDict &intParams);
+        void Run(const std::string &opType, const DataDict &datas, const FloatDict &floatParams, const IntDict &intParams);
+    };
+
+    // 分页缓存追加
+    class CpuAppendPagedCacheOp : BaseOperator {
+        void Reshape(const std::string &opType, const DataDict &datas, const FloatDict &floatParams, const IntDict &intParams);
+        void Run(const std::string &opType, const DataDict &datas, const FloatDict &floatParams, const IntDict &intParams);
+    };
+
+    // 分页缓存批量追加
+    class CpuAppendPagedCacheBatchOp : BaseBatchOperator {
+        void Reshape(const std::string &opType, const DataDict &datas, const FloatDict &floatParams, const IntDict &intParams);
+        void Run(const std::string &opType, const DataDict &datas, const FloatDict &floatParams, const IntDict &intParams);
+    };
+
+    // 分页注意力批量
+    class CpuAttentionPagedBatchOp : BaseBatchOperator {
+        void Reshape(const std::string &opType, const DataDict &datas, const FloatDict &floatParams, const IntDict &intParams);
+        void Run(const std::string &opType, const DataDict &datas, const FloatDict &floatParams, const IntDict &intParams);
+    };
+
+    // 生成分页批量参数
+    class CpuGeneratePagedBatchParamsOp : BaseOperator {
+        void Reshape(const std::string &opType, const DataDict &datas, const FloatDict &floatParams, const IntDict &intParams);
+        void Run(const std::string &opType, const DataDict &datas, const FloatDict &floatParams, const IntDict &intParams);
+    };
+
+    // 生成 AppendPagedCacheBatch 所需的 insertIndexs、insertPositions
+    class CpuGenerateAppendPagedCacheBatchParamsOp : BaseOperator {
         void Reshape(const std::string &opType, const DataDict &datas, const FloatDict &floatParams, const IntDict &intParams);
         void Run(const std::string &opType, const DataDict &datas, const FloatDict &floatParams, const IntDict &intParams);
     };

@@ -859,23 +859,24 @@ namespace fastllm {
     }
 
     void MoeModel::WarmUp() {
-        EmitWarmUpLog();
+        printf("Warmup...\n");
         int oldTopk = this->num_experts_per_tok;
         this->num_experts_per_tok = this->num_experts;
 
         Data inputIds = Data(DataType::FLOAT32, {1, 1}, {1});
-        Data attentionMask = Data(DataType::FLOAT32, {1, 1}, {0});
-        Data positionIds = Data(DataType::FLOAT32, {1, 1}, {0, 0});
+        Data attentionMask = Data(this->dataType, {1, 1}, {0});
+        Data positionIds = Data(this->dataType, {1, 1}, {0, 0});
 
         std::vector <std::pair <Data, Data> > pastKeyValues;
         for (int i = 0; i < block_cnt; i++) {
-            pastKeyValues.push_back(std::make_pair(Data(DataType::FLOAT32),
-                                                   Data(DataType::FLOAT32)));
+            pastKeyValues.push_back(std::make_pair(Data(this->dataType),
+                                                   Data(this->dataType)));
         }
         Forward(inputIds, attentionMask, positionIds, pastKeyValues);
         this->num_experts_per_tok = oldTopk;
         elementsInKVCachePerToken = (long long)block_cnt * 
             (pastKeyValues[0].first.dims[0] * pastKeyValues[0].first.dims[2] + 
              pastKeyValues[0].second.dims[0] * pastKeyValues[0].second.dims[2]);
+        printf("finish.\n");
     }
 }
