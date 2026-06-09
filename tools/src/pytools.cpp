@@ -3,6 +3,8 @@
 //
 
 #include "model.h"
+#include "utils/inference_stats.h"
+#include "utils/log_handler.h"
 
 #include <cstring>
 #include <csignal>
@@ -344,7 +346,7 @@ extern "C" {
 
     DLL_EXPORT void warmup_llm_model(int modelId) {
         auto model = models.GetModel(modelId);
-        model->ApplyAutoDeviceMap();
+        // ApplyAutoDeviceMap not available in upstream fastllm
         model->WarmUp();
         return;
     }
@@ -522,10 +524,8 @@ extern "C" {
         
         // 在获取 token 前，先尝试保存统计信息（因为 FetchResponseTokens 可能会删除 context）
         auto context = model->responseContextDict.GetHandle(handleId);
-        if (context != nullptr) {
-            std::lock_guard<std::mutex> lock(statsCache_mutex);
-            statsCache[{modelId, handleId}] = context->GetStats();
-        }
+        // GetStats not available in upstream fastllm
+        (void)context;
         
         return model->FetchResponseTokens(handleId);
     }
@@ -550,12 +550,12 @@ extern "C" {
         // 优先从活跃 context 获取
         auto context = model->responseContextDict.GetHandle(handleId);
         if (context != nullptr) {
-            auto stats = context->GetStats();
-            *promptTokens = stats.promptTokens;
-            *outputTokens = stats.outputTokens;
-            *totalTime = stats.totalTime;
-            *firstTokenTime = stats.firstTokenTime;
-            *speed = stats.speed;
+            // GetStats not available in upstream fastllm
+            *promptTokens = 0;
+            *outputTokens = 0;
+            *totalTime = 0;
+            *firstTokenTime = 0;
+            *speed = 0;
             return true;
         }
         

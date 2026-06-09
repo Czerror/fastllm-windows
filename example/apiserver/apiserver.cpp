@@ -2220,13 +2220,7 @@ int main(int argc, char** argv) {
 
     // 显示系统信息
     console::printHeader("系统信息");
-    auto cpuFlags = fastllm::cpuInstructInfo.getFlags();
-    std::string enabledFlags;
-    if (cpuFlags.avx2) enabledFlags += "AVX2 ";
-    if (cpuFlags.avx512f) enabledFlags += "AVX512F ";
-    if (cpuFlags.avx512vnni) enabledFlags += "AVX512_VNNI ";
-    if (cpuFlags.avx512bf16) enabledFlags += "AVX512_BF16 ";
-    if (cpuFlags.amx) enabledFlags += "AMX ";
+    std::string enabledFlags = "(CPU capabilities display not available)";
     if (enabledFlags.empty()) enabledFlags = "无";
     console::printConfig("CPU 指令集", enabledFlags);
     if (config.threads > 0) {

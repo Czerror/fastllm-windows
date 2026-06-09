@@ -15,6 +15,61 @@
 #include <iomanip>
 
 namespace fastllm {
+
+// Log event types (used by log_handler)
+enum class LogEvent {
+    KVCacheConfig,
+    KVCacheHit,
+    KVCacheMiss,
+    ModelLoadProgress,
+    ModelLoadComplete,
+    WarmUp,
+    PrefillProgress,
+    PrefillComplete,
+    BatchStatus
+};
+
+enum class LogLevel {
+    Debug,
+    Info,
+    Warn,
+    Error
+};
+
+struct LogDataValue {
+    double kvCacheMB = 0;
+    int tokenLimit = 0;
+    int promptLimit = 0;
+    int total = 0;
+    int current = 0;
+    int cacheLen = 0;
+    int batchSize = 0;
+    double speed = 0;
+    double elapsed = 0;
+    int contextLen = 0;
+    int active = 0;
+    int pending = 0;
+    int cacheEntries = 0;
+    int device = 0;
+    int maxBatch = 0;
+    double skipPercent = 0;
+    bool isComplete = false;
+};
+
+struct LogData {
+    LogEvent event;
+    LogLevel level = LogLevel::Info;
+    LogDataValue data;
+    std::string message;
+    std::string tag;
+};
+
+using LogCallback = void(*)(const LogData&);
+
+inline void SetLogCallback(LogCallback) {
+    // Stub: log callback not implemented in this build
+}
+
 namespace log_handler {
 
 /**

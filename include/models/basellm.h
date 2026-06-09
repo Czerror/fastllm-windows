@@ -323,6 +323,7 @@ namespace fastllm {
 
         virtual void OnAutoWarmupFinished() {};
 
+
         virtual long long GetAutoWarmupCudaRuntimeReserveBytes(int deviceId, int batch) const { return 0; }
 
         virtual void WarmupCudaRuntimeBuffers(int batch) {}

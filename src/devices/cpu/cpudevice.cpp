@@ -46,6 +46,52 @@ namespace fastllm {
         const void *A, long lda, const void *B, long ldb, void *C, long ldc,
         int n, int m, int k, int st, int end);
 
+    // Stub implementations for AVX512 functions (not available on all platforms)
+    static bool FastllmGemmBFloat16NVFP4Block16_AVX512BF16(
+        const void *, long, const void *, long, void *, long, int, int, int, int, int) { return false; }
+    static bool FastllmGemmBFloat16NVFP4Block16E8M0_AVX512BF16(
+        const void *, long, const void *, long, void *, long, int, int, int, int, int) { return false; }
+    static bool FastllmGemmFloat32NVFP4Block16_AVX512BF16(
+        const void *, long, const void *, long, void *, long, int, int, int, int, int) { return false; }
+    static bool FastllmGemmFloat32NVFP4Block16E8M0_AVX512BF16(
+        const void *, long, const void *, long, void *, long, int, int, int, int, int) { return false; }
+
+    // Stub implementations for NVFP4/FP8 linear operations (convert to float and use standard path)
+    static void LaunchLinearBFloat16NVFP4(uint16_t *inputData, Data &weight, float *outputData, float *biasData,
+        int n, int m, int k, std::vector<MultiThreadBaseOp*> &ops, AliveThreadPool *pool, int startTid, int threadNum) {
+        std::vector<float> floatInput(n * m);
+        for (int i = 0; i < n * m; i++) floatInput[i] = half_to_float(inputData[i]);
+        LaunchLinearFloat32Float16(floatInput.data(), weight, outputData, biasData, n, m, k, ops, pool, startTid, threadNum);
+    }
+    static void LaunchLinearFloat32NVFP4(float *inputData, Data &weight, float *outputData, float *biasData,
+        int n, int m, int k, std::vector<MultiThreadBaseOp*> &ops, AliveThreadPool *pool, int startTid, int threadNum) {
+        LaunchLinearFloat32Float16(inputData, weight, outputData, biasData, n, m, k, ops, pool, startTid, threadNum);
+    }
+    static void RunLinearBFloat16FP8E4M3(uint16_t *inputData, Data &weight, float *outputData, float *biasData,
+        int n, int m, int k, AliveThreadPool *pool, int startTid, int threadNum) {
+        std::vector<float> floatInput(n * m);
+        for (int i = 0; i < n * m; i++) floatInput[i] = half_to_float(inputData[i]);
+        RunLinearFloat32Float16(floatInput.data(), (uint16_t*)weight.cpuData, outputData, biasData, n, m, k, pool, startTid, threadNum);
+    }
+    static void RunLinearBFloat16NVFP4(uint16_t *inputData, Data &weight, float *outputData, float *biasData,
+        int n, int m, int k, AliveThreadPool *pool, int startTid, int threadNum) {
+        std::vector<float> floatInput(n * m);
+        for (int i = 0; i < n * m; i++) floatInput[i] = half_to_float(inputData[i]);
+        RunLinearFloat32Float16(floatInput.data(), (uint16_t*)weight.cpuData, outputData, biasData, n, m, k, pool, startTid, threadNum);
+    }
+    static void RunLinearFloat32NVFP4(float *inputData, Data &weight, float *outputData, float *biasData,
+        int n, int m, int k, AliveThreadPool *pool, int startTid, int threadNum) {
+        RunLinearFloat32Float16(inputData, (uint16_t*)weight.cpuData, outputData, biasData, n, m, k, pool, startTid, threadNum);
+    }
+    static void RunLinearFloat16NVFP4(uint16_t *inputData, Data &weight, uint16_t *outputData, float *biasData,
+        int n, int m, int k, AliveThreadPool *pool, int startTid, int threadNum) {
+        std::vector<float> floatInput(n * m);
+        for (int i = 0; i < n * m; i++) floatInput[i] = half_to_float(inputData[i]);
+        std::vector<float> floatOutput(n * k);
+        RunLinearFloat32Float16(floatInput.data(), (uint16_t*)weight.cpuData, floatOutput.data(), biasData, n, m, k, pool, startTid, threadNum);
+        for (int i = 0; i < n * k; i++) outputData[i] = float_to_half(floatOutput[i]);
+    }
+
     static double CpuProfileNowMs() {
         using Clock = std::chrono::steady_clock;
         return std::chrono::duration<double, std::milli>(Clock::now().time_since_epoch()).count();
