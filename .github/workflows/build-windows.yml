@@ -41,6 +41,9 @@ on:
 env:
   BUILD_TYPE: Release
 
+permissions:
+  contents: write
+
 jobs:
   build-cpu:
     name: Build CPU Version
@@ -51,10 +54,12 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@v4  # 自动使用 v4.x 最新版本
       with:
-        submodules: recursive
+        submodules: true
     
-    - name: Setup MSVC
-      uses: microsoft/setup-msbuild@v2  # 自动使用 v2.x 最新版本
+    - name: Setup MSVC Developer Environment
+      uses: ilammy/msvc-dev-cmd@v1
+      with:
+        arch: x64
     
     - name: Setup Python
       uses: actions/setup-python@v5  # 自动使用 v5.x 最新版本
@@ -73,7 +78,7 @@ jobs:
       run: |
         mkdir build
         cd build
-        cmake .. -G "Visual Studio 17 2022" -A x64 `
+        cmake .. -A x64 `
           -DCMAKE_CXX_STANDARD=20 `
           -DCMAKE_CXX_STANDARD_REQUIRED=ON `
           -DCMAKE_CXX_EXTENSIONS=OFF `
@@ -179,10 +184,12 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@v4  # 自动使用 v4.x 最新版本
       with:
-        submodules: recursive
+        submodules: true
     
-    - name: Setup MSVC
-      uses: microsoft/setup-msbuild@v2  # 自动使用 v2.x 最新版本
+    - name: Setup MSVC Developer Environment
+      uses: ilammy/msvc-dev-cmd@v1
+      with:
+        arch: x64
     
     - name: Setup Python
       uses: actions/setup-python@v5  # 自动使用 v5.x 最新版本
@@ -215,7 +222,7 @@ jobs:
         $cudaArch = "${{ github.event.inputs.cuda_arch || '75;80;86;89;90;120' }}"
         mkdir build-cuda
         cd build-cuda
-        cmake .. -G "Visual Studio 17 2022" -A x64 `
+        cmake .. -A x64 `
           -DCMAKE_CXX_STANDARD=20 `
           -DCMAKE_CXX_STANDARD_REQUIRED=ON `
           -DCMAKE_CXX_EXTENSIONS=OFF `
@@ -338,12 +345,15 @@ jobs:
     needs: [build-cpu, build-cuda]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+      pull-requests: write
     
     steps:
     - name: Checkout for version
       uses: actions/checkout@v4  # 自动使用 v4.x 最新版本
       with:
-        submodules: recursive
+        submodules: true
         fetch-depth: 0
     
     - name: Get version and submodule info
@@ -471,6 +481,6 @@ jobs:
       uses: dev-drprasad/delete-older-releases@v0.3.4
       with:
         keep_latest: 2
-        delete_tags: true
+        delete_tags: false
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
