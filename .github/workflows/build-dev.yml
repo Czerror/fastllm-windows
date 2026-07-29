@@ -36,26 +36,6 @@ jobs:
         git config user.name "github-actions[bot]"
         git config user.email "github-actions[bot]@users.noreply.github.com"
     
-    - name: Apply Windows patches
-      shell: pwsh
-      run: |
-        Write-Host "=== Applying Windows patches ==="
-        git apply --whitespace=nowarn patches/source-patches/01-platform-abstraction.patch
-        git apply --whitespace=nowarn patches/source-patches/02-cuda-nccl-guard.patch
-        git apply --whitespace=nowarn patches/source-patches/03-template-tojson.patch
-        git apply --whitespace=nowarn patches/source-patches/04-pybinding-log.patch
-        git apply --whitespace=nowarn patches/source-patches/05-test-fixes.patch
-        git apply --whitespace=nowarn patches/source-patches/06-avx2-fastllm-log.patch
-        git apply --whitespace=nowarn patches/source-patches/07-pytools-adapt.patch
-        git apply --whitespace=nowarn patches/source-patches/08-python-tools.patch
-        git apply --whitespace=nowarn patches/source-patches/09-gitmodules.patch
-        Copy-Item patches/platform-layer/*.h include/utils/ -Force
-        Copy-Item patches/features/include/utils/* include/utils/ -Force
-        Copy-Item patches/features/src/chat_handler.cpp src/ -Force
-        Copy-Item patches/features/ftllm.cpp . -Force
-        Copy-Item patches/cmake/CMakeLists.windows.txt CMakeLists.txt -Force
-        Write-Host "=== Patches applied ==="
-    
     - name: Setup MSVC Developer Environment
       uses: ilammy/msvc-dev-cmd@v1
       with:
