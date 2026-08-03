@@ -112,7 +112,8 @@ jobs:
           echo "updated=false" >> $GITHUB_OUTPUT
         else
           echo "Submodules updated"
-          git add .
+          # 仅提交已跟踪的子模块指针变更,避免把 dev 步骤残留的子模块目录误带入 master
+          git add -u
           git commit -m "chore: Auto-update submodules" || true
           git push origin master
           echo "updated=true" >> $GITHUB_OUTPUT
