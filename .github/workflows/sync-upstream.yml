@@ -92,15 +92,13 @@ jobs:
 
         # checkout 未初始化子模块，需先 init
         git submodule update --init third_party/pybind11 third_party/sentencepiece
-        # 逐个尝试合并到远程分支最新版本；sentencepiece 固定为生产可编译版本，
-        # 若与上游无共同历史则保留固定版本，避免破坏 master 构建
-        for SUB in third_party/pybind11 third_party/sentencepiece; do
-          if git submodule update --remote --merge "$SUB" 2>/dev/null; then
-            echo "✓ $SUB 已更新到远程最新版本"
-          else
-            echo "⚠ $SUB 无法安全合并，保持当前固定版本"
-          fi
-        done
+        # 仅自动更新 pybind11；sentencepiece 固定为生产可编译版本 11051e3b,
+        # 最新版依赖的 Abseil 在 MSVC 无法编译,禁止自动跟随上游
+        if git submodule update --remote --merge third_party/pybind11 2>/dev/null; then
+          echo "✓ third_party/pybind11 已更新到远程最新版本"
+        else
+          echo "⚠ third_party/pybind11 无法安全合并，保持当前版本"
+        fi
 
         # 检查是否有变更
         if git diff --quiet; then
