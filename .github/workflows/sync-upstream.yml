@@ -94,8 +94,17 @@ jobs:
         git checkout master
         git pull origin master
 
-        # 更新子模块到远程最新版本（checkout 未初始化子模块，需先 init）
-        git submodule update --init --remote --merge
+        # checkout 未初始化子模块，需先 init
+        git submodule update --init third_party/pybind11 third_party/sentencepiece
+        # 逐个尝试合并到远程分支最新版本；sentencepiece 固定为生产可编译版本，
+        # 若与上游无共同历史则保留固定版本，避免破坏 master 构建
+        for SUB in third_party/pybind11 third_party/sentencepiece; do
+          if git submodule update --remote --merge "$SUB" 2>/dev/null; then
+            echo "✓ $SUB 已更新到远程最新版本"
+          else
+            echo "⚠ $SUB 无法安全合并，保持当前固定版本"
+          fi
+        done
 
         # 检查是否有变更
         if git diff --quiet; then
@@ -104,7 +113,7 @@ jobs:
         else
           echo "Submodules updated"
           git add .
-          git commit -m "chore: Auto-update submodules (pybind11, sentencepiece)"
+          git commit -m "chore: Auto-update submodules" || true
           git push origin master
           echo "updated=true" >> $GITHUB_OUTPUT
         fi
