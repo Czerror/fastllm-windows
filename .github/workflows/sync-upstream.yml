@@ -8,6 +8,7 @@ on:
 
 permissions:
   contents: write
+  workflows: write
 
 jobs:
   sync:
@@ -63,7 +64,10 @@ jobs:
         bash patches/apply-patches.sh
 
         # 覆盖 workflows 为本仓库默认分支版本
-        DEFAULT_BRANCH=$(git symbolic-ref --short refs/remotes/origin/HEAD | sed 's@^origin/@@')
+        DEFAULT_BRANCH="master"
+        if git symbolic-ref --short refs/remotes/origin/HEAD >/dev/null 2>&1; then
+            DEFAULT_BRANCH=$(git symbolic-ref --short refs/remotes/origin/HEAD | sed 's@^origin/@@')
+        fi
         git fetch origin "$DEFAULT_BRANCH"
         git checkout "origin/$DEFAULT_BRANCH" -- .github/workflows || true
 
