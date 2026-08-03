@@ -55,14 +55,10 @@ jobs:
         git checkout upstream/master -- .
         git reset --hard upstream/master
 
-        # 从重置前的 dev 提交恢复本仓库的 patches 目录，再应用 Windows 补丁
-        git checkout "$BEFORE_COMMIT" -- patches
+        # 从重置前的 dev 提交恢复本仓库的 patches 目录（补丁独立存放,不混入上游源码）
+        git checkout "$BEFORE_COMMIT" -- patches || true
 
-        echo "Applying Windows patches..."
-        chmod +x patches/apply-patches.sh
-        bash patches/apply-patches.sh
-
-        # 覆盖 workflows 为本仓库默认分支版本
+        # 覆盖 workflows 为本仓库默认分支版本（CI 基础设施例外,其余文件均与上游同步）
         DEFAULT_BRANCH="master"
         if git symbolic-ref --short refs/remotes/origin/HEAD >/dev/null 2>&1; then
             DEFAULT_BRANCH=$(git symbolic-ref --short refs/remotes/origin/HEAD | sed 's@^origin/@@')
@@ -74,10 +70,10 @@ jobs:
         git add -A
         AFTER_COMMIT=$(git rev-parse HEAD)
         if [ "$(git diff --cached --name-only)" != "" ]; then
-          git commit -m "chore: sync upstream/master + apply Windows patches" || true
+          git commit -m "chore: sync upstream/master (补丁独立存放于 patches/,不混入上游源码)" || true
           AFTER_COMMIT=$(git rev-parse HEAD)
           echo "dev_synced=true" >> $GITHUB_OUTPUT
-          echo "✅ dev branch updated from upstream/master + patches applied"
+          echo "✅ dev branch synced with upstream/master (patches/ isolated)"
         else
           echo "dev_synced=false" >> $GITHUB_OUTPUT
           echo "ℹ️ dev branch already up to date"
