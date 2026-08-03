@@ -65,6 +65,7 @@ jobs:
           -DCMAKE_CXX_EXTENSIONS=OFF `
           -DUSE_MMAP=ON `
           -DUSE_SENTENCEPIECE=ON `
+          -DUNIT_TEST=OFF `
           -DPY_API=ON
     
     - name: Build (CPU Release)
