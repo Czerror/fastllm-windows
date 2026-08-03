@@ -52,17 +52,17 @@ jobs:
     
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v4  # 自动使用 v4.x 最新版本
+      uses: actions/checkout@v7  # 自动使用 v7.x 最新版本
       with:
         submodules: true
     
     - name: Setup MSVC Developer Environment
-      uses: ilammy/msvc-dev-cmd@v1
+      uses: TheMrMilchmann/setup-msvc-dev@v4
       with:
         arch: x64
     
     - name: Setup Python
-      uses: actions/setup-python@v5  # 自动使用 v5.x 最新版本
+      uses: actions/setup-python@v7  # 自动使用 v7.x 最新版本
       with:
         python-version: '3.11'
     
@@ -168,7 +168,7 @@ jobs:
         fi
     
     - name: Upload CPU Artifact
-      uses: actions/upload-artifact@v4  # 自动使用 v4.x 最新版本
+      uses: actions/upload-artifact@v7  # 自动使用 v7.x 最新版本
       with:
         name: fastllm-win-x64-cpu-${{ steps.version.outputs.version }}
         path: release-cpu/
@@ -182,17 +182,17 @@ jobs:
     
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v4  # 自动使用 v4.x 最新版本
+      uses: actions/checkout@v7  # 自动使用 v7.x 最新版本
       with:
         submodules: true
     
     - name: Setup MSVC Developer Environment
-      uses: ilammy/msvc-dev-cmd@v1
+      uses: TheMrMilchmann/setup-msvc-dev@v4
       with:
         arch: x64
     
     - name: Setup Python
-      uses: actions/setup-python@v5  # 自动使用 v5.x 最新版本
+      uses: actions/setup-python@v7  # 自动使用 v7.x 最新版本
       with:
         python-version: '3.11'
     
@@ -205,7 +205,7 @@ jobs:
         echo "Detected version: ${VERSION}"
     
     - name: Install CUDA Toolkit
-      uses: Jimver/cuda-toolkit@v0.2.30
+      uses: Jimver/cuda-toolkit@v0.2.36
       id: cuda-toolkit
       with:
         cuda: '13.1.0'
@@ -334,7 +334,7 @@ jobs:
         CUDA_PATH: ${{ steps.cuda-toolkit.outputs.CUDA_PATH }}
     
     - name: Upload CUDA Artifact
-      uses: actions/upload-artifact@v4  # 自动使用 v4.x 最新版本
+      uses: actions/upload-artifact@v7  # 自动使用 v7.x 最新版本
       with:
         name: fastllm-win-x64-cuda-${{ steps.version.outputs.version }}
         path: release-cuda/
@@ -351,7 +351,7 @@ jobs:
     
     steps:
     - name: Checkout for version
-      uses: actions/checkout@v4  # 自动使用 v4.x 最新版本
+      uses: actions/checkout@v7  # 自动使用 v7.x 最新版本
       with:
         submodules: true
         fetch-depth: 0
@@ -446,14 +446,14 @@ jobs:
         echo "notes_file=release_notes.md" >> $GITHUB_OUTPUT
     
     - name: Download CPU artifact
-      uses: actions/download-artifact@v4  # 自动使用 v4.x 最新版本
+      uses: actions/download-artifact@v8  # 自动使用 v8.x 最新版本
       with:
         name: fastllm-win-x64-cpu-${{ steps.version.outputs.version }}
         path: fastllm-win-x64-cpu-release
       continue-on-error: true
     
     - name: Download CUDA artifact
-      uses: actions/download-artifact@v4  # 自动使用 v4.x 最新版本
+      uses: actions/download-artifact@v8  # 自动使用 v8.x 最新版本
       with:
         name: fastllm-win-x64-cuda-${{ steps.version.outputs.version }}
         path: fastllm-win-x64-cuda-release
@@ -466,7 +466,7 @@ jobs:
         [ -d "fastllm-win-x64-cuda-release" ] && zip -r "fastllm-win-x64-cuda-v${VERSION}.zip" fastllm-win-x64-cuda-release
     
     - name: Create GitHub Release
-      uses: softprops/action-gh-release@v2  # 自动使用 v2.x 最新版本
+      uses: softprops/action-gh-release@v3  # 自动使用 v3.x 最新版本
       with:
         files: |
           fastllm-win-x64-cpu-*.zip
@@ -478,9 +478,22 @@ jobs:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     
     - name: Cleanup old releases (keep latest 2)
-      uses: dev-drprasad/delete-older-releases@v0.3.4
+      uses: actions/github-script@v9
       with:
-        keep_latest: 2
-        delete_tags: false
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        script: |
+          // 保留最新 2 个 release,删除更早的(不删除 tag)
+          const keep = 2;
+          const releases = await github.paginate(github.rest.repos.listReleases, {
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            per_page: 100
+          });
+          const published = releases.filter((release) => !release.draft);
+          for (const release of published.slice(keep)) {
+            console.log(`Deleting release ${release.tag_name} (${release.id})`);
+            await github.rest.repos.deleteRelease({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              release_id: release.id
+            });
+          }

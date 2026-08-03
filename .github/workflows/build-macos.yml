@@ -24,7 +24,7 @@ jobs:
     
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v4
+      uses: actions/checkout@v7
       with:
         submodules: recursive
     
@@ -33,7 +33,7 @@ jobs:
         brew install cmake ninja
     
     - name: Setup Python
-      uses: actions/setup-python@v5
+      uses: actions/setup-python@v7
       with:
         python-version: '3.11'
     
@@ -145,7 +145,7 @@ jobs:
         chmod +x release-intel/ftllm
     
     - name: Upload Intel Artifact
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
         name: fastllm-macos-x64-${{ steps.version.outputs.version }}
         path: release-intel/
@@ -158,7 +158,7 @@ jobs:
     
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v4
+      uses: actions/checkout@v7
       with:
         submodules: recursive
     
@@ -167,7 +167,7 @@ jobs:
         brew install cmake ninja
     
     - name: Setup Python
-      uses: actions/setup-python@v5
+      uses: actions/setup-python@v7
       with:
         python-version: '3.11'
     
@@ -279,7 +279,7 @@ jobs:
         chmod +x release-arm/ftllm
     
     - name: Upload Apple Silicon Artifact
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
         name: fastllm-macos-arm64-${{ steps.version.outputs.version }}
         path: release-arm/
@@ -294,7 +294,7 @@ jobs:
     
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v4
+      uses: actions/checkout@v7
     
     - name: Get version from setup.py
       id: version
@@ -303,13 +303,13 @@ jobs:
         echo "version=${VERSION}" >> $GITHUB_OUTPUT
     
     - name: Download Intel Artifact
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@v8
       with:
         name: fastllm-macos-x64-${{ steps.version.outputs.version }}
         path: intel
     
     - name: Download Apple Silicon Artifact
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@v8
       with:
         name: fastllm-macos-arm64-${{ steps.version.outputs.version }}
         path: arm
@@ -365,7 +365,7 @@ jobs:
         chmod +x universal/run.sh
     
     - name: Upload Universal Artifact
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
         name: fastllm-macos-universal-${{ steps.version.outputs.version }}
         path: universal/
