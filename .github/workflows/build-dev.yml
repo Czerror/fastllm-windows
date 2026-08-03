@@ -35,6 +35,15 @@ jobs:
       run: |
         git config user.name "github-actions[bot]"
         git config user.email "github-actions[bot]@users.noreply.github.com"
+
+    - name: Apply Windows patches
+      # 仅 dev 分支存在 patches 目录时执行；master 生产树已打补丁，自动跳过
+      if: hashFiles('patches/apply-patches.sh') != ''
+      run: |
+        git config core.autocrlf false
+        git add --renormalize .
+        git reset --hard -q
+        bash patches/apply-patches.sh
     
     - name: Setup MSVC Developer Environment
       uses: ilammy/msvc-dev-cmd@v1
