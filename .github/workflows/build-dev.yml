@@ -116,9 +116,11 @@ jobs:
           cp build/tools/ftllm/fastllm_tools.dll release-cpu/ftllm/
         fi
 
-        # Copy VC++ runtime (若存在)
+        # Copy VC++ runtime (便携化: 根目录/bin/ftllm 三处,确保 ftllm.exe、bin 内工具与 Python ctypes 加载都找到)
         if [ -d "runtime_libs/vcrt" ]; then
-          cp runtime_libs/vcrt/*.dll release-cpu/bin/ 2>/dev/null || true
+        cp runtime_libs/vcrt/*.dll release-cpu/ 2>/dev/null || true
+        cp runtime_libs/vcrt/*.dll release-cpu/bin/ 2>/dev/null || true
+        cp runtime_libs/vcrt/*.dll release-cpu/ftllm/ 2>/dev/null || true
         fi
 
         # Copy Python tools from source (exclude root __init__.py; it will be generated)
@@ -304,9 +306,11 @@ jobs:
           cp build-cuda/tools/ftllm/fastllm_tools.dll release-cuda/ftllm/
         fi
 
-        # Copy VC++ runtime (若存在)
+        # Copy VC++ runtime (便携化: 根目录/bin/ftllm 三处)
         if [ -d "runtime_libs/vcrt" ]; then
-          cp runtime_libs/vcrt/*.dll release-cuda/bin/ 2>/dev/null || true
+        cp runtime_libs/vcrt/*.dll release-cuda/ 2>/dev/null || true
+        cp runtime_libs/vcrt/*.dll release-cuda/bin/ 2>/dev/null || true
+        cp runtime_libs/vcrt/*.dll release-cuda/ftllm/ 2>/dev/null || true
         fi
 
         # Copy CUDA runtime DLLs
