@@ -63,7 +63,7 @@ jobs:
       id: version
       shell: bash
       run: |
-        VERSION=$(sed -n 's/.*version\s*=\s*"\([^"]*\)".*/\1/p' tools/scripts/setup.py)
+        VERSION=$(sed -n 's/.*"version": "\([^"]*\)".*/\1/p' tools/scripts/setup.py | head -1)
         echo "version=${VERSION}" >> $GITHUB_OUTPUT
         echo "Detected version: ${VERSION}"
 
@@ -233,7 +233,7 @@ jobs:
       id: version
       shell: bash
       run: |
-        VERSION=$(sed -n 's/.*version\s*=\s*"\([^"]*\)".*/\1/p' tools/scripts/setup.py)
+        VERSION=$(sed -n 's/.*"version": "\([^"]*\)".*/\1/p' tools/scripts/setup.py | head -1)
         echo "version=${VERSION}" >> $GITHUB_OUTPUT
         echo "Detected version: ${VERSION}"
 
