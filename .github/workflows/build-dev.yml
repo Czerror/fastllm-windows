@@ -10,7 +10,7 @@ on:
       build_cuda:
         description: 'Build CUDA version'
         type: boolean
-        default: false
+        default: true
       cuda_arch:
         description: 'CUDA architectures (semicolon separated)'
         type: string
