@@ -26,6 +26,9 @@ jobs:
       run: |
         git config user.name "github-actions[bot]"
         git config user.email "github-actions[bot]@users.noreply.github.com"
+        # 存在 upstream/master 与 origin/master 两个远程跟踪分支时,
+        # 未限定的 "master" 会产生歧义, 默认以 origin 为准
+        git config checkout.defaultRemote origin
 
     - name: Add upstream remote
       run: |
@@ -87,8 +90,9 @@ jobs:
       run: |
         echo "=== Checking submodule updates on master ==="
 
-        git checkout master
-        git pull origin master
+        # 显式从 origin/master 创建/重置本地 master, 避免与 upstream/master 歧义
+        git checkout -B master origin/master
+        git reset --hard origin/master
 
         # checkout 未初始化子模块，需先 init
         git submodule update --init third_party/pybind11 third_party/sentencepiece
