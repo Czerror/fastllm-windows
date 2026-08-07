@@ -97,12 +97,19 @@ jobs:
 
         # checkout 未初始化子模块，需先 init
         git submodule update --init third_party/pybind11 third_party/sentencepiece
-        # 仅自动更新 pybind11；sentencepiece 固定为生产可编译版本 11051e3b,
-        # 最新版依赖的 Abseil 在 MSVC 无法编译,禁止自动跟随上游
-        if git submodule update --remote --merge third_party/pybind11 2>/dev/null; then
-          echo "✓ third_party/pybind11 已更新到远程最新版本"
+        # 子模块管理遵循上游: pybind11 固定在上游 .gitmodules 记录的提交,
+        # 不再自动跟随子模块远程最新; sentencepiece 上游未定义(Windows 专用),
+        # 保持生产锁定版本, dev 构建时由 apply-patches.sh 按需添加
+        UPSTREAM_PYBIND11=$(git ls-tree upstream/master third_party/pybind11 | awk '{print $3}')
+        if [ -n "$UPSTREAM_PYBIND11" ]; then
+          if ! git -C third_party/pybind11 fetch --depth 1 origin "$UPSTREAM_PYBIND11" 2>/dev/null; then
+            git -C third_party/pybind11 fetch --depth 1 https://github.com/pybind/pybind11.git "$UPSTREAM_PYBIND11"
+          fi
+          git -C third_party/pybind11 checkout --detach "$UPSTREAM_PYBIND11"
+          git add third_party/pybind11
+          echo "✓ third_party/pybind11 已对齐上游提交 $UPSTREAM_PYBIND11"
         else
-          echo "⚠ third_party/pybind11 无法安全合并，保持当前版本"
+          echo "⚠ 未取到上游 pybind11 提交, 保持当前版本"
         fi
 
         # 检查是否有变更
