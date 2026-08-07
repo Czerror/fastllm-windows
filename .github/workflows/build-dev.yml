@@ -15,6 +15,10 @@ on:
         description: 'CUDA architectures (semicolon separated)'
         type: string
         default: '75;80;86;89;90;120'
+      build_sentencepiece:
+        description: '添加 sentencepiece 子模块并以 USE_SENTENCEPIECE=ON 构建'
+        type: boolean
+        default: false
 
 env:
   BUILD_TYPE: Release
@@ -49,6 +53,20 @@ jobs:
         git reset --hard -q
         bash patches/apply-patches.sh
 
+    - name: Add sentencepiece submodule (manual opt-in)
+      if: ${{ inputs.build_sentencepiece == 'true' }}
+      run: |
+        if ! git ls-files --stage third_party/sentencepiece | grep -q '^160000'; then
+          echo "  Adding sentencepiece submodule (pinned 11051e3b)..."
+          git submodule add --depth 1 https://github.com/google/sentencepiece.git third_party/sentencepiece
+          git -C third_party/sentencepiece fetch -q --depth 1 origin 11051e3b73b3a6222a52acd720e39805dc7545ab
+          git -C third_party/sentencepiece checkout -q FETCH_HEAD
+          git add third_party/sentencepiece
+          echo "  ✓ sentencepiece (11051e3b)"
+        else
+          echo "  sentencepiece already present"
+        fi
+
     - name: Setup MSVC Developer Environment
       uses: TheMrMilchmann/setup-msvc-dev@v4
       with:
@@ -76,7 +94,7 @@ jobs:
           -DCMAKE_CXX_STANDARD_REQUIRED=ON `
           -DCMAKE_CXX_EXTENSIONS=OFF `
           -DUSE_MMAP=ON `
-          -DUSE_SENTENCEPIECE=OFF `
+          -DUSE_SENTENCEPIECE=${{ inputs.build_sentencepiece == 'true' && 'ON' || 'OFF' }} `
           -DUNIT_TEST=OFF `
           -DPY_API=ON
 
@@ -220,6 +238,20 @@ jobs:
         git reset --hard -q
         bash patches/apply-patches.sh
 
+    - name: Add sentencepiece submodule (manual opt-in)
+      if: ${{ inputs.build_sentencepiece == 'true' }}
+      run: |
+        if ! git ls-files --stage third_party/sentencepiece | grep -q '^160000'; then
+          echo "  Adding sentencepiece submodule (pinned 11051e3b)..."
+          git submodule add --depth 1 https://github.com/google/sentencepiece.git third_party/sentencepiece
+          git -C third_party/sentencepiece fetch -q --depth 1 origin 11051e3b73b3a6222a52acd720e39805dc7545ab
+          git -C third_party/sentencepiece checkout -q FETCH_HEAD
+          git add third_party/sentencepiece
+          echo "  ✓ sentencepiece (11051e3b)"
+        else
+          echo "  sentencepiece already present"
+        fi
+
     - name: Setup MSVC Developer Environment
       uses: TheMrMilchmann/setup-msvc-dev@v4
       with:
@@ -264,7 +296,7 @@ jobs:
           -DCMAKE_CUDA_FLAGS="-allow-unsupported-compiler -Xcompiler /Zc:preprocessor" `
           -DCUDA_ARCH="$cudaArch" `
           -DUSE_MMAP=ON `
-          -DUSE_SENTENCEPIECE=OFF `
+          -DUSE_SENTENCEPIECE=${{ inputs.build_sentencepiece == 'true' && 'ON' || 'OFF' }} `
           -DUNIT_TEST=OFF `
           -DPY_API=ON
       env:
