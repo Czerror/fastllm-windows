@@ -54,7 +54,7 @@ jobs:
         bash patches/apply-patches.sh
 
     - name: Add sentencepiece submodule (manual opt-in)
-      if: ${{ inputs.build_sentencepiece == 'true' }}
+      if: ${{ inputs.build_sentencepiece }}
       run: |
         if ! git ls-files --stage third_party/sentencepiece | grep -q '^160000'; then
           echo "  Adding sentencepiece submodule (pinned 11051e3b)..."
@@ -94,7 +94,7 @@ jobs:
           -DCMAKE_CXX_STANDARD_REQUIRED=ON `
           -DCMAKE_CXX_EXTENSIONS=OFF `
           -DUSE_MMAP=ON `
-          -DUSE_SENTENCEPIECE=${{ inputs.build_sentencepiece == 'true' && 'ON' || 'OFF' }} `
+          -DUSE_SENTENCEPIECE=${{ inputs.build_sentencepiece && 'ON' || 'OFF' }} `
           -DUNIT_TEST=OFF `
           -DPY_API=ON
 
@@ -239,7 +239,7 @@ jobs:
         bash patches/apply-patches.sh
 
     - name: Add sentencepiece submodule (manual opt-in)
-      if: ${{ inputs.build_sentencepiece == 'true' }}
+      if: ${{ inputs.build_sentencepiece }}
       run: |
         if ! git ls-files --stage third_party/sentencepiece | grep -q '^160000'; then
           echo "  Adding sentencepiece submodule (pinned 11051e3b)..."
@@ -296,7 +296,7 @@ jobs:
           -DCMAKE_CUDA_FLAGS="-allow-unsupported-compiler -Xcompiler /Zc:preprocessor" `
           -DCUDA_ARCH="$cudaArch" `
           -DUSE_MMAP=ON `
-          -DUSE_SENTENCEPIECE=${{ inputs.build_sentencepiece == 'true' && 'ON' || 'OFF' }} `
+          -DUSE_SENTENCEPIECE=${{ inputs.build_sentencepiece && 'ON' || 'OFF' }} `
           -DUNIT_TEST=OFF `
           -DPY_API=ON
       env:
