@@ -124,11 +124,20 @@ jobs:
         GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: |
         # 上游有更新并已同步 dev 后, 自动触发 CPU+CUDA 双版本构建
+        # 注意: 仓库同时存在 origin/upstream 两个远程, gh 可能解析到 upstream,
+        # 因此显式使用 ${{ github.repository }} 走 REST API, 并校验 HTTP 204
         sleep 5
-        gh workflow run build-dev.yml --ref dev \
-          -f build_cpu=true \
-          -f build_cuda=true \
-          -f cuda_arch='75;80;86;89;90;120'
+        status=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
+          -H "Authorization: Bearer $GH_TOKEN" \
+          -H "Accept: application/vnd.github+json" \
+          -H "Content-Type: application/json" \
+          -d '{"ref":"dev","inputs":{"build_cpu":"true","build_cuda":"true","cuda_arch":"75;80;86;89;90;120"}}' \
+          "https://api.github.com/repos/${{ github.repository }}/actions/workflows/build-dev.yml/dispatches")
+        if [ "$status" != "204" ]; then
+          echo "dispatch failed with HTTP $status"
+          exit 1
+        fi
+        echo "✓ build-dev.yml dispatched on dev (CPU+CUDA)"
 
     - name: Create sync summary
       run: |
