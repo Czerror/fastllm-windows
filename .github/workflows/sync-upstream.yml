@@ -2,12 +2,13 @@ name: Sync Upstream
 
 on:
   schedule:
-    # 每天 UTC 0:00 (北京时间 8:00) 自动同步
-    - cron: '0 0 * * *'
+    # 每小时 UTC 整点检查上游更新
+    - cron: '0 * * * *'
   workflow_dispatch:  # 支持手动触发
 
 permissions:
   contents: write
+  actions: write  # 同步完成后触发 build-dev.yml 双版本构建
 
 jobs:
   sync:
@@ -116,6 +117,18 @@ jobs:
           git push origin master
           echo "updated=true" >> $GITHUB_OUTPUT
         fi
+
+    - name: Trigger dev CPU+CUDA rebuild
+      if: steps.sync_dev.outputs.dev_synced == 'true'
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        # 上游有更新并已同步 dev 后, 自动触发 CPU+CUDA 双版本构建
+        sleep 5
+        gh workflow run build-dev.yml --ref dev \
+          -f build_cpu=true \
+          -f build_cuda=true \
+          -f cuda_arch='75;80;86;89;90;120'
 
     - name: Create sync summary
       run: |
