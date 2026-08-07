@@ -194,8 +194,9 @@ jobs:
 
   build-cuda:
     name: Build CUDA (Dev)
-    runs-on: windows-latest
-    needs: build-cpu  # 等待 CPU 版本完成后再编译，避免并发资源竞争
+    runs-on: windows-2022  # CUDA 13.1 官方支持 VS2022; windows-latest 已迁移 VS2026, CUDA 13.1 的 cudafe++ 会崩溃
+    needs: build-cpu  # 串行执行: 避免 CPU/CUDA 并行安装大工具链导致 Actions 容量不足
+    # CPU 构建失败(非取消)时 CUDA 仍会执行; 注意若 CPU 被取消, GitHub 不会继续 CUDA(即使 always()), 日常不要取消 CPU
     if: ${{ always() && (github.event_name != 'workflow_dispatch' || inputs.build_cuda) }}
 
     steps:
@@ -260,6 +261,7 @@ jobs:
           -DCMAKE_CXX_STANDARD_REQUIRED=ON `
           -DCMAKE_CXX_EXTENSIONS=OFF `
           -DUSE_CUDA=ON `
+          -DCMAKE_CUDA_FLAGS="-allow-unsupported-compiler -Xcompiler /Zc:preprocessor" `
           -DCUDA_ARCH="$cudaArch" `
           -DUSE_MMAP=ON `
           -DUSE_SENTENCEPIECE=ON `
