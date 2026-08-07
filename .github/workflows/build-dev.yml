@@ -55,6 +55,7 @@ jobs:
 
     - name: Add sentencepiece submodule (manual opt-in)
       if: ${{ inputs.build_sentencepiece }}
+      shell: bash
       run: |
         if ! git ls-files --stage third_party/sentencepiece | grep -q '^160000'; then
           echo "  Adding sentencepiece submodule (pinned 11051e3b)..."
@@ -240,6 +241,7 @@ jobs:
 
     - name: Add sentencepiece submodule (manual opt-in)
       if: ${{ inputs.build_sentencepiece }}
+      shell: bash
       run: |
         if ! git ls-files --stage third_party/sentencepiece | grep -q '^160000'; then
           echo "  Adding sentencepiece submodule (pinned 11051e3b)..."
