@@ -95,11 +95,10 @@ jobs:
         git checkout -B master origin/master
         git reset --hard origin/master
 
-        # checkout 未初始化子模块，需先 init
-        git submodule update --init third_party/pybind11 third_party/sentencepiece
-        # 子模块管理遵循上游: pybind11 固定在上游 .gitmodules 记录的提交,
-        # 不再自动跟随子模块远程最新; sentencepiece 上游未定义(Windows 专用),
-        # 保持生产锁定版本, dev 构建时由 apply-patches.sh 按需添加
+        # checkout 未初始化子模块，需先 init; 子模块管理遵循上游:
+        # 仅管理上游定义且当前使用的 pybind11; sentencepiece 上游未定义,
+        # dev 构建已默认关闭 USE_SENTENCEPIECE, 不再添加/管理该子模块
+        git submodule update --init third_party/pybind11
         UPSTREAM_PYBIND11=$(git ls-tree upstream/master third_party/pybind11 | awk '{print $3}')
         if [ -n "$UPSTREAM_PYBIND11" ]; then
           if ! git -C third_party/pybind11 fetch --depth 1 origin "$UPSTREAM_PYBIND11" 2>/dev/null; then
