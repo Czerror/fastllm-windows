@@ -76,7 +76,7 @@ jobs:
           -DCMAKE_CXX_STANDARD_REQUIRED=ON `
           -DCMAKE_CXX_EXTENSIONS=OFF `
           -DUSE_MMAP=ON `
-          -DUSE_SENTENCEPIECE=OFF `  # 默认关闭(遵循上游); 已用 ON 验证过可成功构建
+          -DUSE_SENTENCEPIECE=OFF `
           -DUNIT_TEST=OFF `
           -DPY_API=ON
 
@@ -264,7 +264,7 @@ jobs:
           -DCMAKE_CUDA_FLAGS="-allow-unsupported-compiler -Xcompiler /Zc:preprocessor" `
           -DCUDA_ARCH="$cudaArch" `
           -DUSE_MMAP=ON `
-          -DUSE_SENTENCEPIECE=OFF `  # 默认关闭(遵循上游); 已用 ON 验证过可成功构建
+          -DUSE_SENTENCEPIECE=OFF `
           -DUNIT_TEST=OFF `
           -DPY_API=ON
       env:
