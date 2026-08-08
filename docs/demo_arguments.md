@@ -20,6 +20,7 @@
 ```
 - **使用的设备 (`--device`)**: 指定服务器使用的设备。可以指定为`cpu`或`cuda`或额外编译的其余device类型
 - **CUDA Embedding (`--cuda_embedding`)**: 若带上此配置且device设置为`cuda`，那么会在cuda设备上进行embedding操作，这样速度会略微提升，显存占用也会提升，建议在显存非常充足的情况下使用
+- **CUDA权重slab (`--cuda_slab`)**: 设置 CUDA 模型权重 slab 分配块大小，单位 MB，默认 `0` 表示关闭。对于将大量 MOE 专家权重放在 CUDA 上的场景，可以使用如 `--cuda_slab 1024` 减少小权重分别分配造成的显存碎片和页对齐开销
 - **KV缓存最大使用量 (`--kv_cache_limit`)**: 设置KV缓存的最大使用量。若不使用此参数或设置为`auto`，框架会自动处理。手动设定示例如下：
 ```bash
 --kv_cache_limit 5G   # 设置为5G
@@ -34,8 +35,6 @@
 - **模型名称 (`--model_name`)**: 指定部署的模型名称，API调用时会进行名称核验
 - **API服务器主机地址 (`--host`)**: 设置API服务器的主机地址
 - **API服务器端口号 (`--port`)**: 设置API服务器的端口号
-- **API Key (`--api_key`)**: 设置API Key认证（为空不校验）
-- **输出 think (`--think`)**: 是否输出 `<think>` 标签 (true/false)
 
 
 ## Web UI 配置参数
