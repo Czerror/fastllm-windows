@@ -70,15 +70,15 @@ jobs:
         git fetch origin "$DEFAULT_BRANCH"
         git checkout "origin/$DEFAULT_BRANCH" -- .github/workflows || true
 
-        # 提交所有变更
+        # 暂存全部变更; 以“同步后 dev 树 vs 同步前 dev 树”判断是否真有更新
+        # (不能比较 index vs upstream: patches/ 必然产生差异, 会导致每次同步都触发构建)
         git add -A
-        AFTER_COMMIT=$(git rev-parse HEAD)
-        if [ "$(git diff --cached --name-only)" != "" ]; then
-          git commit -m "chore: sync upstream/master (补丁独立存放于 patches/,不混入上游源码)" || true
-          AFTER_COMMIT=$(git rev-parse HEAD)
+        if [ "$(git write-tree)" != "$(git rev-parse "$BEFORE_COMMIT"^{tree})" ]; then
+          git commit -m "chore: sync upstream/master (补丁独立存放于 patches/,不混入上游源码)"
           echo "dev_synced=true" >> $GITHUB_OUTPUT
           echo "✅ dev branch synced with upstream/master (patches/ isolated)"
         else
+          git reset --hard "$BEFORE_COMMIT"
           echo "dev_synced=false" >> $GITHUB_OUTPUT
           echo "ℹ️ dev branch already up to date"
         fi
