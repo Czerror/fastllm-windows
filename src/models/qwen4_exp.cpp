@@ -6759,7 +6759,11 @@ namespace fastllm {
             hiddenStates.dims.size() == 3 &&
             hiddenStates.dims[1] > 1 &&
             hiddenStates.dims[1] <= this->indexerCompressRatio;
+        // Only single-token MoE uses the expert cache. Check the shape before
+        // querying availability, which lazily allocates the device cache.
+        // MTP verifier batches with NUMA experts must stay outside the graph.
         const bool moeCudaCache =
+            hiddenStates.dims.size() == 3 && hiddenStates.dims[1] == 1 &&
             !this->weights.empty() && !this->weights[0].empty() &&
             MoeCudaCacheAvailable(this->weights[0]);
         const bool moeDeviceMapGraphCompatible =

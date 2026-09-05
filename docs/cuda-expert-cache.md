@@ -19,6 +19,14 @@ The adapter currently runs single-token SwiGLU experts in compact NVFP4 format.
 Prefill and unsupported layouts retain the configured MoE backend. CPU-only
 and ROCm builds do not enable this NVIDIA CUDA adapter.
 
+Qwen4-Exp MTP verifier batches contain multiple tokens and retain the configured
+MoE backend; MTP draft expert tables are not registered with this cache. With
+NUMA experts, these MTP paths run eagerly even when the application enables
+CUDA Graph. The cache only makes the single-token backbone graph eligible;
+it cannot make a NUMA verifier batch safe to capture. Verifier eligibility
+checks do not allocate a device expert cache. Enabling MTP therefore does not
+imply that it benefits from the GPU expert-cache budget.
+
 ## Metadata: `fastllm-cuda-expert-cache.cuh`
 
 `ExpertCacheView` owns no memory. The caller supplies a global key-to-slot map,
