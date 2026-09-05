@@ -1,7 +1,7 @@
 //
-// Graph-capturable compact NVFP4 expert cache.
+// Graph-capturable FP8 and compact NVFP4 expert cache.
 //
-// The checkpoint keeps E2M1 values and planar E4M3 block scales on the host.
+// Host records retain quantized weights and their format-specific scales.
 // A device LRU cache stores complete expert records in that same compact
 // representation. Misses are pulled directly from mapped pinned host memory
 // by a CUDA kernel; CPU cores do not participate in the decode hot path.
@@ -37,6 +37,7 @@ size_t AlignUp(size_t value, size_t alignment) {
 }
 
 struct OffloadLayout {
+    fastllm::DataType weightType = fastllm::DataType::NVFP4_BLOCK_16_E4M3;
     int experts = 0;
     int hidden = 0;
     int inter = 0;
@@ -50,8 +51,21 @@ struct OffloadLayout {
     size_t downBytes = 0;
     size_t downOffset = 0;
     size_t scalesOffset = 0;
+    size_t gateScaleBytes = 0;
+    size_t downScaleBytes = 0;
     size_t recordStride = 0;
 };
+
+const char *FormatName(fastllm::DataType type) {
+    if (type == fastllm::DataType::FP8_E4M3) return "FP8 E4M3";
+    if (type == fastllm::DataType::FP8_E4M3_BLOCK_128) return "FP8 block128";
+    return "NVFP4";
+}
+
+int Fp8PointerTableCount(fastllm::DataType type) {
+    return type == fastllm::DataType::FP8_E4M3 ? 4 :
+        type == fastllm::DataType::FP8_E4M3_BLOCK_128 ? 2 : 0;
+}
 
 struct DeviceCache {
     bool attempted = false;
@@ -71,6 +85,9 @@ struct DeviceCache {
     int32_t *missCount = nullptr;
     unsigned long long *hitCount = nullptr;
     unsigned long long *totalMissCount = nullptr;
+    // Contiguous slot pointer tables: gate/down weights, then external scales
+    // for native E4M3. Packed block128 needs only the two weight tables.
+    void **fp8Pointers = nullptr;
 };
 
 struct OffloadGroup {
@@ -111,28 +128,42 @@ bool ValidateWeightPair(fastllm::Data *gate, fastllm::Data *down,
                         const OffloadLayout *expected,
                         OffloadLayout &observed) {
     if (gate == nullptr || down == nullptr ||
-        gate->dataType != fastllm::DataType::NVFP4_BLOCK_16_E4M3 ||
-        down->dataType != fastllm::DataType::NVFP4_BLOCK_16_E4M3 ||
+        (gate->dataType != fastllm::DataType::NVFP4_BLOCK_16_E4M3 &&
+         gate->dataType != fastllm::DataType::FP8_E4M3 &&
+         gate->dataType != fastllm::DataType::FP8_E4M3_BLOCK_128) ||
+        down->dataType != gate->dataType ||
         gate->dataDevice != fastllm::DataDevice::CPU ||
         down->dataDevice != fastllm::DataDevice::CPU ||
         gate->cpuData == nullptr || down->cpuData == nullptr ||
         gate->dims.size() != 2 || down->dims.size() != 2 ||
         gate->dims[0] <= 0 || gate->dims[1] <= 0 ||
         down->dims[0] <= 0 || down->dims[1] <= 0 ||
+        down->dims[1] > INT_MAX / 2 ||
         gate->dims[0] != down->dims[1] * 2 ||
-        gate->dims[1] != down->dims[0] ||
-        gate->blockK <= 0 || gate->blockM <= 0 ||
-        down->blockK <= 0 || down->blockM <= 0 ||
-        gate->scales.size() != 2 || down->scales.size() != 1) {
+        gate->dims[1] != down->dims[0]) {
         return false;
     }
 
+    observed.weightType = gate->dataType;
+    const bool block128 = gate->dataType == fastllm::DataType::FP8_E4M3_BLOCK_128;
+    if (!block128 && (gate->blockK <= 0 || gate->blockM <= 0 ||
+                     down->blockK <= 0 || down->blockM <= 0)) return false;
+    if (gate->dataType == fastllm::DataType::NVFP4_BLOCK_16_E4M3 &&
+        (gate->scales.size() != 2 || down->scales.size() != 1)) return false;
     observed.hidden = gate->dims[1];
     observed.inter = down->dims[1];
-    observed.gateBlockK = gate->blockK;
-    observed.gateBlockM = gate->blockM;
-    observed.downBlockK = down->blockK;
-    observed.downBlockM = down->blockM;
+    observed.gateBlockK = block128 ? 1 : gate->blockK;
+    observed.gateBlockM = block128 ? 128 : gate->blockM;
+    observed.downBlockK = block128 ? 1 : down->blockK;
+    observed.downBlockM = block128 ? 128 : down->blockM;
+    // Existing indexed FP8 kernels load four weights at a time. Keep their
+    // alignment and scale-block assumptions explicit; unsupported layouts
+    // retain the configured backend rather than issuing misaligned reads.
+    if (observed.weightType != fastllm::DataType::NVFP4_BLOCK_16_E4M3 &&
+        ((observed.hidden & 3) || (observed.inter & 3) ||
+         (observed.gateBlockM & 3) || (observed.downBlockM & 3))) return false;
+    // The existing packed block128 indexed kernels expect complete blocks.
+    if (block128 && ((observed.hidden & 127) || (observed.inter & 127))) return false;
     observed.gateScaleCols =
         (observed.hidden + observed.gateBlockM - 1) /
         observed.gateBlockM;
@@ -144,17 +175,30 @@ bool ValidateWeightPair(fastllm::Data *gate, fastllm::Data *down,
     observed.downOffset = AlignUp(observed.gateBytes, 16);
     observed.scalesOffset =
         AlignUp(observed.downOffset + observed.downBytes, 16);
-    // Keep each host expert record aligned for GPU reads over PCIe. The
-    // trailing global scales would otherwise shift successive source addresses.
-    observed.recordStride =
-        AlignUp(observed.scalesOffset + 3 * sizeof(float), 128);
+    if (gate->dataType == fastllm::DataType::NVFP4_BLOCK_16_E4M3) {
+        observed.gateScaleBytes = 2 * sizeof(float);
+        observed.downScaleBytes = sizeof(float);
+    } else if (gate->dataType == fastllm::DataType::FP8_E4M3) {
+        const size_t gateScaleCount =
+            ((size_t(gate->dims[0]) - 1) / gate->blockK + 1) * observed.gateScaleCols;
+        const size_t downScaleCount =
+            ((size_t(down->dims[0]) - 1) / down->blockK + 1) * observed.downScaleCols;
+        if (gate->scales.size() != gateScaleCount || down->scales.size() != downScaleCount)
+            return false;
+        observed.gateScaleBytes = gateScaleCount * sizeof(float);
+        observed.downScaleBytes = downScaleCount * sizeof(float);
+    }
+    // All formats retain 128-byte alignment at every host record boundary.
+    observed.recordStride = AlignUp(observed.scalesOffset +
+        observed.gateScaleBytes + observed.downScaleBytes, 128);
     if (observed.gateBytes == 0 || observed.downBytes == 0) {
         return false;
     }
     if (expected == nullptr) {
         return true;
     }
-    return expected->hidden == observed.hidden &&
+    return expected->weightType == observed.weightType &&
+           expected->hidden == observed.hidden &&
            expected->inter == observed.inter &&
            expected->gateBlockK == observed.gateBlockK &&
            expected->gateBlockM == observed.gateBlockM &&
@@ -164,6 +208,8 @@ bool ValidateWeightPair(fastllm::Data *gate, fastllm::Data *down,
            expected->downBytes == observed.downBytes &&
            expected->downOffset == observed.downOffset &&
            expected->scalesOffset == observed.scalesOffset &&
+           expected->gateScaleBytes == observed.gateScaleBytes &&
+           expected->downScaleBytes == observed.downScaleBytes &&
            expected->recordStride == observed.recordStride;
 }
 
@@ -201,10 +247,11 @@ void ReleaseDeviceCache(DeviceCache &cache) {
     cudaFree(cache.missCount);
     cudaFree(cache.hitCount);
     cudaFree(cache.totalMissCount);
+    cudaFree(cache.fp8Pointers);
     cache = DeviceCache();
 }
 
-void PrintDeviceCacheStats(const DeviceCache &cache) {
+void PrintDeviceCacheStats(const DeviceCache &cache, fastllm::DataType weightType) {
     if (!cache.ready || cache.hitCount == nullptr ||
         cache.totalMissCount == nullptr) {
         return;
@@ -227,15 +274,34 @@ void PrintDeviceCacheStats(const DeviceCache &cache) {
             static_cast<double>(routes);
     std::fprintf(
         stderr,
-        "[Fastllm] NVFP4 GPU expert cache stats cuda:%d: "
+        "[Fastllm] %s GPU expert cache stats cuda:%d: "
         "%llu hits, %llu misses, %.3f%% hit rate, %d slots.\n",
-        cache.device, hits, misses, hitRate, cache.slots);
+        FormatName(weightType), cache.device, hits, misses, hitRate, cache.slots);
 }
 
 bool AllocateOne(void **pointer, size_t bytes) {
     *pointer = nullptr;
     return bytes > 0 && cudaMalloc(pointer, bytes) == cudaSuccess &&
            *pointer != nullptr;
+}
+
+bool PrepareFp8SlotPointers(DeviceCache &cache, const OffloadLayout &layout) {
+    const int tables = Fp8PointerTableCount(layout.weightType);
+    if (tables == 0) return true;
+    const size_t slots = cache.slots;
+    std::vector<void *> pointers(slots * tables);
+    for (size_t slot = 0; slot < slots; ++slot) {
+        uint8_t *record = cache.records + size_t(slot) * layout.recordStride;
+        pointers[slot] = record;
+        pointers[slots + slot] = record + layout.downOffset;
+        if (tables == 4) {
+            pointers[2 * slots + slot] = record + layout.scalesOffset;
+            pointers[3 * slots + slot] = record + layout.scalesOffset + layout.gateScaleBytes;
+        }
+    }
+    const size_t bytes = pointers.size() * sizeof(void *);
+    return AllocateOne(reinterpret_cast<void **>(&cache.fp8Pointers), bytes) &&
+        cudaMemcpy(cache.fp8Pointers, pointers.data(), bytes, cudaMemcpyHostToDevice) == cudaSuccess;
 }
 
 DeviceCache *GetDeviceCache(OffloadGroup &group) {
@@ -259,7 +325,7 @@ DeviceCache *GetDeviceCache(OffloadGroup &group) {
         group.layout.recordStride, group.totalRecords);
     if (slots < kMaxTopK) {
         std::fprintf(stderr,
-            "[Fastllm] NVFP4 offload cache needs at least %d slots; "
+            "[Fastllm] CUDA expert cache needs at least %d slots; "
             "requested %zu.\n", kMaxTopK, slots);
         return nullptr;
     }
@@ -272,7 +338,8 @@ DeviceCache *GetDeviceCache(OffloadGroup &group) {
         freeBytes, DeviceMemoryReserveBytes(totalBytes));
     const size_t metadataBytes =
         group.totalRecords * sizeof(int32_t) +
-        slots * (sizeof(int32_t) + sizeof(unsigned long long)) + 4096;
+        slots * (sizeof(int32_t) + sizeof(unsigned long long) +
+            Fp8PointerTableCount(group.layout.weightType) * sizeof(void *)) + 4096;
     size_t usableBytes = freeBytes > reserveBytes
         ? freeBytes - reserveBytes : 0;
     usableBytes = usableBytes > metadataBytes
@@ -280,7 +347,7 @@ DeviceCache *GetDeviceCache(OffloadGroup &group) {
     slots = std::min(slots, usableBytes / group.layout.recordStride);
     if (slots < kMaxTopK) {
         std::fprintf(stderr,
-            "[Fastllm] NVFP4 offload cache has insufficient free GPU "
+            "[Fastllm] CUDA expert cache has insufficient free GPU "
             "memory after reserving %.3f GiB for runtime allocations.\n",
             static_cast<double>(reserveBytes) /
                 (1024.0 * 1024.0 * 1024.0));
@@ -331,10 +398,11 @@ DeviceCache *GetDeviceCache(OffloadGroup &group) {
         cudaMemsetAsync(cache.hitCount, 0,
             sizeof(unsigned long long), cudaStreamPerThread) == cudaSuccess &&
         cudaMemsetAsync(cache.totalMissCount, 0,
-            sizeof(unsigned long long), cudaStreamPerThread) == cudaSuccess;
+            sizeof(unsigned long long), cudaStreamPerThread) == cudaSuccess &&
+        PrepareFp8SlotPointers(cache, group.layout);
     if (!initialized) {
         std::fprintf(stderr,
-            "[Fastllm] CUDA allocation or initialization of the NVFP4 expert cache failed: "
+            "[Fastllm] CUDA expert cache allocation or initialization failed: "
             "%s.\n", cudaGetErrorString(cudaGetLastError()));
         ReleaseDeviceCache(cache);
         cache.attempted = true;
@@ -345,9 +413,9 @@ DeviceCache *GetDeviceCache(OffloadGroup &group) {
     cache.ready = true;
 
     std::fprintf(stderr,
-        "[Fastllm] NVFP4 GPU expert cache: %d slots, %.3f GiB, "
+        "[Fastllm] %s GPU expert cache: %d slots, %.3f GiB, "
         "%zu records in mapped host storage; refill grid %d x %d.\n",
-        cache.slots,
+        FormatName(group.layout.weightType), cache.slots,
         static_cast<double>(slots * group.layout.recordStride) /
             (1024.0 * 1024.0 * 1024.0),
         group.totalRecords, cache.copyLaunch.blocks, cache.copyLaunch.threads);
@@ -379,7 +447,6 @@ struct ActivationTraits;
 
 template <>
 struct ActivationTraits<float> {
-    static constexpr fastllm::DataType type = fastllm::DataType::FLOAT32;
     __device__ static float ToFloat(float value) { return value; }
     __device__ static float FromFloat(float value) { return value; }
     __device__ static float E4M3ToFloat(uint8_t value) {
@@ -391,14 +458,12 @@ struct ActivationTraits<float> {
 
 template <>
 struct ActivationTraits<half> : ActivationTraits<float> {
-    static constexpr fastllm::DataType type = fastllm::DataType::FLOAT16;
     __device__ static float ToFloat(half value) { return __half2float(value); }
     __device__ static half FromFloat(float value) { return __float2half(value); }
 };
 
 template <>
 struct ActivationTraits<__nv_bfloat16> {
-    static constexpr fastllm::DataType type = fastllm::DataType::BFLOAT16;
     __device__ static float ToFloat(__nv_bfloat16 value) {
         return __bfloat162float(value);
     }
@@ -772,40 +837,9 @@ __global__ void FastllmNVFP4OffloadDownExactWideKernel(
 }
 
 template <typename T>
-bool RunTyped(const fastllm::Data &input, fastllm::Data &gateOutput,
-              fastllm::Data &output, OffloadGroup &group,
-              DeviceCache &cache, int tableId, const int32_t *indices,
-              const float *scores, int topk) {
-    const OffloadLayout &layout = group.layout;
-    gateOutput.dataType = ActivationTraits<T>::type;
-    gateOutput.dataDevice = input.dataDevice;
-    gateOutput.dataDeviceIds = input.dataDeviceIds;
-    gateOutput.Resize({topk, layout.inter});
-    output.dataType = ActivationTraits<T>::type;
-    output.dataDevice = input.dataDevice;
-    output.dataDeviceIds = input.dataDeviceIds;
-    output.Resize({1, layout.hidden});
-    gateOutput.Allocate(false);
-    output.Allocate(false);
-    if (gateOutput.cudaData == nullptr || output.cudaData == nullptr) {
-        return false;
-    }
-
-    fastllm::cuda::ExpertCacheView metadata{
-        cache.keyToSlot, cache.slotKeys, cache.lastUsed, cache.step,
-        cache.hitCount, cache.totalMissCount, cache.slots};
-    if (!fastllm::cuda::EnsureExpertCache<kMaxTopK>(
-            metadata, indices, tableId * layout.experts, layout.experts, topk,
-            cache.routeSlots, cache.missExperts, cache.missSlots, cache.missCount,
-            cache.ensureThreads, cudaStreamPerThread)) return false;
-    const uint8_t *sourceTable = group.deviceHostRecords +
-        static_cast<size_t>(tableId) * layout.experts *
-        layout.recordStride;
-    if (!fastllm::cuda::CopyRecords(
-            {sourceTable, cache.records, layout.recordStride,
-             layout.recordStride, layout.recordStride},
-            cache.missExperts, cache.missSlots, cache.missCount, topk,
-            cache.copyLaunch, cudaStreamPerThread)) return false;
+bool LaunchNVFP4Cache(const fastllm::Data &input, fastllm::Data &gateOutput,
+                       fastllm::Data &output, const OffloadLayout &layout,
+                       const DeviceCache &cache, const float *scores, int topk) {
     const bool useExactWideDecode =
         layout.gateBlockK == 1 && layout.gateBlockM == 16 &&
         layout.downBlockK == 1 && layout.downBlockM == 16 &&
@@ -900,8 +934,8 @@ bool FastllmCudaPrepareMoeCache(
                     layers[layer].weights[position + 1];
                 std::fprintf(stderr,
                     "[Fastllm] CUDA expert cache rejected layer %d expert %d: "
-                    "requires matching host-resident compact NVFP4 weights "
-                    "and gate/up/down scales (gate dtype=%d, down dtype=%d).\n",
+                    "requires matching host-resident NVFP4 or FP8 weights "
+                    "and valid scales (gate dtype=%d, down dtype=%d).\n",
                     layer, expert,
                     gate == nullptr ? -1 : static_cast<int>(gate->dataType),
                     down == nullptr ? -1 : static_cast<int>(down->dataType));
@@ -931,7 +965,7 @@ bool FastllmCudaPrepareMoeCache(
     if (requestedSlots < kMaxTopK) {
         std::fprintf(
             stderr,
-            "[Fastllm] NVFP4 GPU expert cache needs at least %d slots; "
+            "[Fastllm] CUDA expert cache needs at least %d slots; "
             "the configured budget holds %zu.\n",
             kMaxTopK, requestedSlots);
         return false;
@@ -942,7 +976,7 @@ bool FastllmCudaPrepareMoeCache(
         &host, hostBytes, cudaHostAllocMapped | cudaHostAllocPortable);
     if (state != cudaSuccess || host == nullptr) {
         std::fprintf(stderr,
-            "[Fastllm] NVFP4 offload could not allocate %.3f GiB of mapped "
+            "[Fastllm] CUDA expert cache could not allocate %.3f GiB of mapped "
             "host storage: %s. The normal MoE backend remains active.\n",
             static_cast<double>(hostBytes) /
                 (1024.0 * 1024.0 * 1024.0),
@@ -955,7 +989,7 @@ bool FastllmCudaPrepareMoeCache(
     state = cudaHostGetDevicePointer(&deviceHost, host, 0);
     if (state != cudaSuccess || deviceHost == nullptr) {
         std::fprintf(stderr,
-            "[Fastllm] NVFP4 offload could not map host storage: %s.\n",
+            "[Fastllm] CUDA expert cache could not map host storage: %s.\n",
             cudaGetErrorString(state));
         cudaFreeHost(host);
         cudaGetLastError();
@@ -977,11 +1011,12 @@ bool FastllmCudaPrepareMoeCache(
             std::memcpy(record, gate->cpuData, layout.gateBytes);
             std::memcpy(record + layout.downOffset,
                         down->cpuData, layout.downBytes);
-            float *globalScales = reinterpret_cast<float *>(
-                record + layout.scalesOffset);
-            globalScales[0] = gate->scales[0];
-            globalScales[1] = gate->scales[1];
-            globalScales[2] = down->scales[0];
+            if (layout.gateScaleBytes) {
+                std::memcpy(record + layout.scalesOffset,
+                            gate->scales.data(), layout.gateScaleBytes);
+                std::memcpy(record + layout.scalesOffset + layout.gateScaleBytes,
+                            down->scales.data(), layout.downScaleBytes);
+            }
         }
     }
 
@@ -991,9 +1026,9 @@ bool FastllmCudaPrepareMoeCache(
     }
     Groups().push_back(std::move(group));
     std::fprintf(stderr,
-        "[Fastllm] Prepared %d x %d compact NVFP4 experts in %.3f "
+        "[Fastllm] Prepared %d x %d %s experts in %.3f "
         "GiB of mapped host storage (record %zu bytes).\n",
-        layerCount, experts,
+        layerCount, experts, FormatName(layout.weightType),
         static_cast<double>(hostBytes) /
             (1024.0 * 1024.0 * 1024.0),
         layout.recordStride);
@@ -1077,7 +1112,7 @@ void FastllmCudaReleaseMoeCache(
     int originalDevice = -1;
     cudaGetDevice(&originalDevice);
     for (auto &cache : released->deviceCaches) {
-        PrintDeviceCacheStats(*cache.second);
+        PrintDeviceCacheStats(*cache.second, released->layout.weightType);
         ReleaseDeviceCache(*cache.second);
     }
     released->deviceCaches.clear();
@@ -1113,13 +1148,58 @@ bool FastllmCudaMergeMOECacheBatch1(
     if (cache == nullptr) {
         return false;
     }
-    if (input.dataType == fastllm::DataType::FLOAT32) {
-        return RunTyped<float>(input, gateOutput, output, *group, *cache,
-                               tableId, indices, scores, topk);
+    const OffloadLayout &layout = group->layout;
+    gateOutput.dataType = input.dataType;
+    gateOutput.dataDevice = input.dataDevice;
+    gateOutput.dataDeviceIds = input.dataDeviceIds;
+    gateOutput.Resize({topk, layout.inter});
+    output.dataType = input.dataType;
+    output.dataDevice = input.dataDevice;
+    output.dataDeviceIds = input.dataDeviceIds;
+    output.Resize({1, layout.hidden});
+    gateOutput.Allocate(false);
+    output.Allocate(false);
+    if (gateOutput.cudaData == nullptr || output.cudaData == nullptr) {
+        return false;
     }
-    return input.dataType == fastllm::DataType::FLOAT16
-        ? RunTyped<half>(input, gateOutput, output, *group, *cache,
-                         tableId, indices, scores, topk)
-        : RunTyped<__nv_bfloat16>(input, gateOutput, output, *group, *cache,
-                                  tableId, indices, scores, topk);
+
+    fastllm::cuda::ExpertCacheView metadata{
+        cache->keyToSlot, cache->slotKeys, cache->lastUsed, cache->step,
+        cache->hitCount, cache->totalMissCount, cache->slots};
+    if (!fastllm::cuda::EnsureExpertCache<kMaxTopK>(
+            metadata, indices, tableId * layout.experts, layout.experts, topk,
+            cache->routeSlots, cache->missExperts, cache->missSlots, cache->missCount,
+            cache->ensureThreads, cudaStreamPerThread)) return false;
+    const uint8_t *sourceTable = group->deviceHostRecords +
+        static_cast<size_t>(tableId) * layout.experts *
+        layout.recordStride;
+    if (!fastllm::cuda::CopyRecords(
+            {sourceTable, cache->records, layout.recordStride,
+             layout.recordStride, layout.recordStride},
+            cache->missExperts, cache->missSlots, cache->missCount, topk,
+            cache->copyLaunch, cudaStreamPerThread)) return false;
+    if (layout.weightType != fastllm::DataType::NVFP4_BLOCK_16_E4M3) {
+        const size_t slots = cache->slots;
+        const bool externalScales = layout.weightType == fastllm::DataType::FP8_E4M3;
+        const FastllmCudaMoeFP8CacheView view{
+            layout.weightType,
+            reinterpret_cast<uint8_t **>(cache->fp8Pointers),
+            reinterpret_cast<uint8_t **>(cache->fp8Pointers + slots),
+            externalScales ? reinterpret_cast<float **>(cache->fp8Pointers + 2 * slots) : nullptr,
+            externalScales ? reinterpret_cast<float **>(cache->fp8Pointers + 3 * slots) : nullptr,
+            layout.gateBlockM, layout.gateBlockK,
+            layout.downBlockM, layout.downBlockK};
+        return FastllmCudaMoeFP8CacheCompute(
+            input, gateOutput, output, view, cache->routeSlots, scores, topk);
+    }
+    switch (input.dataType) {
+        case fastllm::DataType::FLOAT32:
+            return LaunchNVFP4Cache<float>(input, gateOutput, output, layout, *cache, scores, topk);
+        case fastllm::DataType::FLOAT16:
+            return LaunchNVFP4Cache<half>(input, gateOutput, output, layout, *cache, scores, topk);
+        case fastllm::DataType::BFLOAT16:
+            return LaunchNVFP4Cache<__nv_bfloat16>(input, gateOutput, output, layout, *cache, scores, topk);
+        default:
+            return false;
+    }
 }

@@ -24,6 +24,17 @@ template <typename T>
 struct FastllmMoeFp8Traits;
 
 template <>
+struct FastllmMoeFp8Traits<float> {
+    static constexpr fastllm::DataType dataType = fastllm::DataType::FLOAT32;
+    __device__ __forceinline__ static float toFloat(float value) { return value; }
+    __device__ __forceinline__ static float fromFloat(float value) { return value; }
+    __device__ __forceinline__ static float fp8ToFloat(uint8_t value) {
+        return __half2float(__ushort_as_half(((value & 0x80) << 8) | ((value & 0x7F) << 7)));
+    }
+    __device__ __forceinline__ static float magicScale() { return exp2f(8.0f); }
+};
+
+template <>
 struct FastllmMoeFp8Traits<half> {
     static constexpr fastllm::DataType dataType = fastllm::DataType::FLOAT16;
 
@@ -5394,6 +5405,77 @@ static bool FastllmCudaTypedMergeMOEFP8E4M3Batch1Indexed(const fastllm::Data &in
     FastllmCudaFinishInput(input, cudaInput);
     return true;
 }
+
+#ifndef USE_ROCM
+template <typename T>
+static bool LaunchMoeFP8Cache(
+        const fastllm::Data &inputData, fastllm::Data &gateData,
+        fastllm::Data &outputData, const FastllmCudaMoeFP8CacheView &view,
+        const int32_t *slots, const float *scores, int topk) {
+    T *input = static_cast<T *>(inputData.cudaData);
+    T *gate = static_cast<T *>(gateData.cudaData);
+    T *output = static_cast<T *>(outputData.cudaData);
+    const int hidden = inputData.dims[1], inter = gateData.dims[1];
+    const dim3 grid(inter, topk);
+    if (view.weightType == fastllm::DataType::FP8_E4M3_BLOCK_128) {
+        const int gatePitch = hidden + ((hidden - 1) / 128 + 1) * sizeof(float);
+        const int downPitch = inter + ((inter - 1) / 128 + 1) * sizeof(float);
+        FastllmGemvTypedFP8E4M3Block128TopKSwigluIndexedKernel<T, 64>
+            <<<grid, 64, 0, cudaStreamPerThread>>>(
+                input, slots, view.gateWeights, gate, topk, hidden, inter, gatePitch);
+        FastllmGemvTypedFP8E4M3Block128TopKDownReduceIndexedKernel<T, 64>
+            <<<hidden, 64, 0, cudaStreamPerThread>>>(
+                gate, slots, view.downWeights, output, scores, topk, inter, hidden, downPitch);
+    } else if constexpr (std::is_same_v<T, half>) {
+        FastllmGemvHalfFP8E4M3TopKSwigluIndexedKernel<64>
+            <<<grid, 64, 0, cudaStreamPerThread>>>(
+                input, slots, view.gateWeights, view.gateScales, gate,
+                topk, hidden, inter, view.gateBlockM, view.gateBlockK);
+        FastllmGemvHalfFP8E4M3TopKDownReduceIndexedKernel<64>
+            <<<hidden, 64, 0, cudaStreamPerThread>>>(
+                gate, slots, view.downWeights, view.downScales, output, scores,
+                topk, inter, hidden, view.downBlockM, view.downBlockK);
+    } else {
+        FastllmGemvTypedFP8E4M3TopKSwigluIndexedKernel<T, 64>
+            <<<grid, 64, 0, cudaStreamPerThread>>>(
+                input, slots, view.gateWeights, view.gateScales, gate,
+                topk, hidden, inter, view.gateBlockM, view.gateBlockK);
+        FastllmGemvTypedFP8E4M3TopKDownReduceIndexedKernel<T, 64>
+            <<<hidden, 64, 0, cudaStreamPerThread>>>(
+                gate, slots, view.downWeights, view.downScales, output, scores,
+                topk, inter, hidden, view.downBlockM, view.downBlockK);
+    }
+    return cudaGetLastError() == cudaSuccess;
+}
+
+bool FastllmCudaMoeFP8CacheCompute(
+        const fastllm::Data &input, fastllm::Data &gateOutput,
+        fastllm::Data &output, const FastllmCudaMoeFP8CacheView &view,
+        const int32_t *slots, const float *scores, int topk) {
+    if ((view.weightType != fastllm::DataType::FP8_E4M3 &&
+         view.weightType != fastllm::DataType::FP8_E4M3_BLOCK_128) ||
+        !view.gateWeights || !view.downWeights || !slots || !scores || topk <= 0 ||
+        !input.cudaData || !gateOutput.cudaData || !output.cudaData ||
+        input.dims.size() != 2 || gateOutput.dims.size() != 2 ||
+        input.dims[0] != 1 || gateOutput.dims[0] != topk ||
+        input.dims[1] <= 0 || gateOutput.dims[1] <= 0 ||
+        output.dims != input.dims || input.dataType != gateOutput.dataType ||
+        input.dataType != output.dataType) return false;
+    if (view.weightType == fastllm::DataType::FP8_E4M3 &&
+        (!view.gateScales || !view.downScales || view.gateBlockM <= 0 ||
+         view.gateBlockK <= 0 || view.downBlockM <= 0 || view.downBlockK <= 0)) return false;
+    switch (input.dataType) {
+        case fastllm::DataType::FLOAT32:
+            return LaunchMoeFP8Cache<float>(input, gateOutput, output, view, slots, scores, topk);
+        case fastllm::DataType::FLOAT16:
+            return LaunchMoeFP8Cache<half>(input, gateOutput, output, view, slots, scores, topk);
+        case fastllm::DataType::BFLOAT16:
+            return LaunchMoeFP8Cache<__nv_bfloat16>(input, gateOutput, output, view, slots, scores, topk);
+        default:
+            return false;
+    }
+}
+#endif
 
 bool FastllmCudaHalfMergeMOEFP8E4M3Batch1Indexed(const fastllm::Data &input, fastllm::Data &w1, fastllm::Data &output,
                                                  fastllm::Data **weights, int weightsBatch, const int32_t *indices,

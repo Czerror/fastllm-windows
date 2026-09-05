@@ -1586,11 +1586,8 @@ bool FastllmCudaMergeMOENVFP4E4M3MarlinIndexed(
         const int32_t *indices, const float *scores,
         int batch, int topk);
 #ifndef USE_ROCM
-// Model-facing interface for the opt-in GPU expert cache. Backends inspect
-// the actual weight format during preparation; the first implementation
-// supports compact E4M3 NVFP4 SwiGLU experts. Keeping format checks behind
-// this interface lets another MoE model reuse the cache without depending on
-// NVFP4-specific symbols.
+// Model-facing interface for the opt-in GPU expert cache. Preparation validates
+// compact NVFP4 or FP8 SwiGLU weights behind this format-independent interface.
 struct FastllmCudaMoeCacheLayer {
     fastllm::Data *const *weights = nullptr;
     int weightsBatch = 0;
@@ -1610,6 +1607,21 @@ bool FastllmCudaMergeMOECacheBatch1(
         const fastllm::Data &input, fastllm::Data &gateOutput,
         fastllm::Data &output, fastllm::Data **weights, int weightsBatch,
         const int32_t *indices, const float *scores, int topk);
+// Slot pointer tables are device-resident and stable for the lifetime of a
+// cache. Inputs/outputs are already allocated; this adapter only launches
+// the existing indexed FP8 compute kernels on cudaStreamPerThread.
+struct FastllmCudaMoeFP8CacheView {
+    fastllm::DataType weightType;
+    uint8_t **gateWeights;
+    uint8_t **downWeights;
+    float **gateScales;
+    float **downScales;
+    int gateBlockM, gateBlockK, downBlockM, downBlockK;
+};
+bool FastllmCudaMoeFP8CacheCompute(
+        const fastllm::Data &input, fastllm::Data &gateOutput,
+        fastllm::Data &output, const FastllmCudaMoeFP8CacheView &view,
+        const int32_t *slots, const float *scores, int topk);
 #endif
 bool FastllmCudaNVFP4E4M3GroupedMoeSupported(int device);
 bool FastllmCudaHalfMatMulFloatInt4Group128(const fastllm::Data &input, fastllm::Data &weight, const fastllm::Data &bias, fastllm::Data &output, int n, int m, int k);
