@@ -653,6 +653,10 @@ if (UNIT_TEST)
     add_executable(testTokenizer test/ops/tokenizerTest.cpp)
     target_link_libraries(testTokenizer fastllm)
 
+    add_executable(qwen4_mtp_weights_test test/basic/test_qwen4_mtp_weights.cpp)
+    target_link_libraries(qwen4_mtp_weights_test PRIVATE fastllm)
+    add_test(NAME qwen4_mtp_weights COMMAND qwen4_mtp_weights_test)
+
     add_executable(regressionOps test/ops/regressionOps.cpp)
     target_link_libraries(regressionOps fastllm)
     add_executable(contextExtensionRegression test/ops/contextExtension.cpp)

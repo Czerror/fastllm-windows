@@ -18,6 +18,9 @@
 #ifdef USE_CUDA
 #include "fastllm-cuda.cuh"
 #endif
+#ifdef USE_TFACC
+#include "fastllm-tfacc.h"
+#endif
 
 #include <algorithm>
 #include <cmath>
@@ -33,6 +36,9 @@
 #include <utility>
 
 namespace fastllm {
+#ifdef USE_NUMAS
+    void RegisterNumas(fastllm::Data *data, std::string weightType);
+#endif
 #ifdef USE_CUDA
     void FastllmCudaMergeMOEClearGraphUnsafeFallbackFlag();
     bool FastllmCudaMergeMOEUsedGraphUnsafeFallback();
@@ -1731,6 +1737,15 @@ namespace fastllm {
                 result[name].push_back({name, visualType});
                 continue;
             }
+            if (mtpWeight &&
+                (name == "mtp.layers.0.mlp.experts.gate_up_proj" ||
+                 name == "mtp.layers.0.mlp.experts.down_proj")) {
+                // ModelOpt leaves the packed MTP experts in BF16. Keep the
+                // source precision and split the expert axis after loading;
+                // these tensors must not inherit the target's NVFP4 layout.
+                result[name].push_back({name, DataType::BFLOAT16});
+                continue;
+            }
             if (name.find("ple_embedding.layer_multipliers") != std::string::npos ||
                 name.find("ple_embedding.ngram_heads_offsets") != std::string::npos ||
                 name.find("ple_embedding.ngram_heads_vocab_sizes") != std::string::npos) {
@@ -1770,6 +1785,80 @@ namespace fastllm {
         }
         result.insert(mapped.begin(), mapped.end());
         return result;
+    }
+
+    void Qwen4ExpModel::OnWeightLoaded(
+            const std::string &weightName,
+            const std::set<std::string> &finishedWeightNames) {
+        const std::string prefix = "mtp.layers.0.mlp.experts.";
+        const std::string gateName = prefix + "gate_up_proj";
+        const std::string downName = prefix + "down_proj";
+        if ((weightName != gateName && weightName != downName) ||
+            finishedWeightNames.count(gateName) == 0 ||
+            finishedWeightNames.count(downName) == 0) {
+            return;
+        }
+        auto gate = this->weight.weight.find(gateName);
+        auto down = this->weight.weight.find(downName);
+        if (gate == this->weight.weight.end() ||
+            down == this->weight.weight.end()) {
+            return;
+        }
+        const Data &gateUp = gate->second;
+        const Data &downProj = down->second;
+        AssertInFastLLM(
+            gateUp.dims.size() == 3 && downProj.dims.size() == 3 &&
+            this->num_experts > 0 &&
+            gateUp.dims[0] == this->num_experts &&
+            downProj.dims[0] == this->num_experts &&
+            downProj.dims[1] > 0 && downProj.dims[2] > 0 &&
+            gateUp.dims[1] == 2 * downProj.dims[2] &&
+            gateUp.dims[2] == downProj.dims[1],
+            "Qwen4-Exp packed MTP expert shapes are inconsistent.\n");
+        for (const Data *source : {&gateUp, &downProj}) {
+            AssertInFastLLM(
+                source->dataDevice == DataDevice::CPU &&
+                source->cpuData != nullptr &&
+                (source->dataType == DataType::FLOAT16 ||
+                 source->dataType == DataType::BFLOAT16 ||
+                 source->dataType == DataType::FLOAT32),
+                "Qwen4-Exp packed MTP experts require CPU floating-point weights.\n");
+        }
+        for (int expert = 0; expert < this->num_experts; expert++) {
+            for (const Data *source : {&gateUp, &downProj}) {
+                const bool isGate = source == &gateUp;
+                const std::string name = prefix + std::to_string(expert) +
+                    (isGate ? ".gateup_proj.weight" : ".down_proj.weight");
+                AssertInFastLLM(this->weight.weight.count(name) == 0,
+                    "Qwen4-Exp checkpoint mixes packed and separate MTP experts.\n");
+                Data &target = this->weight.weight[name];
+                target = Data(source->dataType,
+                              {source->dims[1], source->dims[2]});
+                target.Allocate();
+                std::memcpy(target.cpuData,
+                            source->cpuData + target.GetBytes() * expert,
+                            target.GetBytes());
+                target.name = name;
+                target.weightType = WeightType::LINEAR;
+                target.isModelWeight = true;
+                target.CalcWeightSum();
+                const std::string kind = isGate ? "linearSwiglu" : "linearColumn";
+#ifdef USE_TFACC
+                if (ShouldRegisterSpecialWeightForDeviceType(name, "tfacc")) {
+                    target.weightSum.resize(1);
+                    RegisterFastllmData(&target, kind);
+                }
+#endif
+#ifdef USE_NUMAS
+                if (ShouldRegisterSpecialWeightForDeviceType(name, "numa")) {
+                    RegisterNumas(&target, kind);
+                }
+#endif
+                MoveSpecialWeightToCudaIfNeeded(name, target);
+            }
+        }
+        this->weight.weight.erase(gateName);
+        this->weight.weight.erase(downName);
     }
 
     void Qwen4ExpModel::OnModelWeightsLoaded() {
