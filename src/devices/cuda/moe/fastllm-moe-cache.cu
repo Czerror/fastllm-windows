@@ -104,6 +104,7 @@ struct DeviceCache {
     // Contiguous slot pointer tables: gate/down weights, then external scales
     // for native E4M3. Packed block128 needs only the two weight tables.
     void **fp8Pointers = nullptr;
+    void **numaPointers = nullptr;
 };
 
 struct OffloadGroup {
@@ -112,6 +113,11 @@ struct OffloadGroup {
     uint8_t *hostRecords = nullptr;
     uint8_t *deviceHostRecords = nullptr;
     std::vector<const fastllm::Data *> tableKeys;
+    // When NUMA storage is shared, hostRecords contains only original scales.
+    // The weight shards are borrowed from the model's prefill backend.
+    std::vector<void *> numaPointers;
+    int numaCount = 0;
+    size_t hostScaleStride = 0;
     std::unordered_map<int, std::unique_ptr<DeviceCache> > deviceCaches;
     std::mutex mutex;
 };
@@ -120,6 +126,50 @@ struct CachedTable {
     OffloadGroup *group;
     int layer;
 };
+
+size_t NumaScaleStride(const OffloadLayout &layout) {
+    if (layout.weightType != fastllm::DataType::NVFP4_BLOCK_16_E4M3 ||
+        layout.gateBlockK != 1 || layout.downBlockK != 1 ||
+        layout.gateBlockM != 16 || layout.downBlockM != 16 ||
+        layout.hidden % 16 != 0 || layout.inter % 16 != 0 ||
+        layout.recordStride > UINT32_MAX / kMaxTopK) return 0;
+    const size_t weightBytes = size_t(layout.hidden) * layout.inter * 3 / 2;
+    const size_t bytes = layout.gateBytes + layout.downBytes - weightBytes + 3 * sizeof(float);
+    return AlignUp(bytes, 16);
+}
+
+bool BindNumaWeights(OffloadGroup &group, const std::vector<fastllm::Data *> &weights) {
+    const OffloadLayout &layout = group.layout;
+    const int nodes = weights.front()->numasData.size();
+    if (nodes <= 0 || (layout.inter * 2) % nodes != 0 ||
+        layout.hidden % nodes != 0) return false;
+    std::vector<void *> pointers;
+    pointers.reserve(weights.size() * nodes);
+    for (size_t index = 0; index < weights.size(); ++index) {
+        const fastllm::Data &weight = *weights[index];
+        const int rows = index % 2 == 0 ? 2 * layout.inter : layout.hidden;
+        const int columns = index % 2 == 0 ? layout.hidden : layout.inter;
+        if (weight.dataType != fastllm::DataType::NVFP4_BLOCK_16 ||
+            weight.dims.size() != 2 || weight.dims[0] != rows || weight.dims[1] != columns ||
+            weight.blockK != 1 || weight.blockM != 16 ||
+            weight.dataDevice != fastllm::DataDevice::CPU ||
+            !weight.isPinned || weight.cpuData != nullptr ||
+            weight.numasData.size() != size_t(nodes)) return false;
+        for (uint8_t *source : weight.numasData) {
+            void *mapped = nullptr;
+            if (source == nullptr || (reinterpret_cast<uintptr_t>(source) & 15) != 0 ||
+                cudaHostGetDevicePointer(&mapped, source, 0) != cudaSuccess ||
+                mapped == nullptr) {
+                cudaGetLastError();
+                return false;
+            }
+            pointers.push_back(source);
+        }
+    }
+    group.numaCount = nodes;
+    group.numaPointers = std::move(pointers);
+    return true;
+}
 
 std::mutex &RegistryMutex() {
     static auto *mutex = new std::mutex();
@@ -264,6 +314,7 @@ void ReleaseDeviceCache(DeviceCache &cache) {
     cudaFree(cache.hitCount);
     cudaFree(cache.totalMissCount);
     cudaFree(cache.fp8Pointers);
+    cudaFree(cache.numaPointers);
     cache = DeviceCache();
 }
 
@@ -354,6 +405,7 @@ DeviceCache *GetDeviceCache(OffloadGroup &group) {
         freeBytes, DeviceMemoryReserveBytes(totalBytes));
     const size_t metadataBytes =
         group.totalRecords * sizeof(int32_t) +
+        group.numaPointers.size() * sizeof(void *) +
         slots * (sizeof(int32_t) + sizeof(unsigned long long) +
             Fp8PointerTableCount(group.layout.weightType) * sizeof(void *)) + 4096;
     size_t usableBytes = freeBytes > reserveBytes
@@ -380,7 +432,7 @@ DeviceCache *GetDeviceCache(OffloadGroup &group) {
     cache.copyLaunch = fastllm::cuda::RecordCopyConfiguration(
         group.layout.recordStride, kMaxTopK, properties);
 
-    const bool initialized =
+    bool initialized =
         AllocateOne(reinterpret_cast<void **>(&cache.records),
                     slots * group.layout.recordStride) &&
         AllocateOne(reinterpret_cast<void **>(&cache.keyToSlot),
@@ -416,6 +468,18 @@ DeviceCache *GetDeviceCache(OffloadGroup &group) {
         cudaMemsetAsync(cache.totalMissCount, 0,
             sizeof(unsigned long long), cudaStreamPerThread) == cudaSuccess &&
         PrepareFp8SlotPointers(cache, group.layout);
+    if (initialized && !group.numaPointers.empty()) {
+        std::vector<void *> pointers(group.numaPointers.size());
+        for (size_t i = 0; initialized && i < pointers.size(); ++i) {
+            initialized = cudaHostGetDevicePointer(
+                &pointers[i], group.numaPointers[i], 0) == cudaSuccess;
+        }
+        const size_t bytes = pointers.size() * sizeof(void *);
+        initialized = initialized &&
+            AllocateOne(reinterpret_cast<void **>(&cache.numaPointers), bytes) &&
+            cudaMemcpy(cache.numaPointers, pointers.data(), bytes,
+                       cudaMemcpyHostToDevice) == cudaSuccess;
+    }
     if (!initialized) {
         std::fprintf(stderr,
             "[Fastllm] CUDA expert cache allocation or initialization failed: "
@@ -902,6 +966,68 @@ bool LaunchNVFP4Cache(const fastllm::Data &input, fastllm::Data &gateOutput,
     return cudaGetLastError() == cudaSuccess;
 }
 
+// NUMA block-16 storage has 8 weight bytes followed by a float scale. The
+// prefill layout stays untouched; decode refill gathers only the weight bytes
+// and restores the original planar E4M3 scales kept in the smaller snapshot.
+__device__ uint32_t LoadNumaWeightWord(
+        void *const *pointers, int nodes, int expert, int part,
+        int rows, int columns, uint32_t offset) {
+    const int rowBytes = columns / 2, rowsPerNode = rows / nodes;
+    int row = offset / rowBytes;
+    const int columnByte = offset % rowBytes;
+    if (part == 0) {
+        row = row < rows / 2 ? row * 2 : (row - rows / 2) * 2 + 1;
+    }
+    const int node = row / rowsPerNode;
+    const uint8_t *source = static_cast<const uint8_t *>(
+        pointers[(expert * 2 + part) * nodes + node]);
+    source += size_t(row % rowsPerNode) * (columns / 16) * 12 +
+              (columnByte / 8) * 12 + columnByte % 8;
+    return *reinterpret_cast<const uint32_t *>(source);
+}
+
+__global__ void CopyNumaNVFP4Records(
+        OffloadLayout layout, void *const *pointers, int nodes,
+        const uint8_t *scales, size_t scaleStride, uint8_t *records,
+        const int32_t *sourceIds, const int32_t *destinationIds,
+        const int32_t *count) {
+    const uint32_t units = layout.recordStride / sizeof(uint32_t);
+    const uint32_t gateWeightBytes = layout.inter * layout.hidden;
+    const uint32_t downWeightBytes = gateWeightBytes / 2;
+    const uint32_t gateScales = layout.gateBytes - gateWeightBytes;
+    const uint32_t downScales = layout.downBytes - downWeightBytes;
+    const uint32_t total = *count * units;
+    for (uint32_t flat = blockIdx.x * blockDim.x + threadIdx.x;
+         flat < total; flat += gridDim.x * blockDim.x) {
+        const uint32_t request = flat / units;
+        const uint32_t offset = (flat % units) * sizeof(uint32_t);
+        const int expert = sourceIds[request];
+        const uint8_t *sourceScales = scales + size_t(expert) * scaleStride;
+        uint32_t value = 0;
+        if (offset < gateWeightBytes) {
+            value = LoadNumaWeightWord(pointers, nodes, expert, 0,
+                layout.inter * 2, layout.hidden, offset);
+        } else if (offset < layout.gateBytes) {
+            value = *reinterpret_cast<const uint32_t *>(
+                sourceScales + offset - gateWeightBytes);
+        } else if (offset >= layout.downOffset &&
+                   offset < layout.downOffset + downWeightBytes) {
+            value = LoadNumaWeightWord(pointers, nodes, expert, 1,
+                layout.hidden, layout.inter, offset - layout.downOffset);
+        } else if (offset >= layout.downOffset + downWeightBytes &&
+                   offset < layout.downOffset + layout.downBytes) {
+            value = *reinterpret_cast<const uint32_t *>(sourceScales + gateScales +
+                offset - layout.downOffset - downWeightBytes);
+        } else if (offset >= layout.scalesOffset &&
+                   offset < layout.scalesOffset + 3 * sizeof(float)) {
+            value = *reinterpret_cast<const uint32_t *>(sourceScales + gateScales +
+                downScales + offset - layout.scalesOffset);
+        }
+        *reinterpret_cast<uint32_t *>(records +
+            size_t(destinationIds[request]) * layout.recordStride + offset) = value;
+    }
+}
+
 } // namespace
 
 bool FastllmCudaMoeCacheRequested() {
@@ -909,7 +1035,8 @@ bool FastllmCudaMoeCacheRequested() {
 }
 
 bool FastllmCudaPrepareMoeCache(
-        const FastllmCudaMoeCacheLayer *layers, int layerCount) {
+        const FastllmCudaMoeCacheLayer *layers, int layerCount,
+        const std::function<void()> &registerNumaWeights) {
     if (!FastllmCudaMoeCacheRequested()) {
         return false;
     }
@@ -986,7 +1113,12 @@ bool FastllmCudaPrepareMoeCache(
             kMaxTopK, requestedSlots);
         return false;
     }
-    const size_t hostBytes = group->totalRecords * layout.recordStride;
+    // Capture scales directly from compact checkpoint tensors, before NUMA
+    // registration releases them. Never allocate a duplicate weight snapshot.
+    group->hostScaleStride = registerNumaWeights ? NumaScaleStride(layout) : 0;
+    const bool shareNuma = group->hostScaleStride > 0;
+    const size_t hostStride = shareNuma ? group->hostScaleStride : layout.recordStride;
+    const size_t hostBytes = group->totalRecords * hostStride;
     void *host = nullptr;
     cudaError_t state = cudaHostAlloc(
         &host, hostBytes, cudaHostAllocMapped | cudaHostAllocPortable);
@@ -1000,19 +1132,22 @@ bool FastllmCudaPrepareMoeCache(
         cudaGetLastError();
         return false;
     }
-    group->hostRecords = reinterpret_cast<uint8_t *>(host);
+    // Also releases the unpublished snapshot if registration fails or throws.
+    std::unique_ptr<void, decltype(&cudaFreeHost)> hostOwner(host, cudaFreeHost);
+    group->hostRecords = static_cast<uint8_t *>(host);
     void *deviceHost = nullptr;
     state = cudaHostGetDevicePointer(&deviceHost, host, 0);
     if (state != cudaSuccess || deviceHost == nullptr) {
         std::fprintf(stderr,
             "[Fastllm] CUDA expert cache could not map host storage: %s.\n",
             cudaGetErrorString(state));
-        cudaFreeHost(host);
         cudaGetLastError();
         return false;
     }
     group->deviceHostRecords = reinterpret_cast<uint8_t *>(deviceHost);
     group->tableKeys.reserve(layerCount);
+    std::vector<fastllm::Data *> expertWeights;
+    if (shareNuma) expertWeights.reserve(group->totalRecords * 2);
 
     for (int layer = 0; layer < layerCount; ++layer) {
         fastllm::Data *tableKey = layers[layer].weights[2];
@@ -1023,24 +1158,52 @@ bool FastllmCudaPrepareMoeCache(
             fastllm::Data *down = layers[layer].weights[position + 1];
             uint8_t *record = group->hostRecords +
                 (static_cast<size_t>(layer) * experts + expert) *
-                layout.recordStride;
-            std::memcpy(record, gate->cpuData, layout.gateBytes);
-            std::memcpy(record + layout.downOffset,
-                        down->cpuData, layout.downBytes);
-            if (layout.gateScaleBytes) {
-                std::memcpy(record + layout.scalesOffset,
+                hostStride;
+            if (shareNuma) {
+                expertWeights.push_back(gate);
+                expertWeights.push_back(down);
+                const size_t gateScales = layout.gateBytes - size_t(layout.inter) * layout.hidden;
+                const size_t downScales = layout.downBytes - size_t(layout.inter) * layout.hidden / 2;
+                std::memcpy(record, fastllm::GetNVFP4ScaleData(*gate), gateScales);
+                std::memcpy(record + gateScales, fastllm::GetNVFP4ScaleData(*down), downScales);
+                std::memcpy(record + gateScales + downScales, gate->scales.data(), 2 * sizeof(float));
+                std::memcpy(record + gateScales + downScales + 2 * sizeof(float),
+                            down->scales.data(), sizeof(float));
+                std::memset(record + gateScales + downScales + 3 * sizeof(float), 0,
+                            hostStride - gateScales - downScales - 3 * sizeof(float));
+            } else {
+                std::memcpy(record, gate->cpuData, layout.gateBytes);
+                std::memcpy(record + layout.downOffset,
+                            down->cpuData, layout.downBytes);
+                if (layout.gateScaleBytes) {
+                    std::memcpy(record + layout.scalesOffset,
                             gate->scales.data(), layout.gateScaleBytes);
-                std::memcpy(record + layout.scalesOffset + layout.gateScaleBytes,
+                    std::memcpy(record + layout.scalesOffset + layout.gateScaleBytes,
                             down->scales.data(), layout.downScaleBytes);
+                }
             }
         }
     }
 
+    if (shareNuma) {
+        registerNumaWeights();
+        if (!BindNumaWeights(*group, expertWeights)) {
+            std::fprintf(stderr, "[Fastllm] CUDA expert cache requires matching pinned NUMA "
+                         "shards after registration; using the configured MoE backend.\n");
+            return false;
+        }
+        std::fprintf(stderr,
+            "[Fastllm] NVFP4 expert cache shares %d NUMA shards per weight; "
+            "original scales use %.3f GiB, avoiding a %.3f GiB host weight snapshot.\n",
+            group->numaCount, double(hostBytes) / (1ULL << 30),
+            double(group->totalRecords * (layout.recordStride - hostStride)) / (1ULL << 30));
+    }
     OffloadGroup *rawGroup = group.get();
     for (int layer = 0; layer < layerCount; ++layer) {
         TableRegistry()[group->tableKeys[layer]] = {rawGroup, layer};
     }
     Groups().push_back(std::move(group));
+    hostOwner.release();
     std::fprintf(stderr,
         "[Fastllm] Prepared %d x %d %s experts in %.3f "
         "GiB of mapped host storage (record %zu bytes).\n",
@@ -1174,7 +1337,8 @@ bool FastllmCudaMergeMOECache(
         cache->keyToSlot, cache->slotKeys, cache->lastUsed, cache->step,
         cache->hitCount, cache->totalMissCount, cache->slots};
     const uint8_t *sourceTable = group->deviceHostRecords +
-        static_cast<size_t>(tableId) * layout.experts * layout.recordStride;
+        static_cast<size_t>(tableId) * layout.experts *
+            (group->numaCount > 0 ? group->hostScaleStride : layout.recordStride);
     auto computeRow = [&](const fastllm::Data &input, fastllm::Data &gateOutput,
                           fastllm::Data &output, const int32_t *indices,
                           const float *scores) {
@@ -1182,7 +1346,14 @@ bool FastllmCudaMergeMOECache(
                 metadata, indices, tableId * layout.experts, layout.experts, topk,
                 cache->routeSlots, cache->missExperts, cache->missSlots, cache->missCount,
                 cache->ensureThreads, cudaStreamPerThread)) return false;
-        if (!fastllm::cuda::CopyRecords(
+        if (group->numaCount > 0) {
+            CopyNumaNVFP4Records<<<cache->copyLaunch.blocks, cache->copyLaunch.threads,
+                                  0, cudaStreamPerThread>>>(
+                layout,
+                cache->numaPointers + size_t(tableId) * layout.experts * 2 * group->numaCount,
+                group->numaCount, sourceTable, group->hostScaleStride, cache->records,
+                cache->missExperts, cache->missSlots, cache->missCount);
+        } else if (!fastllm::cuda::CopyRecords(
                 {sourceTable, cache->records, layout.recordStride,
                  layout.recordStride, layout.recordStride},
                 cache->missExperts, cache->missSlots, cache->missCount, topk,

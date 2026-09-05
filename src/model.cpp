@@ -286,7 +286,7 @@ namespace fastllm {
     }
 
     bool basellm::PrepareMoeCudaCache(
-            const std::vector<std::vector<Data *>> &layerWeights) const {
+            const std::vector<std::vector<Data *>> &layerWeights) {
 #if defined(USE_CUDA) && !defined(USE_ROCM)
         if (!FastllmCudaMoeCacheRequested() || layerWeights.empty()) {
             return false;
@@ -298,8 +298,19 @@ namespace fastllm {
                 weights.data(),
                 static_cast<int>(weights.size())});
         }
+        std::function<void()> registerNumaWeights;
+#ifdef USE_NUMAS
+        bool allNuma = true;
+        for (int layer = 0; layer < static_cast<int>(layers.size()); ++layer) {
+            const std::string device = SelectMoeDeviceForLayer(layer);
+            allNuma = allNuma && (device == "numa" || device.compare(0, 5, "numa:") == 0);
+        }
+        if (allNuma) {
+            registerNumaWeights = [this] { WarmupNumaMoeWeights(); };
+        }
+#endif
         return FastllmCudaPrepareMoeCache(
-            layers.data(), static_cast<int>(layers.size()));
+            layers.data(), static_cast<int>(layers.size()), registerNumaWeights);
 #else
         (void)layerWeights;
         return false;

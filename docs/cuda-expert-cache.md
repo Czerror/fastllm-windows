@@ -15,7 +15,8 @@ use binary units and must fit in uint64. No cache-specific environment
 variables or experimental kernel switches are required. CUDA Graph uses the
 existing application setting.
 
-The adapter runs single-token SwiGLU experts with FP32, FP16 or BF16 activations:
+The adapter runs SwiGLU experts for one to nine tokens with FP32, FP16 or BF16
+activations:
 
 | Expert weights | Host/cache record | Compute requirements |
 | --- | --- | --- |
@@ -38,13 +39,25 @@ NVIDIA CUDA adapter. A model must prepare its expert tables and call the cache
 dispatch/release interfaces to use the adapter; the CLI flag alone does not
 add integration to other model implementations.
 
-Qwen4-Exp MTP verifier batches contain multiple tokens and retain the configured
-MoE backend; MTP draft expert tables are not registered with this cache. With
-NUMA experts, these MTP paths run eagerly even when the application enables
-CUDA Graph. The cache only makes the single-token backbone graph eligible;
-it cannot make a NUMA verifier batch safe to capture. Verifier eligibility
-checks do not allocate a device expert cache. Enabling MTP therefore does not
-imply that it benefits from the GPU expert-cache budget.
+Qwen4-Exp MTP verifier batches of up to nine tokens can use the cache and become
+eligible for CUDA Graph when the remaining graph requirements are satisfied.
+Larger batches retain the configured MoE backend. MTP draft expert tables are
+not registered with this cache and retain their separately configured placement.
+
+For supported compact NVFP4 experts assigned entirely to NUMA, preparation
+copies only original E4M3/global scales, invokes the model's NUMA registration
+callback, then borrows its pinned block-16 shards. Refill restores compact GPU
+records without rounding; the CPU prefill layout and kernels stay unchanged.
+The cache is published only after all shards validate. Failure or an exception
+releases the temporary snapshot; unsupported layouts retain a full snapshot.
+Repeated preparation reuses the group, preserving graph source addresses.
+Borrowed weights must remain alive until the model releases the cache.
+
+For Qwen3.8-Flash-Next-NVFP4 this removes about 56.25 GiB of duplicate weights,
+retaining about 7.03 GiB of scales. No full snapshot is allocated during loading,
+though individual tensor conversions still need temporary storage. Refill must
+skip NUMA's FP32 scales, which can reduce decode throughput; measure this
+tradeoff at the intended GPU-cache size.
 
 For a native FP8 checkpoint, keep `--dtype auto` and use CUDA compute with
 `--moe_device numa --moe_cuda_cache 5g`. The same byte budget holds fewer FP8
@@ -175,6 +188,11 @@ aligned and odd widths; FP8 covers its supported layouts. Random FP8 tests
 compare gate and output bytes against the original all-resident GPU backend
 for FP16/BF16, including two layer tables, repeated expert IDs, changing inputs
 and scores, eviction and both eager execution and graph replay.
+
+Shared-NUMA NVFP4 cases compare gate/output bytes with a full snapshot across
+NUMA shard counts, verifier sizes, eviction and eager/graph replay, including a
+2560-by-640 expert. They cover distinct gate/up scales, invalid shards,
+registration exceptions, retries and reuse of an already-active cache.
 
 Architecture compilation and execution are distinct checks: compiling these
 tests for another SM does not establish its runtime correctness or performance.
