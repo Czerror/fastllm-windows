@@ -388,6 +388,8 @@ namespace fastllm {
         bool HasMtpWeights() const;
         bool MtpSupportsGenerationConfig(
             const GenerationConfig &generationConfig) const;
+        bool CanCloneMtpPrefixState(
+            const MtpRuntimeState &source, int cachedLen) const;
         std::shared_ptr<MtpRuntimeState> CloneMtpPrefixState(
             const MtpRuntimeState &source, int cachedLen) const;
         int RunMtpDraft(MtpRuntimeState &state,

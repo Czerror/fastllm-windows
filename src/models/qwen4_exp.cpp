@@ -5350,21 +5350,25 @@ namespace fastllm {
 
     }
 
-    std::shared_ptr<Qwen4ExpModel::MtpRuntimeState>
-    Qwen4ExpModel::CloneMtpPrefixState(
+    bool Qwen4ExpModel::CanCloneMtpPrefixState(
             const MtpRuntimeState &source, int cachedLen) const {
         const int expectedMtpLength = std::max(0, cachedLen - 1);
         const auto cacheLength = [](const Data &cache) {
             return cache.dims.size() > 1 ? cache.dims[1] : 0;
         };
-        if (cachedLen <= 0 || !source.hasDeferredTargetHidden ||
-            source.deferredPosition < 0 ||
-            source.deferredTargetHidden.dims !=
-                std::vector<int>({1, 1, this->hcCount * this->embed_dim}) ||
-            cacheLength(source.key) != expectedMtpLength ||
-            cacheLength(source.value) != expectedMtpLength ||
-            !source.proposals.empty() ||
-            !source.pendingOutputTokens.empty()) {
+        return cachedLen > 0 && source.hasDeferredTargetHidden &&
+            source.deferredPosition >= 0 &&
+            source.deferredTargetHidden.dims ==
+                std::vector<int>({1, 1, this->hcCount * this->embed_dim}) &&
+            cacheLength(source.key) == expectedMtpLength &&
+            cacheLength(source.value) == expectedMtpLength &&
+            source.proposals.empty() && source.pendingOutputTokens.empty();
+    }
+
+    std::shared_ptr<Qwen4ExpModel::MtpRuntimeState>
+    Qwen4ExpModel::CloneMtpPrefixState(
+            const MtpRuntimeState &source, int cachedLen) const {
+        if (!CanCloneMtpPrefixState(source, cachedLen)) {
             return nullptr;
         }
 
@@ -8126,6 +8130,23 @@ namespace fastllm {
             return;
         }
 
+        {
+            std::lock_guard<std::mutex> guard(this->prefixCacheMutex);
+            auto existing = FindPrefixSnapshotLocked(
+                state.processedTokens, cachedLen, cachedLen);
+            if (existing != nullptr) {
+                existing->timestamp = ++this->prefixSnapshotTimestamp;
+                state.lastPrefixSnapshotLen = cachedLen;
+                return;
+            }
+        }
+        // Snapshot materialization requires the deferred MTP boundary;
+        // proposal generation may already have advanced its QSA history.
+        if (state.mtpState != nullptr &&
+            !CanCloneMtpPrefixState(*state.mtpState, cachedLen)) {
+            return;
+        }
+
         // Snapshot state is copied by value. Complete the asynchronous groups
         // and materialize the device-resident PLE/QSA histories once at this
         // boundary so the snapshot has a self-sufficient generic fallback
@@ -8249,9 +8270,6 @@ namespace fastllm {
                 state.mtpState->attentionState);
             mtpSnapshotState = CloneMtpPrefixState(
                 *state.mtpState, cachedLen);
-            // A target-only snapshot would force every restored request to
-            // abandon MTP. Wait for an aligned boundary instead of recording
-            // a cache entry whose draft state cannot be continued correctly.
             if (mtpSnapshotState == nullptr) {
                 return;
             }
@@ -8300,13 +8318,6 @@ namespace fastllm {
                     state.prefixRequestId = 1;
                     this->prefixRequestCounter = 1;
                 }
-            }
-            auto existing = FindPrefixSnapshotLocked(
-                state.processedTokens, cachedLen, cachedLen);
-            if (existing != nullptr) {
-                existing->timestamp = ++this->prefixSnapshotTimestamp;
-                state.lastPrefixSnapshotLen = cachedLen;
-                return;
             }
         }
 
