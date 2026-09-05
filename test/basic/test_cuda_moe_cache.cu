@@ -175,6 +175,12 @@ template<class T>
 static void CompareFP8(fastllm::DataType dtype, fastllm::DataType weightType,
                        std::vector<std::unique_ptr<fastllm::Data>> &keepAlive, int batch = 1) {
     constexpr int hidden = 256, inter = 128, experts = 24, topk = 7, tables = 2;
+    const auto computeE4M3 = std::is_same_v<T, half>
+        ? FastllmCudaHalfMergeMOEFP8E4M3Batch1Indexed
+        : FastllmCudaBFloat16MergeMOEFP8E4M3Batch1Indexed;
+    const auto computeBlock128 = std::is_same_v<T, half>
+        ? FastllmCudaHalfMergeMOEFP8E4M3Block128Batch1Indexed
+        : FastllmCudaBFloat16MergeMOEFP8E4M3Block128Batch1Indexed;
     std::mt19937 rng(42);
     std::vector<std::unique_ptr<fastllm::Data>> owned;
     std::vector<fastllm::Data *> weights[tables];
@@ -261,19 +267,11 @@ static void CompareFP8(fastllm::DataType dtype, fastllm::DataType weightType,
             auto *index = static_cast<int32_t *>(ids.cudaData) + row * topk;
             auto *s = static_cast<float *>(scores.cudaData) + row * topk;
             if (weightType == fastllm::DataType::FP8_E4M3) {
-                if constexpr (std::is_same_v<T, half>)
-                    ok = FastllmCudaHalfMergeMOEFP8E4M3Batch1Indexed(rowInput, rowGate, rowOutput,
-                        weights[table].data(), weights[table].size(), index, s, topk, hidden, inter, false);
-                else
-                    ok = FastllmCudaBFloat16MergeMOEFP8E4M3Batch1Indexed(rowInput, rowGate, rowOutput,
-                        weights[table].data(), weights[table].size(), index, s, topk, hidden, inter, false);
+                ok = computeE4M3(rowInput, rowGate, rowOutput,
+                    weights[table].data(), weights[table].size(), index, s, topk, hidden, inter, false);
             } else {
-                if constexpr (std::is_same_v<T, half>)
-                    ok = FastllmCudaHalfMergeMOEFP8E4M3Block128Batch1Indexed(rowInput, rowGate, rowOutput,
-                        weights[table].data(), weights[table].size(), index, s, topk, hidden, inter);
-                else
-                    ok = FastllmCudaBFloat16MergeMOEFP8E4M3Block128Batch1Indexed(rowInput, rowGate, rowOutput,
-                        weights[table].data(), weights[table].size(), index, s, topk, hidden, inter);
+                ok = computeBlock128(rowInput, rowGate, rowOutput,
+                    weights[table].data(), weights[table].size(), index, s, topk, hidden, inter);
             }
             Require(ok, "resident FP8 reference failed");
         }

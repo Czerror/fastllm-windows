@@ -38,6 +38,16 @@ bool PackedCacheRows(const fastllm::Data &data) {
            (data.dims[0] == 1 || data.strides[0] == data.dims[1]);
 }
 
+bool SupportedCacheInput(const fastllm::Data &input) {
+    return PackedCacheRows(input) && input.dims[0] > 0 &&
+           input.dims[0] <= FASTLLM_CUDA_MOE_CACHE_MAX_BATCH &&
+           input.dataDevice == fastllm::DataDevice::CUDA &&
+           input.cudaData != nullptr &&
+           (input.dataType == fastllm::DataType::FLOAT32 ||
+            input.dataType == fastllm::DataType::FLOAT16 ||
+            input.dataType == fastllm::DataType::BFLOAT16);
+}
+
 size_t AlignUp(size_t value, size_t alignment) {
     return (value + alignment - 1) / alignment * alignment;
 }
@@ -1055,14 +1065,7 @@ bool FastllmCudaCanRunMoeCacheSmallBatch(
         const fastllm::Data &score, fastllm::Data **weights,
         int weightsBatch, fastllm::MoeGateType gateType) {
     const bool supportedInput = FastllmCudaMoeCacheRequested() &&
-           gateType == fastllm::MoeGateSwiglu &&
-           input.dims.size() == 2 && input.dims[0] > 0 &&
-           input.dims[0] <= FASTLLM_CUDA_MOE_CACHE_MAX_BATCH &&
-           (input.dataType == fastllm::DataType::FLOAT32 ||
-            input.dataType == fastllm::DataType::FLOAT16 ||
-            input.dataType == fastllm::DataType::BFLOAT16) &&
-           input.dataDevice == fastllm::DataDevice::CUDA &&
-           input.cudaData != nullptr &&
+           gateType == fastllm::MoeGateSwiglu && SupportedCacheInput(input) &&
            index.dims.size() == 2 && index.dims[0] == input.dims[0] &&
            index.dims[1] > 0 && index.dims[1] <= kMaxTopK &&
            index.dataDevice == fastllm::DataDevice::CUDA &&
@@ -1070,7 +1073,7 @@ bool FastllmCudaCanRunMoeCacheSmallBatch(
            index.cudaData != nullptr && score.dims == index.dims &&
            score.dataDevice == fastllm::DataDevice::CUDA &&
            score.dataType == fastllm::DataType::FLOAT32 &&
-           score.cudaData != nullptr && PackedCacheRows(input) &&
+           score.cudaData != nullptr &&
            PackedCacheRows(index) && PackedCacheRows(score);
     if (!supportedInput) {
         return false;
@@ -1138,15 +1141,8 @@ bool FastllmCudaMergeMOECache(
         const fastllm::Data &input, fastllm::Data &gateOutput,
         fastllm::Data &output, fastllm::Data **weights, int weightsBatch,
         const int32_t *indices, const float *scores, int topk) {
-    if (input.dataDevice != fastllm::DataDevice::CUDA ||
-        input.cudaData == nullptr || input.dims.size() != 2 ||
-        input.dims[0] <= 0 || input.dims[0] > FASTLLM_CUDA_MOE_CACHE_MAX_BATCH ||
-        !PackedCacheRows(input) ||
-        indices == nullptr || scores == nullptr ||
-        topk <= 0 || topk > kMaxTopK ||
-        (input.dataType != fastllm::DataType::FLOAT32 &&
-         input.dataType != fastllm::DataType::FLOAT16 &&
-         input.dataType != fastllm::DataType::BFLOAT16)) {
+    if (!SupportedCacheInput(input) || indices == nullptr || scores == nullptr ||
+        topk <= 0 || topk > kMaxTopK) {
         return false;
     }
     int tableId = -1;
@@ -1174,19 +1170,18 @@ bool FastllmCudaMergeMOECache(
         return false;
     }
 
+    const fastllm::cuda::ExpertCacheView metadata{
+        cache->keyToSlot, cache->slotKeys, cache->lastUsed, cache->step,
+        cache->hitCount, cache->totalMissCount, cache->slots};
+    const uint8_t *sourceTable = group->deviceHostRecords +
+        static_cast<size_t>(tableId) * layout.experts * layout.recordStride;
     auto computeRow = [&](const fastllm::Data &input, fastllm::Data &gateOutput,
                           fastllm::Data &output, const int32_t *indices,
                           const float *scores) {
-        fastllm::cuda::ExpertCacheView metadata{
-            cache->keyToSlot, cache->slotKeys, cache->lastUsed, cache->step,
-            cache->hitCount, cache->totalMissCount, cache->slots};
         if (!fastllm::cuda::EnsureExpertCache<kMaxTopK>(
                 metadata, indices, tableId * layout.experts, layout.experts, topk,
                 cache->routeSlots, cache->missExperts, cache->missSlots, cache->missCount,
                 cache->ensureThreads, cudaStreamPerThread)) return false;
-        const uint8_t *sourceTable = group->deviceHostRecords +
-            static_cast<size_t>(tableId) * layout.experts *
-            layout.recordStride;
         if (!fastllm::cuda::CopyRecords(
                 {sourceTable, cache->records, layout.recordStride,
                  layout.recordStride, layout.recordStride},

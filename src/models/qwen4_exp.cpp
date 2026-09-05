@@ -919,10 +919,12 @@ namespace fastllm {
             return true;
         }
 
-        bool Qwen4EnvFlagEnabled(const char *name) {
+        bool Qwen4EnvFlagEnabled(const char *name, bool fallback = false) {
             const char *value = std::getenv(name);
-            return value != nullptr && value[0] != '\0' &&
-                   std::strcmp(value, "0") != 0 &&
+            if (value == nullptr || value[0] == '\0') {
+                return fallback;
+            }
+            return std::strcmp(value, "0") != 0 &&
                    std::strcmp(value, "false") != 0 &&
                    std::strcmp(value, "FALSE") != 0 &&
                    std::strcmp(value, "off") != 0 &&
@@ -947,11 +949,9 @@ namespace fastllm {
         constexpr float QWEN4_MTP_TYPICAL_POSTERIOR_THRESHOLD = 0.09f;
         constexpr float QWEN4_MTP_TYPICAL_POSTERIOR_ALPHA = 0.3f;
 
-        bool Qwen4MtpFp8DraftHeadEnabled() {
-            const char *value = std::getenv("FASTLLM_MTP_FP8_DRAFT_HEAD");
-            return value == nullptr || value[0] == '\0' ||
-                   Qwen4EnvFlagEnabled("FASTLLM_MTP_FP8_DRAFT_HEAD");
-        }
+        const std::string kMtpExpertPrefix = "mtp.layers.0.mlp.experts.";
+        const std::string kMtpPackedGateName = kMtpExpertPrefix + "gate_up_proj";
+        const std::string kMtpPackedDownName = kMtpExpertPrefix + "down_proj";
 
         thread_local bool qwen4MtpDecodeEquivalentTarget = false;
 
@@ -967,9 +967,7 @@ namespace fastllm {
         };
 
         bool Qwen4PrefixCacheEnabled() {
-            const char *value = std::getenv("FASTLLM_PREFIX_CACHE");
-            return value == nullptr || value[0] == '\0' ||
-                   Qwen4EnvFlagEnabled("FASTLLM_PREFIX_CACHE");
+            return Qwen4EnvFlagEnabled("FASTLLM_PREFIX_CACHE", true);
         }
 
         bool Qwen4PrefixCacheDebugEnabled() {
@@ -1705,12 +1703,13 @@ namespace fastllm {
                     "ple_embedding.ngram_embedding.weight_scale") !=
                     std::string::npos;
             });
+        const bool loadMtp = Qwen4MtpDraftsPerStep() > 0;
         for (const std::string &name : tensorNames) {
             const bool mtpWeight = Qwen4StartsWith(name, "mtp.");
             if (name != "lm_head.weight" &&
                 !Qwen4StartsWith(name, languagePrefix) &&
                 !Qwen4StartsWith(name, visualPrefix) &&
-                !(mtpWeight && Qwen4MtpDraftsPerStep() > 0)) {
+                !(mtpWeight && loadMtp)) {
                 // MTP remains opt-in so normal inference keeps its established
                 // memory footprint. Vision weights are loaded when present so
                 // the public conditional-generation checkpoint is complete.
@@ -1737,9 +1736,7 @@ namespace fastllm {
                 result[name].push_back({name, visualType});
                 continue;
             }
-            if (mtpWeight &&
-                (name == "mtp.layers.0.mlp.experts.gate_up_proj" ||
-                 name == "mtp.layers.0.mlp.experts.down_proj")) {
+            if (name == kMtpPackedGateName || name == kMtpPackedDownName) {
                 // ModelOpt leaves the packed MTP experts in BF16. Keep the
                 // source precision and split the expert axis after loading;
                 // these tensors must not inherit the target's NVFP4 layout.
@@ -1790,16 +1787,13 @@ namespace fastllm {
     void Qwen4ExpModel::OnWeightLoaded(
             const std::string &weightName,
             const std::set<std::string> &finishedWeightNames) {
-        const std::string prefix = "mtp.layers.0.mlp.experts.";
-        const std::string gateName = prefix + "gate_up_proj";
-        const std::string downName = prefix + "down_proj";
-        if ((weightName != gateName && weightName != downName) ||
-            finishedWeightNames.count(gateName) == 0 ||
-            finishedWeightNames.count(downName) == 0) {
+        if ((weightName != kMtpPackedGateName && weightName != kMtpPackedDownName) ||
+            finishedWeightNames.count(kMtpPackedGateName) == 0 ||
+            finishedWeightNames.count(kMtpPackedDownName) == 0) {
             return;
         }
-        auto gate = this->weight.weight.find(gateName);
-        auto down = this->weight.weight.find(downName);
+        auto gate = this->weight.weight.find(kMtpPackedGateName);
+        auto down = this->weight.weight.find(kMtpPackedDownName);
         if (gate == this->weight.weight.end() ||
             down == this->weight.weight.end()) {
             return;
@@ -1827,7 +1821,7 @@ namespace fastllm {
         for (int expert = 0; expert < this->num_experts; expert++) {
             for (const Data *source : {&gateUp, &downProj}) {
                 const bool isGate = source == &gateUp;
-                const std::string name = prefix + std::to_string(expert) +
+                const std::string name = kMtpExpertPrefix + std::to_string(expert) +
                     (isGate ? ".gateup_proj.weight" : ".down_proj.weight");
                 AssertInFastLLM(this->weight.weight.count(name) == 0,
                     "Qwen4-Exp checkpoint mixes packed and separate MTP experts.\n");
@@ -1857,8 +1851,8 @@ namespace fastllm {
                 MoveSpecialWeightToCudaIfNeeded(name, target);
             }
         }
-        this->weight.weight.erase(gateName);
-        this->weight.weight.erase(downName);
+        this->weight.weight.erase(kMtpPackedGateName);
+        this->weight.weight.erase(kMtpPackedDownName);
     }
 
     void Qwen4ExpModel::OnModelWeightsLoaded() {
@@ -2108,7 +2102,6 @@ namespace fastllm {
                 this->mtpMoeBiass.push_back(nullptr);
                 this->mtpMoeBiass.push_back(nullptr);
             }
-
         }
         this->mtpWeightsStatus.store(hasMtpWeights ? 1 : 0, std::memory_order_release);
         this->preparedWeights = true;
@@ -2144,7 +2137,7 @@ namespace fastllm {
             previousDevice != lmHead.dataDeviceIds[0]) {
             FastllmCudaSetDevice(previousDevice);
         }
-        if ((!useNvfp4 && !Qwen4MtpFp8DraftHeadEnabled()) ||
+        if ((!useNvfp4 && !Qwen4EnvFlagEnabled("FASTLLM_MTP_FP8_DRAFT_HEAD", true)) ||
             lmHead.dims[1] % (useNvfp4 ? 16 : 128) != 0) {
             this->mtpDraftLmHeadAttempted = true;
             return;
