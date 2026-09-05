@@ -7,6 +7,7 @@
 
 #include "qwen3_next.h"
 
+#include <atomic>
 #include <cstdint>
 #include <deque>
 #include <map>
@@ -255,6 +256,7 @@ namespace fastllm {
         Data visionCosData;
 
         bool preparedWeights = false;
+        std::atomic<int> mtpWeightsStatus{-1};
         std::mutex prepareMutex;
         mutable std::mutex stateMutex;
         mutable std::map<const Data *, RequestState> requestStates;

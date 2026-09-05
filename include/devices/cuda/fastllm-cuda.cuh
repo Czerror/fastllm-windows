@@ -1592,18 +1592,21 @@ struct FastllmCudaMoeCacheLayer {
     fastllm::Data *const *weights = nullptr;
     int weightsBatch = 0;
 };
+// One anchor plus up to eight speculative tokens. Larger prefill batches
+// keep using the configured MoE backend.
+constexpr int FASTLLM_CUDA_MOE_CACHE_MAX_BATCH = 9;
 bool FastllmCudaMoeCacheRequested();
 bool FastllmCudaPrepareMoeCache(
         const FastllmCudaMoeCacheLayer *layers, int layerCount);
 bool FastllmCudaCanRunMoeCache(
         fastllm::Data **weights, int weightsBatch);
-bool FastllmCudaCanRunMoeCacheBatch1(
+bool FastllmCudaCanRunMoeCacheSmallBatch(
         const fastllm::Data &input, const fastllm::Data &index,
         const fastllm::Data &score, fastllm::Data **weights,
         int weightsBatch, fastllm::MoeGateType gateType);
 void FastllmCudaReleaseMoeCache(
         fastllm::Data **weights, int weightsBatch);
-bool FastllmCudaMergeMOECacheBatch1(
+bool FastllmCudaMergeMOECache(
         const fastllm::Data &input, fastllm::Data &gateOutput,
         fastllm::Data &output, fastllm::Data **weights, int weightsBatch,
         const int32_t *indices, const float *scores, int topk);

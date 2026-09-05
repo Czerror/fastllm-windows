@@ -32,6 +32,12 @@ constexpr size_t kMinDeviceMemoryReserveBytes = 256ULL << 20;
 constexpr size_t kMaxDeviceMemoryReserveBytes = 2ULL << 30;
 constexpr size_t kDeviceMemoryReserveDivisor = 16;
 
+bool PackedCacheRows(const fastllm::Data &data) {
+    return data.dims.size() == 2 && data.strides.size() == 2 &&
+           data.strides[1] == 1 &&
+           (data.dims[0] == 1 || data.strides[0] == data.dims[1]);
+}
+
 size_t AlignUp(size_t value, size_t alignment) {
     return (value + alignment - 1) / alignment * alignment;
 }
@@ -1044,26 +1050,28 @@ bool FastllmCudaCanRunMoeCache(
     return group != nullptr && GetDeviceCache(*group) != nullptr;
 }
 
-bool FastllmCudaCanRunMoeCacheBatch1(
+bool FastllmCudaCanRunMoeCacheSmallBatch(
         const fastllm::Data &input, const fastllm::Data &index,
         const fastllm::Data &score, fastllm::Data **weights,
         int weightsBatch, fastllm::MoeGateType gateType) {
     const bool supportedInput = FastllmCudaMoeCacheRequested() &&
            gateType == fastllm::MoeGateSwiglu &&
-           input.dims.size() == 2 && input.dims[0] == 1 &&
+           input.dims.size() == 2 && input.dims[0] > 0 &&
+           input.dims[0] <= FASTLLM_CUDA_MOE_CACHE_MAX_BATCH &&
            (input.dataType == fastllm::DataType::FLOAT32 ||
             input.dataType == fastllm::DataType::FLOAT16 ||
             input.dataType == fastllm::DataType::BFLOAT16) &&
            input.dataDevice == fastllm::DataDevice::CUDA &&
            input.cudaData != nullptr &&
-           index.dims.size() == 2 && index.dims[0] == 1 &&
+           index.dims.size() == 2 && index.dims[0] == input.dims[0] &&
            index.dims[1] > 0 && index.dims[1] <= kMaxTopK &&
            index.dataDevice == fastllm::DataDevice::CUDA &&
            index.dataType == fastllm::DataType::INT32 &&
            index.cudaData != nullptr && score.dims == index.dims &&
            score.dataDevice == fastllm::DataDevice::CUDA &&
            score.dataType == fastllm::DataType::FLOAT32 &&
-           score.cudaData != nullptr;
+           score.cudaData != nullptr && PackedCacheRows(input) &&
+           PackedCacheRows(index) && PackedCacheRows(score);
     if (!supportedInput) {
         return false;
     }
@@ -1126,13 +1134,15 @@ void FastllmCudaReleaseMoeCache(
     }
 }
 
-bool FastllmCudaMergeMOECacheBatch1(
+bool FastllmCudaMergeMOECache(
         const fastllm::Data &input, fastllm::Data &gateOutput,
         fastllm::Data &output, fastllm::Data **weights, int weightsBatch,
         const int32_t *indices, const float *scores, int topk) {
     if (input.dataDevice != fastllm::DataDevice::CUDA ||
         input.cudaData == nullptr || input.dims.size() != 2 ||
-        input.dims[0] != 1 || indices == nullptr || scores == nullptr ||
+        input.dims[0] <= 0 || input.dims[0] > FASTLLM_CUDA_MOE_CACHE_MAX_BATCH ||
+        !PackedCacheRows(input) ||
+        indices == nullptr || scores == nullptr ||
         topk <= 0 || topk > kMaxTopK ||
         (input.dataType != fastllm::DataType::FLOAT32 &&
          input.dataType != fastllm::DataType::FLOAT16 &&
@@ -1152,54 +1162,83 @@ bool FastllmCudaMergeMOECacheBatch1(
     gateOutput.dataType = input.dataType;
     gateOutput.dataDevice = input.dataDevice;
     gateOutput.dataDeviceIds = input.dataDeviceIds;
-    gateOutput.Resize({topk, layout.inter});
+    const int rows = input.dims[0];
+    gateOutput.Resize({rows * topk, layout.inter});
     output.dataType = input.dataType;
     output.dataDevice = input.dataDevice;
     output.dataDeviceIds = input.dataDeviceIds;
-    output.Resize({1, layout.hidden});
+    output.Resize({rows, layout.hidden});
     gateOutput.Allocate(false);
     output.Allocate(false);
     if (gateOutput.cudaData == nullptr || output.cudaData == nullptr) {
         return false;
     }
 
-    fastllm::cuda::ExpertCacheView metadata{
-        cache->keyToSlot, cache->slotKeys, cache->lastUsed, cache->step,
-        cache->hitCount, cache->totalMissCount, cache->slots};
-    if (!fastllm::cuda::EnsureExpertCache<kMaxTopK>(
-            metadata, indices, tableId * layout.experts, layout.experts, topk,
-            cache->routeSlots, cache->missExperts, cache->missSlots, cache->missCount,
-            cache->ensureThreads, cudaStreamPerThread)) return false;
-    const uint8_t *sourceTable = group->deviceHostRecords +
-        static_cast<size_t>(tableId) * layout.experts *
-        layout.recordStride;
-    if (!fastllm::cuda::CopyRecords(
-            {sourceTable, cache->records, layout.recordStride,
-             layout.recordStride, layout.recordStride},
-            cache->missExperts, cache->missSlots, cache->missCount, topk,
-            cache->copyLaunch, cudaStreamPerThread)) return false;
-    if (layout.weightType != fastllm::DataType::NVFP4_BLOCK_16_E4M3) {
-        const size_t slots = cache->slots;
-        const bool externalScales = layout.weightType == fastllm::DataType::FP8_E4M3;
-        const FastllmCudaMoeFP8CacheView view{
-            layout.weightType,
-            reinterpret_cast<uint8_t **>(cache->fp8Pointers),
-            reinterpret_cast<uint8_t **>(cache->fp8Pointers + slots),
-            externalScales ? reinterpret_cast<float **>(cache->fp8Pointers + 2 * slots) : nullptr,
-            externalScales ? reinterpret_cast<float **>(cache->fp8Pointers + 3 * slots) : nullptr,
-            layout.gateBlockM, layout.gateBlockK,
-            layout.downBlockM, layout.downBlockK};
-        return FastllmCudaMoeFP8CacheCompute(
-            input, gateOutput, output, view, cache->routeSlots, scores, topk);
+    auto computeRow = [&](const fastllm::Data &input, fastllm::Data &gateOutput,
+                          fastllm::Data &output, const int32_t *indices,
+                          const float *scores) {
+        fastllm::cuda::ExpertCacheView metadata{
+            cache->keyToSlot, cache->slotKeys, cache->lastUsed, cache->step,
+            cache->hitCount, cache->totalMissCount, cache->slots};
+        if (!fastllm::cuda::EnsureExpertCache<kMaxTopK>(
+                metadata, indices, tableId * layout.experts, layout.experts, topk,
+                cache->routeSlots, cache->missExperts, cache->missSlots, cache->missCount,
+                cache->ensureThreads, cudaStreamPerThread)) return false;
+        const uint8_t *sourceTable = group->deviceHostRecords +
+            static_cast<size_t>(tableId) * layout.experts *
+            layout.recordStride;
+        if (!fastllm::cuda::CopyRecords(
+                {sourceTable, cache->records, layout.recordStride,
+                 layout.recordStride, layout.recordStride},
+                cache->missExperts, cache->missSlots, cache->missCount, topk,
+                cache->copyLaunch, cudaStreamPerThread)) return false;
+        if (layout.weightType != fastllm::DataType::NVFP4_BLOCK_16_E4M3) {
+            const size_t slots = cache->slots;
+            const bool externalScales = layout.weightType == fastllm::DataType::FP8_E4M3;
+            const FastllmCudaMoeFP8CacheView view{
+                layout.weightType,
+                reinterpret_cast<uint8_t **>(cache->fp8Pointers),
+                reinterpret_cast<uint8_t **>(cache->fp8Pointers + slots),
+                externalScales ? reinterpret_cast<float **>(cache->fp8Pointers + 2 * slots) : nullptr,
+                externalScales ? reinterpret_cast<float **>(cache->fp8Pointers + 3 * slots) : nullptr,
+                layout.gateBlockM, layout.gateBlockK,
+                layout.downBlockM, layout.downBlockK};
+            return FastllmCudaMoeFP8CacheCompute(
+                input, gateOutput, output, view, cache->routeSlots, scores, topk);
+        }
+        switch (input.dataType) {
+            case fastllm::DataType::FLOAT32:
+                return LaunchNVFP4Cache<float>(input, gateOutput, output, layout, *cache, scores, topk);
+            case fastllm::DataType::FLOAT16:
+                return LaunchNVFP4Cache<half>(input, gateOutput, output, layout, *cache, scores, topk);
+            case fastllm::DataType::BFLOAT16:
+                return LaunchNVFP4Cache<__nv_bfloat16>(input, gateOutput, output, layout, *cache, scores, topk);
+            default:
+                return false;
+        }
+    };
+    if (rows == 1) {
+        return computeRow(input, gateOutput, output, indices, scores);
     }
-    switch (input.dataType) {
-        case fastllm::DataType::FLOAT32:
-            return LaunchNVFP4Cache<float>(input, gateOutput, output, layout, *cache, scores, topk);
-        case fastllm::DataType::FLOAT16:
-            return LaunchNVFP4Cache<half>(input, gateOutput, output, layout, *cache, scores, topk);
-        case fastllm::DataType::BFLOAT16:
-            return LaunchNVFP4Cache<__nv_bfloat16>(input, gateOutput, output, layout, *cache, scores, topk);
-        default:
+
+    // Each row completes lookup, refill and compute on the same stream
+    // before the next row reuses route metadata or evicts an expert. This
+    // also preserves the single-token kernels' reduction order in a graph.
+    fastllm::Data inputRow, gateRow, outputRow;
+    for (int row = 0; row < rows; ++row) {
+        inputRow.FakeFrom(input, size_t(row) * layout.hidden * input.unitSize);
+        inputRow.Resize({1, layout.hidden});
+        inputRow.dataDeviceIds = input.dataDeviceIds;
+        gateRow.FakeFrom(gateOutput, size_t(row) * topk * layout.inter * input.unitSize);
+        gateRow.Resize({topk, layout.inter});
+        gateRow.dataDeviceIds = input.dataDeviceIds;
+        outputRow.FakeFrom(output, size_t(row) * layout.hidden * input.unitSize);
+        outputRow.Resize({1, layout.hidden});
+        outputRow.dataDeviceIds = input.dataDeviceIds;
+        if (!computeRow(inputRow, gateRow, outputRow,
+                        indices + row * topk, scores + row * topk)) {
             return false;
+        }
     }
+    return true;
 }

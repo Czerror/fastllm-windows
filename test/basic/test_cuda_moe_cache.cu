@@ -34,7 +34,8 @@ static size_t ExpertRecordBytes(const fastllm::Data &gate, const fastllm::Data &
 
 template<class T>
 static void Run(fastllm::DataType dtype, int hidden, int inter,
-                fastllm::DataType weightType = fastllm::DataType::NVFP4_BLOCK_16_E4M3) {
+                fastllm::DataType weightType = fastllm::DataType::NVFP4_BLOCK_16_E4M3,
+                int batch = 1) {
     constexpr int experts = 32, topk = 10;
     std::vector<std::unique_ptr<fastllm::Data>> owned;
     std::vector<fastllm::Data *> weights(2 * (experts + 1), nullptr);
@@ -91,32 +92,51 @@ static void Run(fastllm::DataType dtype, int hidden, int inter,
     }
     Require(FastllmCudaPrepareMoeCache(&layer, 1), "valid table rejected");
 
-    fastllm::Data input(dtype, {1, hidden}), index(fastllm::DataType::INT32, {1, topk});
-    fastllm::Data score(fastllm::DataType::FLOAT32, {1, topk}), gate, output;
+    fastllm::Data input(dtype, {batch, hidden}), index(fastllm::DataType::INT32, {batch, topk});
+    fastllm::Data score(fastllm::DataType::FLOAT32, {batch, topk}), gate, output;
     AllocateGpu(input); AllocateGpu(index); AllocateGpu(score);
-    std::vector<T> activation(hidden, T(1.0f / 128));
-    std::vector<float> scores(topk, 1.0f / topk);
-    Check(cudaMemcpy(input.cudaData, activation.data(), hidden * sizeof(T), cudaMemcpyHostToDevice));
-    Check(cudaMemcpy(score.cudaData, scores.data(), topk * sizeof(float), cudaMemcpyHostToDevice));
+    std::vector<T> activation(batch * hidden);
+    for (int row = 0; row < batch; ++row)
+        std::fill_n(activation.begin() + row * hidden, hidden, T((1 + row % 4) / 128.0f));
+    std::vector<float> scores(batch * topk, 1.0f / topk);
+    Check(cudaMemcpy(input.cudaData, activation.data(), activation.size() * sizeof(T), cudaMemcpyHostToDevice));
+    Check(cudaMemcpy(score.cudaData, scores.data(), scores.size() * sizeof(float), cudaMemcpyHostToDevice));
     auto supported = [&] {
-        return FastllmCudaCanRunMoeCacheBatch1(input, index, score, weights.data(),
+        return FastllmCudaCanRunMoeCacheSmallBatch(input, index, score, weights.data(),
                                               weights.size(), fastllm::MoeGateSwiglu);
     };
     Require(supported(), "valid decode rejected");
     input.dims[1] = hidden + 1;
     Require(!supported(), "mismatched hidden width accepted");
     input.dims[1] = hidden;
+    index.dims[0] = batch + 1;
+    Require(!supported(), "mismatched route rows accepted");
+    index.dims[0] = batch;
+    input.dims[0] = index.dims[0] = score.dims[0] = FASTLLM_CUDA_MOE_CACHE_MAX_BATCH + 1;
+    Require(!supported(), "prefill batch accepted by decode cache");
+    input.dims[0] = index.dims[0] = score.dims[0] = batch;
+    for (auto *data : {&input, &index, &score}) {
+        data->strides[1]++;
+        Require(!supported(), "noncontiguous columns accepted");
+        data->strides[1]--;
+        if (batch > 1) {
+            data->strides[0]++;
+            Require(!supported(), "padded cache rows accepted");
+            data->strides[0]--;
+        }
+    }
 
     auto launch = [&] {
-        Require(FastllmCudaMergeMOECacheBatch1(input, gate, output, weights.data(),
+        Require(FastllmCudaMergeMOECache(input, gate, output, weights.data(),
                     weights.size(), static_cast<int32_t *>(index.cudaData),
                     static_cast<float *>(score.cudaData), topk), "decode failed");
     };
     cudaGraph_t graph = nullptr; cudaGraphExec_t exec = nullptr;
     for (int pass = 0; pass < 5; ++pass) {
-        std::vector<int32_t> ids(topk);
-        for (int k = 0; k < topk; ++k) ids[k] = (pass * 9 + k) % experts;
-        Check(cudaMemcpy(index.cudaData, ids.data(), topk * sizeof(int32_t), cudaMemcpyHostToDevice));
+        std::vector<int32_t> ids(batch * topk);
+        for (int row = 0; row < batch; ++row) for (int k = 0; k < topk; ++k)
+            ids[row * topk + k] = (pass * 9 + row * 11 + k) % experts;
+        Check(cudaMemcpy(index.cudaData, ids.data(), ids.size() * sizeof(int32_t), cudaMemcpyHostToDevice));
         if (pass == 0) {
             launch(); Check(cudaStreamSynchronize(cudaStreamPerThread));
             Check(cudaStreamBeginCapture(cudaStreamPerThread, cudaStreamCaptureModeThreadLocal));
@@ -126,30 +146,34 @@ static void Run(fastllm::DataType dtype, int hidden, int inter,
         }
         Check(cudaGraphLaunch(exec, cudaStreamPerThread));
         Check(cudaStreamSynchronize(cudaStreamPerThread));
-        std::vector<T> actual(hidden);
-        Check(cudaMemcpy(actual.data(), output.cudaData, hidden * sizeof(T), cudaMemcpyDeviceToHost));
-        float g = float(T(hidden / 128.0f));
-        float activated = float(T((g / (1 + std::exp(-g))) * g));
-        float expected = 0;
-        for (int id : ids) expected += float(T(inter * activated * ((id + 1) / 32.0f))) / topk;
-        expected = float(T(expected));
-        float tolerance = dtype == fastllm::DataType::FLOAT32 ? 1e-5f :
-                          dtype == fastllm::DataType::FLOAT16 ? 0.002f : 0.012f;
-        for (T v : actual) Require(std::fabs(float(v) - expected) <= tolerance * std::max(1.0f, std::fabs(expected)),
-                                  "expert output mismatch");
+        std::vector<T> actual(batch * hidden);
+        Check(cudaMemcpy(actual.data(), output.cudaData, actual.size() * sizeof(T), cudaMemcpyDeviceToHost));
+        for (int row = 0; row < batch; ++row) {
+            float g = float(T(hidden * (1 + row % 4) / 128.0f));
+            float activated = float(T((g / (1 + std::exp(-g))) * g));
+            float expected = 0;
+            for (int k = 0; k < topk; ++k)
+                expected += float(T(inter * activated * ((ids[row * topk + k] + 1) / 32.0f))) / topk;
+            expected = float(T(expected));
+            float tolerance = dtype == fastllm::DataType::FLOAT32 ? 1e-5f :
+                              dtype == fastllm::DataType::FLOAT16 ? 0.002f : 0.012f;
+            for (int col = 0; col < hidden; ++col)
+                Require(std::fabs(float(actual[row * hidden + col]) - expected) <= tolerance * std::max(1.0f, std::fabs(expected)),
+                        "expert output mismatch");
+        }
     }
     cudaGraphExecDestroy(exec); cudaGraphDestroy(graph);
     FastllmCudaReleaseMoeCache(weights.data(), weights.size());
     Require(!supported(), "released table still registered");
     FastllmCudaReleaseMoeCache(weights.data(), weights.size());
     fastllm::SetMoeCudaCacheBytes(0);
-    std::printf("PASS adapter weight=%d dtype=%d hidden=%d inter=%d, graph/eviction/release/validation\n",
-                int(weightType), int(dtype), hidden, inter);
+    std::printf("PASS adapter weight=%d dtype=%d hidden=%d inter=%d batch=%d, graph/eviction/release/validation\n",
+                int(weightType), int(dtype), hidden, inter, batch);
 }
 
 template<class T>
 static void CompareFP8(fastllm::DataType dtype, fastllm::DataType weightType,
-                       std::vector<std::unique_ptr<fastllm::Data>> &keepAlive) {
+                       std::vector<std::unique_ptr<fastllm::Data>> &keepAlive, int batch = 1) {
     constexpr int hidden = 256, inter = 128, experts = 24, topk = 7, tables = 2;
     std::mt19937 rng(42);
     std::vector<std::unique_ptr<fastllm::Data>> owned;
@@ -189,26 +213,26 @@ static void CompareFP8(fastllm::DataType dtype, fastllm::DataType weightType,
     // The cache owns a compact host snapshot; the original tables can now
     // serve as an independent all-resident GPU backend reference.
     for (auto &w : owned) w->ToDevice(fastllm::DataDevice::CUDA);
-    fastllm::Data input(dtype, {1, hidden}), ids(fastllm::DataType::INT32, {1, topk});
-    fastllm::Data scores(fastllm::DataType::FLOAT32, {1, topk});
+    fastllm::Data input(dtype, {batch, hidden}), ids(fastllm::DataType::INT32, {batch, topk});
+    fastllm::Data scores(fastllm::DataType::FLOAT32, {batch, topk});
     fastllm::Data gate[tables], output[tables], refGate[tables], refOutput[tables];
     AllocateGpu(input); AllocateGpu(ids); AllocateGpu(scores);
-    std::vector<T> activation(hidden);
-    std::vector<float> score(topk);
+    std::vector<T> activation(batch * hidden);
+    std::vector<float> score(batch * topk);
     cudaGraph_t graph[tables]{}; cudaGraphExec_t exec[tables]{};
     for (int pass = 0; pass < 50; ++pass) {
         const int table = pass % tables;
-        std::vector<int32_t> indices(topk);
+        std::vector<int32_t> indices(batch * topk);
         for (auto &v : activation) v = T((int(rng() % 31) - 15) / 64.0f);
-        for (int k = 0; k < topk; ++k) {
-            indices[k] = pass < 4 ? k : rng() % experts;
+        for (int k = 0; k < batch * topk; ++k) {
+            indices[k] = pass < 4 ? k % experts : rng() % experts;
             score[k] = float(1 + rng() % 8) / 32;
         }
-        Check(cudaMemcpy(input.cudaData, activation.data(), hidden * sizeof(T), cudaMemcpyHostToDevice));
-        Check(cudaMemcpy(ids.cudaData, indices.data(), topk * sizeof(int32_t), cudaMemcpyHostToDevice));
-        Check(cudaMemcpy(scores.cudaData, score.data(), topk * sizeof(float), cudaMemcpyHostToDevice));
+        Check(cudaMemcpy(input.cudaData, activation.data(), activation.size() * sizeof(T), cudaMemcpyHostToDevice));
+        Check(cudaMemcpy(ids.cudaData, indices.data(), indices.size() * sizeof(int32_t), cudaMemcpyHostToDevice));
+        Check(cudaMemcpy(scores.cudaData, score.data(), score.size() * sizeof(float), cudaMemcpyHostToDevice));
         auto launch = [&] {
-            Require(FastllmCudaMergeMOECacheBatch1(input, gate[table], output[table],
+            Require(FastllmCudaMergeMOECache(input, gate[table], output[table],
                 weights[table].data(), weights[table].size(), static_cast<int32_t *>(ids.cudaData),
                 static_cast<float *>(scores.cudaData), topk), "FP8 cached compute failed");
         };
@@ -220,25 +244,39 @@ static void CompareFP8(fastllm::DataType dtype, fastllm::DataType weightType,
         }
         if (pass % 3 == 0) launch();
         else Check(cudaGraphLaunch(exec[table], cudaStreamPerThread));
-        bool ok;
-        auto *index = static_cast<int32_t *>(ids.cudaData);
-        auto *s = static_cast<float *>(scores.cudaData);
-        if (weightType == fastllm::DataType::FP8_E4M3) {
-            if constexpr (std::is_same_v<T, half>)
-                ok = FastllmCudaHalfMergeMOEFP8E4M3Batch1Indexed(input, refGate[table], refOutput[table],
-                    weights[table].data(), weights[table].size(), index, s, topk, hidden, inter, false);
-            else
-                ok = FastllmCudaBFloat16MergeMOEFP8E4M3Batch1Indexed(input, refGate[table], refOutput[table],
-                    weights[table].data(), weights[table].size(), index, s, topk, hidden, inter, false);
-        } else {
-            if constexpr (std::is_same_v<T, half>)
-                ok = FastllmCudaHalfMergeMOEFP8E4M3Block128Batch1Indexed(input, refGate[table], refOutput[table],
-                    weights[table].data(), weights[table].size(), index, s, topk, hidden, inter);
-            else
-                ok = FastllmCudaBFloat16MergeMOEFP8E4M3Block128Batch1Indexed(input, refGate[table], refOutput[table],
-                    weights[table].data(), weights[table].size(), index, s, topk, hidden, inter);
+        refGate[table].dataType = refOutput[table].dataType = dtype;
+        refGate[table].Resize({batch * topk, inter});
+        refOutput[table].Resize({batch, hidden});
+        AllocateGpu(refGate[table]); AllocateGpu(refOutput[table]);
+        for (int row = 0; row < batch; ++row) {
+            fastllm::Data rowInput, rowGate, rowOutput;
+            rowInput.FakeFrom(input, size_t(row) * hidden * sizeof(T));
+            rowInput.Resize({1, hidden});
+            rowGate.FakeFrom(refGate[table], size_t(row) * topk * inter * sizeof(T));
+            rowGate.Resize({topk, inter});
+            rowOutput.FakeFrom(refOutput[table], size_t(row) * hidden * sizeof(T));
+            rowOutput.Resize({1, hidden});
+            rowInput.dataDeviceIds = rowGate.dataDeviceIds = rowOutput.dataDeviceIds = {0};
+            bool ok;
+            auto *index = static_cast<int32_t *>(ids.cudaData) + row * topk;
+            auto *s = static_cast<float *>(scores.cudaData) + row * topk;
+            if (weightType == fastllm::DataType::FP8_E4M3) {
+                if constexpr (std::is_same_v<T, half>)
+                    ok = FastllmCudaHalfMergeMOEFP8E4M3Batch1Indexed(rowInput, rowGate, rowOutput,
+                        weights[table].data(), weights[table].size(), index, s, topk, hidden, inter, false);
+                else
+                    ok = FastllmCudaBFloat16MergeMOEFP8E4M3Batch1Indexed(rowInput, rowGate, rowOutput,
+                        weights[table].data(), weights[table].size(), index, s, topk, hidden, inter, false);
+            } else {
+                if constexpr (std::is_same_v<T, half>)
+                    ok = FastllmCudaHalfMergeMOEFP8E4M3Block128Batch1Indexed(rowInput, rowGate, rowOutput,
+                        weights[table].data(), weights[table].size(), index, s, topk, hidden, inter);
+                else
+                    ok = FastllmCudaBFloat16MergeMOEFP8E4M3Block128Batch1Indexed(rowInput, rowGate, rowOutput,
+                        weights[table].data(), weights[table].size(), index, s, topk, hidden, inter);
+            }
+            Require(ok, "resident FP8 reference failed");
         }
-        Require(ok, "resident FP8 reference failed");
         Check(cudaStreamSynchronize(cudaStreamPerThread));
         for (bool intermediate : {false, true}) {
             auto &actual = intermediate ? gate[table] : output[table];
@@ -257,8 +295,8 @@ static void CompareFP8(fastllm::DataType dtype, fastllm::DataType weightType,
     // reference weights alive until all cases finish so addresses cannot alias.
     for (auto &w : owned) keepAlive.push_back(std::move(w));
     fastllm::SetMoeCudaCacheBytes(0);
-    std::printf("PASS FP8 resident-reference weight=%d dtype=%d: 50 steps, two tables, duplicates, eviction, eager/graph, bitwise gate/output\n",
-                int(weightType), int(dtype));
+    std::printf("PASS FP8 resident-reference weight=%d dtype=%d batch=%d: 50 steps, two tables, duplicates, eviction, eager/graph, bitwise gate/output\n",
+                int(weightType), int(dtype), batch);
 }
 
 int main() {
@@ -278,10 +316,21 @@ int main() {
                 Run<__nv_bfloat16>(fastllm::DataType::BFLOAT16, hidden, 128, weightType);
             }
         }
+        for (int batch : {2, 4, 6, FASTLLM_CUDA_MOE_CACHE_MAX_BATCH}) {
+            for (auto weightType : {fastllm::DataType::NVFP4_BLOCK_16_E4M3,
+                                   fastllm::DataType::FP8_E4M3,
+                                   fastllm::DataType::FP8_E4M3_BLOCK_128}) {
+                Run<float>(fastllm::DataType::FLOAT32, 128, 128, weightType, batch);
+                Run<half>(fastllm::DataType::FLOAT16, 128, 128, weightType, batch);
+                Run<__nv_bfloat16>(fastllm::DataType::BFLOAT16, 128, 128, weightType, batch);
+            }
+        }
         std::vector<std::unique_ptr<fastllm::Data>> references;
         for (auto weightType : {fastllm::DataType::FP8_E4M3, fastllm::DataType::FP8_E4M3_BLOCK_128}) {
-            CompareFP8<half>(fastllm::DataType::FLOAT16, weightType, references);
-            CompareFP8<__nv_bfloat16>(fastllm::DataType::BFLOAT16, weightType, references);
+            for (int batch : {1, 2, 4, 6, FASTLLM_CUDA_MOE_CACHE_MAX_BATCH}) {
+                CompareFP8<half>(fastllm::DataType::FLOAT16, weightType, references, batch);
+                CompareFP8<__nv_bfloat16>(fastllm::DataType::BFLOAT16, weightType, references, batch);
+            }
         }
         std::puts("ALL_PASS"); return 0;
     } catch (const std::exception &e) {

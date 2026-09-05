@@ -9224,16 +9224,16 @@ namespace fastllm {
     }
 
 #ifndef USE_ROCM
-    static bool TryCudaMergeMOECacheBatch1(
+    static bool TryCudaMergeMOECache(
             const Data &input, Data &output, const Data &index,
             const Data &score, Data &gateOutput,
             Data **weights, int weightsBatch, MoeGateType gateType) {
-        if (!FastllmCudaCanRunMoeCacheBatch1(
+        if (!FastllmCudaCanRunMoeCacheSmallBatch(
                 input, index, score, weights, weightsBatch, gateType)) {
             return false;
         }
         const bool success =
-            FastllmCudaMergeMOECacheBatch1(
+            FastllmCudaMergeMOECache(
                 input, gateOutput, output, weights, weightsBatch,
                 reinterpret_cast<const int32_t *>(index.cudaData),
                 reinterpret_cast<const float *>(score.cudaData), index.dims[1]);
@@ -9703,7 +9703,7 @@ namespace fastllm {
 
             int marlinTopk = index.dims.size() >= 2 ? index.dims[1] : 0;
 #ifndef USE_ROCM
-            if (TryCudaMergeMOECacheBatch1(
+            if (TryCudaMergeMOECache(
                     input, output, index, score,
                     w1, weights, weightsBatch, gateType)) {
                 return;

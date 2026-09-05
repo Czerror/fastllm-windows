@@ -313,7 +313,7 @@ namespace fastllm {
 #if defined(USE_CUDA) && !defined(USE_ROCM)
         const bool cudaOutput = outputDevice == "cuda" ||
             outputDevice.compare(0, 5, "cuda:") == 0;
-        if (cudaOutput && FastllmCudaCanRunMoeCacheBatch1(
+        if (cudaOutput && FastllmCudaCanRunMoeCacheSmallBatch(
                 input, index, score, weights.data(),
                 static_cast<int>(weights.size()), gateType)) {
             ((Executor*)GetExecutor())->SetFirstDevice(outputDevice);

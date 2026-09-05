@@ -1612,6 +1612,7 @@ namespace fastllm {
         this->weights.clear();
         this->biass.clear();
         this->preparedWeights = false;
+        this->mtpWeightsStatus.store(-1, std::memory_order_release);
 
         for (int layer = 0; layer < this->block_cnt; layer++) {
             const std::string mlp = languagePrefix + "layers." +
@@ -1851,6 +1852,10 @@ namespace fastllm {
         if (Qwen4MtpDraftsPerStep() <= 0) {
             return false;
         }
+        const int status = this->mtpWeightsStatus.load(std::memory_order_acquire);
+        if (status >= 0) {
+            return status != 0;
+        }
         const std::vector<std::string> required = {
             "mtp.fc_embedding.weight",
             "mtp.fc_hidden.weight",
@@ -2016,6 +2021,7 @@ namespace fastllm {
             }
 
         }
+        this->mtpWeightsStatus.store(hasMtpWeights ? 1 : 0, std::memory_order_release);
         this->preparedWeights = true;
     }
 
@@ -5164,9 +5170,8 @@ namespace fastllm {
             !generationConfig.tool_call_parameter_name_constraint_enabled &&
             !generationConfig.tool_call_content_sampling_enabled &&
             Qwen4CudaOnlyDeviceMap(this->deviceMap) &&
-            // CUDA+NUMA MTP deliberately stays on the eager path. The draft
-            // and target CUDA Graph eligibility checks retain their stricter
-            // all-CUDA predicates because a graph cannot capture NUMA MoE.
+            // Mixed placement is supported. Each graph entry independently
+            // requires CUDA-resident experts or a usable GPU expert cache.
             Qwen4CudaOrNumaOnlyDeviceMap(this->moeDeviceMap) &&
             Qwen4CudaOrNumaOnlyDeviceMap(this->layeredMoeDeviceMap);
     }
@@ -6763,11 +6768,13 @@ namespace fastllm {
             hiddenStates.dims.size() == 3 &&
             hiddenStates.dims[1] > 1 &&
             hiddenStates.dims[1] <= this->indexerCompressRatio;
-        // Only single-token MoE uses the expert cache. Check the shape before
-        // querying availability, which lazily allocates the device cache.
-        // MTP verifier batches with NUMA experts must stay outside the graph.
+        // Check the supported cache shape before querying availability,
+        // which lazily allocates the device cache. Cached verifier rows run
+        // entirely on CUDA, so their configured NUMA fallback is graph-safe.
         const bool moeCudaCache =
-            hiddenStates.dims.size() == 3 && hiddenStates.dims[1] == 1 &&
+            hiddenStates.dims.size() == 3 && hiddenStates.dims[1] > 0 &&
+            hiddenStates.dims[1] <= FASTLLM_CUDA_MOE_CACHE_MAX_BATCH &&
+            (hiddenStates.dims[1] == 1 || mtpTargetGraph) &&
             !this->weights.empty() && !this->weights[0].empty() &&
             MoeCudaCacheAvailable(this->weights[0]);
         const bool moeDeviceMapGraphCompatible =
@@ -6903,6 +6910,12 @@ namespace fastllm {
                 }
             }
             if (needsGrowth) {
+                if (logicalDims[0] == 0) {
+                    // A restored empty tail may own compact storage. There
+                    // are no rows to preserve; avoid the strided copy used
+                    // when growing a nonempty cache.
+                    cache->FreeSpace();
+                }
                 cache->Expansion(capacityDims);
             }
             return sameCudaDevice(*cache);
@@ -7017,6 +7030,10 @@ namespace fastllm {
                         wholeGraphReady = false;
                         break;
                     }
+                    // Reservation is not a captured QSA append. Keep the
+                    // logical history empty until the whole graph is chosen;
+                    // segmented/eager attention appends its own rows.
+                    rawKeyCapture.Resize({0, this->indexerHeadDim});
                     appendSignature(
                         rawKeyCapture.cudaData, graphSequence,
                         rawKeyCapture.strides[0]);
@@ -7931,6 +7948,15 @@ namespace fastllm {
         };
 
         if (wholeGraphReady) {
+            if (mtpTargetGraph) {
+                for (int layer = fullAttentionCacheStartLayer;
+                     layer < this->block_cnt; layer++) {
+                    if (!this->IsLinearAttentionLayer(layer)) {
+                        verificationCapture->qsaRawKeys[layer].Resize(
+                            {graphSequence, this->indexerHeadDim});
+                    }
+                }
+            }
             runSegment(
                 graphStartLayer, this->block_cnt, true,
                 mtpTargetGraph ? this->indexerCompressRatio
