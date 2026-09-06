@@ -1596,15 +1596,13 @@ struct FastllmCudaMoeCacheLayer {
 // keep using the configured MoE backend.
 constexpr int FASTLLM_CUDA_MOE_CACHE_MAX_BATCH = 9;
 bool FastllmCudaMoeCacheRequested();
-// With a registration callback, supported compact NVFP4 layouts snapshot only
-// original scales, then register and borrow pinned NUMA block-16 weights
-// (interleaved gate/up rows, ordinary down rows). The callback must not reenter
-// cache APIs. FP8 snapshots retain the existing compact representation and
-// register CPU shards for hybrid execution. Failed registration leaves no
-// published cache; the configured MoE backend can still use the weights.
-// Unsupported layouts keep a full snapshot without invoking the callback.
-// Borrowed shards must remain alive
-// and unchanged until cache release.
+// With a registration callback, retain only original metadata and borrow the
+// registered pinned NUMA weights through byte-layout views. No duplicate
+// host weight snapshot is made, including during preparation. The callback
+// must not reenter cache APIs. Unsupported layouts or failed registration
+// leave no published cache; the configured MoE backend remains usable.
+// Borrowed shards must remain alive and unchanged until cache release.
+// Without a callback, snapshot the host weights for the ordinary CUDA cache.
 bool FastllmCudaPrepareMoeCache(
         const FastllmCudaMoeCacheLayer *layers, int layerCount,
         const std::function<void()> &registerNumaWeights = {});

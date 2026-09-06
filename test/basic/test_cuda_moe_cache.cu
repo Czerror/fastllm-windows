@@ -1,6 +1,7 @@
 #include "fastllm.h"
 #include "devices/moe_decode_scheduler.h"
 #include "fastllm-cuda.cuh"
+#include "fastllm-cuda-shared-weight.cuh"
 #include "devices/cpu/cpudevice.h"
 #include "devices/cuda/cudadevice.h"
 #ifdef USE_NUMAS
@@ -99,11 +100,7 @@ static void Run(fastllm::DataType dtype, int hidden, int inter,
         Require(!FastllmCudaPrepareMoeCache(&layer, 1), "unaligned FP8 scale block accepted");
         weights[2]->blockM = 128;
     }
-    std::function<void()> unsupportedCallback;
-    if (weightType == fastllm::DataType::NVFP4_BLOCK_16_E4M3 && (hidden % 16 || inter % 16)) {
-        unsupportedCallback = [] { throw std::runtime_error("unsupported NUMA callback invoked"); };
-    }
-    Require(FastllmCudaPrepareMoeCache(&layer, 1, unsupportedCallback), "valid table rejected");
+    Require(FastllmCudaPrepareMoeCache(&layer, 1), "valid table rejected");
 
     fastllm::Data input(dtype, {batch, hidden}), index(fastllm::DataType::INT32, {batch, topk});
     fastllm::Data score(fastllm::DataType::FLOAT32, {batch, topk}), gate, output;
@@ -314,7 +311,8 @@ template<class T>
 static void CompareNumaCache(fastllm::DataType dtype, int nodes, int batch,
                             int hidden = 128, int inter = 64, bool planar = false,
                             bool hybrid = false,
-                            fastllm::DataType weightType = fastllm::DataType::NVFP4_BLOCK_16_E4M3) {
+                            fastllm::DataType weightType = fastllm::DataType::NVFP4_BLOCK_16_E4M3,
+                            bool perchannel = false) {
     constexpr int experts = 24, topk = 7, tables = 2;
     std::mt19937 rng(171);
     std::vector<std::unique_ptr<fastllm::Data>> owned[3];
@@ -332,17 +330,17 @@ static void CompareNumaCache(fastllm::DataType dtype, int nodes, int batch,
                     const int cols = part == 0 ? hidden : inter;
                     const bool nvfp4 = weightType == fastllm::DataType::NVFP4_BLOCK_16_E4M3;
                     auto w = std::make_unique<fastllm::Data>(weightType);
-                    w->blockK = nvfp4 ? 1 : 128; w->blockM = nvfp4 ? 16 : 128;
+                    w->blockK = nvfp4 ? 1 : 128; w->blockM = nvfp4 ? 16 : (perchannel ? cols : 128);
                     w->Resize({rows, cols}); w->Allocate(false);
                     if (nvfp4) {
-                        for (size_t b = 0; b < size_t(rows) * cols / 2; ++b) w->cpuData[b] = rng() % 256;
+                        for (size_t b = 0; b < fastllm::GetNVFP4WeightBytes(rows, cols); ++b) w->cpuData[b] = rng() % 256;
                         auto *scale = fastllm::GetNVFP4ScaleData(*w);
-                        for (int b = 0; b < rows * cols / 16; ++b) scale[b] = 0x28 + rng() % 24;
+                        for (int b = 0; b < rows * ((cols + 15) / 16); ++b) scale[b] = 0x28 + rng() % 24;
                         w->scales = part == 0 ? std::vector<float>{0.73f, 1.31f} : std::vector<float>{0.39f};
                     } else if (weightType == fastllm::DataType::FP8_E4M3) {
                         for (size_t b = 0; b < size_t(rows) * cols; ++b)
                             w->cpuData[b] = (rng() % 2 ? 128 : 0) | (0x28 + rng() % 24);
-                        w->scales.resize(((rows + 127) / 128) * (cols / 128));
+                        w->scales.resize(((rows + 127) / 128) * ((cols + w->blockM - 1) / w->blockM));
                         for (float &scale : w->scales) scale = (1 + rng() % 16) / 64.0f;
                     } else {
                         const size_t pitch = fastllm::GetDataBytes(weightType, 1, cols);
@@ -368,7 +366,8 @@ static void CompareNumaCache(fastllm::DataType dtype, int nodes, int batch,
                 const int rows = w.dims[0], cols = w.dims[1];
                 const bool nvfp4 = weightType == fastllm::DataType::NVFP4_BLOCK_16_E4M3;
                 const bool usePlanar = nvfp4 && planar && (rows / nodes) % fastllm::NVFP4_PLANAR_TILE_ROWS == 0;
-                const auto storageType = nvfp4 ? fastllm::DataType::NVFP4_BLOCK_16 : fastllm::DataType::FP8_E4M3_BLOCK_128;
+                const auto storageType = nvfp4 ? fastllm::DataType::NVFP4_BLOCK_16 :
+                    (perchannel && cols != 128 ? fastllm::DataType::FP8_E4M3_PERCHANNEL : fastllm::DataType::FP8_E4M3_BLOCK_128);
                 const size_t pitch = fastllm::GetDataBytes(storageType, 1, cols);
                 const size_t bytes = pitch * (rows / nodes);
                 for (int node = 0; node < nodes; ++node) {
@@ -385,11 +384,13 @@ static void CompareNumaCache(fastllm::DataType dtype, int nodes, int batch,
                             const int originalRow = i % 2 == 0 ? row / 2 + (row % 2) * (rows / 2) : row;
                             if (weightType == fastllm::DataType::FP8_E4M3_BLOCK_128) {
                                 memcpy(dest + r * pitch, w.cpuData + originalRow * pitch, pitch);
-                            } else for (int c = 0; c < cols; c += 128) {
-                                auto *block = dest + r * pitch + (c / 128) * 132;
-                                memcpy(block, w.cpuData + originalRow * cols + c, 128);
-                                const float scale = w.scales[(originalRow / 128) * (cols / 128) + c / 128];
-                                memcpy(block + 128, &scale, sizeof(scale));
+                            } else for (int c = 0; c < cols; c += w.blockM) {
+                                const int bytes = std::min(w.blockM, cols - c);
+                                auto *block = dest + r * pitch + (c / w.blockM) * (w.blockM + sizeof(float));
+                                memcpy(block, w.cpuData + originalRow * cols + c, bytes);
+                                const float scale = w.scales[(originalRow / w.blockK) *
+                                    ((cols + w.blockM - 1) / w.blockM) + c / w.blockM];
+                                memcpy(block + bytes, &scale, sizeof(scale));
                             }
                         }
                     }
@@ -619,6 +620,105 @@ static void ComparePlanarLinear(fastllm::DataType dtype, int columns, int batch)
                 int(dtype), columns, batch);
 }
 
+// Raw byte payloads deliberately have no DataType. Exercise ordinary packed
+// rows, inline block metadata, row tiles, odd tails and row interleaving, so
+// sharing does not depend on the three currently implemented cache kernels.
+static void CheckSharedByteViews() {
+    using namespace fastllm::cuda;
+    for (int mode = 0; mode < 6; ++mode) {
+        SharedExpertLayout layout;
+        layout.shards = 3;
+        layout.auxiliaryBytes = 16;
+        const uint32_t rowBytes = mode == 3 ? 37 : mode == 4 ? 128 : mode == 5 ? 132 : 64;
+        for (int part = 0; part < 2; ++part) {
+            auto &v = layout.weights[part];
+            v = SharedWeightView::Rows(24, rowBytes, 3, part ? 1 : 2);
+            if (mode == 1 || mode == 3) {
+                v.blockBytes = mode == 3 ? 7 : 8;
+                v.blockStride = v.blockBytes + 4;
+                v.rowStride = v.tileStride = ((rowBytes + v.blockBytes - 1) / v.blockBytes) * v.blockStride;
+            } else if (mode == 2) {
+                v.tileRows = 4;
+                v.tileStride = 4 * v.rowStride + 128;
+            } else if (mode == 4) {
+                v.blockBytes = 128; v.blockStride = 132;
+                v.tileStride = v.rowStride = 132;
+            }
+            v.destinationOffset = part * 24 * rowBytes;
+        }
+        layout.recordBytes = 48 * rowBytes + 16;
+        layout.auxiliary[0] = {0, 48 * rowBytes, 16};
+        Require(layout.Prepare(), "valid shared byte view rejected");
+        Require(layout.scatter == (mode >= 4), "shared copy chose an unexpected host access pattern");
+        auto invalid = layout; invalid.weights[0].rowsPerShard++;
+        Require(!invalid.Prepare(), "inconsistent row shards accepted");
+        std::vector<void *> hostPointers, devicePointers;
+        std::vector<uint8_t> expected(4 * layout.recordBytes, 0), actual(expected.size());
+        uint8_t *metadata = nullptr, *deviceMetadata = nullptr, *records = nullptr;
+        void **table = nullptr;
+        int32_t *ids = nullptr;
+        Check(cudaHostAlloc(&metadata, 4 * layout.auxiliaryBytes, cudaHostAllocMapped));
+        Check(cudaHostGetDevicePointer(&deviceMetadata, metadata, 0));
+        for (int e = 0; e < 4; ++e) {
+            for (int part = 0; part < 2; ++part) {
+                const auto &v = layout.weights[part];
+                for (uint32_t n = 0; n < layout.shards; ++n) {
+                    void *host = nullptr, *mapped = nullptr;
+                    Check(cudaHostAlloc(&host, v.rowsPerShard / v.tileRows * v.tileStride, cudaHostAllocMapped));
+                    memset(host, 0xa5, v.rowsPerShard / v.tileRows * v.tileStride);
+                    Check(cudaHostGetDevicePointer(&mapped, host, 0));
+                    hostPointers.push_back(host); devicePointers.push_back(mapped);
+                }
+                // Populate physical rows, deriving the independent logical
+                // reference in the inverse direction from the gather kernel.
+                for (uint32_t physical = 0; physical < v.rows; ++physical) {
+                    const uint32_t logical = physical / v.rowGroups +
+                        (physical % v.rowGroups) * (v.rows / v.rowGroups);
+                    const uint32_t local = physical % v.rowsPerShard;
+                    auto *dst = static_cast<uint8_t *>(hostPointers[(e * 2 + part) * layout.shards + physical / v.rowsPerShard]);
+                    for (uint32_t c = 0; c < v.rowBytes; ++c) {
+                        const uint8_t value = (e * 71 + part * 43 + physical * 19 + c) % 251;
+                        dst[(local / v.tileRows) * v.tileStride + (local % v.tileRows) * v.rowStride +
+                            (c / v.blockBytes) * v.blockStride + c % v.blockBytes] = value;
+                        expected[e * layout.recordBytes + v.destinationOffset + logical * v.rowBytes + c] = value;
+                    }
+                }
+            }
+            for (uint32_t c = 0; c < layout.auxiliaryBytes; ++c)
+                expected[(e + 1) * layout.recordBytes - 16 + c] = metadata[e * 16 + c] = e * 13 + c;
+        }
+        Check(cudaMalloc(&table, devicePointers.size() * sizeof(void *)));
+        Check(cudaMemcpy(table, devicePointers.data(), devicePointers.size() * sizeof(void *), cudaMemcpyHostToDevice));
+        Check(cudaMalloc(&records, expected.size()));
+        Check(cudaMalloc(&ids, 9 * sizeof(int32_t)));
+        const int32_t hostIds[]{3, 1, 0, 2, 3, 1, 0, 2, 4};
+        Check(cudaMemcpy(ids, hostIds, sizeof(hostIds), cudaMemcpyHostToDevice));
+        auto copy = [&] { Require(CopySharedExpertRecords(layout, table, deviceMetadata, records,
+            ids, ids + 4, ids + 8, 4, {4, 128}, cudaStreamPerThread), "shared byte gather failed"); };
+        cudaGraph_t graph; cudaGraphExec_t exec;
+        Check(cudaStreamBeginCapture(cudaStreamPerThread, cudaStreamCaptureModeThreadLocal));
+        copy();
+        Check(cudaStreamEndCapture(cudaStreamPerThread, &graph));
+        Check(cudaGraphInstantiate(&exec, graph, nullptr, nullptr, 0));
+        for (int pass = 0; pass < 2; ++pass) {
+            if (pass) {
+                // The captured copy must read the owner's current allocation,
+                // rather than a hidden snapshot of its contents.
+                static_cast<uint8_t *>(hostPointers[0])[0] ^= 0x5a;
+                expected[0] ^= 0x5a;
+            }
+            Check(cudaGraphLaunch(exec, cudaStreamPerThread));
+            Check(cudaMemcpy(actual.data(), records, actual.size(), cudaMemcpyDeviceToHost));
+            Require(actual == expected, "shared byte gather changed payload or retained a snapshot");
+        }
+        Check(cudaGraphExecDestroy(exec)); Check(cudaGraphDestroy(graph));
+        Check(cudaFree(ids)); Check(cudaFree(records)); Check(cudaFree(table));
+        for (void *p : hostPointers) Check(cudaFreeHost(p));
+        Check(cudaFreeHost(metadata));
+    }
+    std::puts("PASS shared byte layouts: packed rows, blocks, tiles, tails, borrowed updates, graph replay");
+}
+
 static void CheckDecodeScheduler() {
     fastllm::MoeDecodeScheduler scheduler;
     for (int call = 0; call < 48 + 2 * 11; ++call) {
@@ -656,6 +756,7 @@ static void CheckDecodeScheduler() {
 
 int main() {
     try {
+        CheckSharedByteViews();
         CheckDecodeScheduler();
         for (int columns : {17, 128, 640, 4096}) {
             for (int batch : {1, 4, 31, 32, 65}) {
@@ -705,6 +806,18 @@ int main() {
                 CompareNumaCache<__nv_bfloat16>(fastllm::DataType::BFLOAT16, nodes, batch, 128, 64, true);
             }
         }
+        for (auto type : {fastllm::DataType::FP8_E4M3, fastllm::DataType::FP8_E4M3_BLOCK_128})
+            for (int nodes : {1, 2, 4}) for (int batch : {1, 4}) {
+                CompareNumaCache<float>(fastllm::DataType::FLOAT32, nodes, batch, 256, 128, false, false, type);
+                CompareNumaCache<half>(fastllm::DataType::FLOAT16, nodes, batch, 256, 128, false, false, type);
+                CompareNumaCache<__nv_bfloat16>(fastllm::DataType::BFLOAT16, nodes, batch, 256, 128, false, false, type);
+            }
+        CompareNumaCache<half>(fastllm::DataType::FLOAT16, 2, 4, 260, 132, false, false,
+                              fastllm::DataType::FP8_E4M3, true);
+        CompareNumaCache<half>(fastllm::DataType::FLOAT16, 2, 4, 260, 128, false, false,
+                              fastllm::DataType::FP8_E4M3);
+        CompareNumaCache<half>(fastllm::DataType::FLOAT16, 1, 4, 32, 17);
+        CompareNumaCache<half>(fastllm::DataType::FLOAT16, 1, 4, 32, 17, true);
         CompareNumaCache<half>(fastllm::DataType::FLOAT16, 4, 4, 2560, 640);
         CompareNumaCache<half>(fastllm::DataType::FLOAT16, 4, 4, 2560, 640, true);
         CompareNumaCache<half>(fastllm::DataType::FLOAT16, 1, 4, 128, 16, true);

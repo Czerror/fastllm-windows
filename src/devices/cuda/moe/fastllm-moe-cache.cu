@@ -11,6 +11,7 @@
 #include "fastllm-cuda.cuh"
 #include "fastllm-cuda-expert-cache.cuh"
 #include "fastllm-cuda-record-copy.cuh"
+#include "fastllm-cuda-shared-weight.cuh"
 #include "fastllm.h"
 #include "utils.h"
 #include "devices/moe_decode_scheduler.h"
@@ -140,13 +141,11 @@ struct OffloadGroup {
     uint8_t *hostRecords = nullptr;
     uint8_t *deviceHostRecords = nullptr;
     std::vector<const fastllm::Data *> tableKeys;
-    // When NUMA storage is shared, hostRecords contains only original scales.
+    // When NUMA storage is shared, hostRecords contains only original metadata.
     // The weight shards are borrowed from the model's prefill backend.
     std::vector<void *> numaPointers;
-    int numaCount = 0;
     bool cpuDecodeReady = false;
-    int numaPlanarParts = 0;
-    size_t hostScaleStride = 0;
+    fastllm::cuda::SharedExpertLayout sharedLayout;
     std::unordered_map<int, std::unique_ptr<DeviceCache> > deviceCaches;
     std::mutex mutex;
 };
@@ -160,67 +159,142 @@ struct CachedTable {
 // the policy, cache admission, CPU overlap and result merge stay unchanged.
 // perExpert requests unweighted FP32 [topk, hidden] results. A negative route
 // slot is inactive and must never dereference a weight pointer.
+struct SharedCacheStorage {
+    bool (*plan)(const OffloadLayout &, fastllm::cuda::SharedExpertLayout &);
+    void (*snapshot)(const OffloadLayout &, const fastllm::Data &, const fastllm::Data &, uint8_t *);
+    bool (*bind)(const OffloadLayout &, const fastllm::Data &, int, fastllm::cuda::SharedWeightView &);
+};
+
 struct ExpertCacheBackend {
     fastllm::DataType type;
     bool (*supportsHybrid)(const OffloadLayout &);
-    bool (*supportsNumaRegistration)(const OffloadLayout &);
+    const SharedCacheStorage *storage;
     bool (*compute)(const fastllm::Data &, fastllm::Data &, fastllm::Data &,
                     const OffloadLayout &, const DeviceCache &, const float *, int, float *);
 };
 const ExpertCacheBackend *FindExpertCacheBackend(fastllm::DataType type);
 
-size_t NumaScaleStride(const OffloadLayout &layout) {
-    if (layout.weightType != fastllm::DataType::NVFP4_BLOCK_16_E4M3 ||
-        layout.gateBlockK != 1 || layout.downBlockK != 1 ||
-        layout.gateBlockM != 16 || layout.downBlockM != 16 ||
-        layout.hidden % 16 != 0 || layout.inter % 16 != 0 ||
-        layout.recordStride > UINT32_MAX / kMaxTopK) return 0;
-    const size_t weightBytes = size_t(layout.hidden) * layout.inter * 3 / 2;
-    const size_t bytes = layout.gateBytes + layout.downBytes - weightBytes + 3 * sizeof(float);
-    return AlignUp(bytes, 16);
+bool PlanSharedNVFP4(const OffloadLayout &l, fastllm::cuda::SharedExpertLayout &plan) {
+    if (l.gateBlockK != 1 || l.downBlockK != 1 || l.gateBlockM != 16 ||
+        l.downBlockM != 16) return false;
+    const uint32_t gate = l.gateBytes - fastllm::GetNVFP4WeightBytes(l.inter * 2, l.hidden);
+    const uint32_t down = l.downBytes - fastllm::GetNVFP4WeightBytes(l.hidden, l.inter);
+    plan.auxiliary[0] = {0, uint32_t(fastllm::GetNVFP4WeightBytes(l.inter * 2, l.hidden)), gate};
+    plan.auxiliary[1] = {gate, uint32_t(l.downOffset + fastllm::GetNVFP4WeightBytes(l.hidden, l.inter)), down};
+    // Include zero padding in the final span to retain aligned 16-byte loads.
+    plan.auxiliary[2] = {gate + down, uint32_t(l.scalesOffset), 16};
+    plan.auxiliaryBytes = gate + down + 16;
+    return true;
 }
 
-bool BindNumaWeights(OffloadGroup &group, const std::vector<fastllm::Data *> &weights) {
+void SnapshotNVFP4Metadata(const OffloadLayout &l, const fastllm::Data &gate,
+                          const fastllm::Data &down, uint8_t *record) {
+    const size_t gateBytes = l.gateBytes - fastllm::GetNVFP4WeightBytes(l.inter * 2, l.hidden);
+    const size_t downBytes = l.downBytes - fastllm::GetNVFP4WeightBytes(l.hidden, l.inter);
+    memcpy(record, fastllm::GetNVFP4ScaleData(gate), gateBytes);
+    memcpy(record + gateBytes, fastllm::GetNVFP4ScaleData(down), downBytes);
+    memcpy(record + gateBytes + downBytes, gate.scales.data(), 2 * sizeof(float));
+    memcpy(record + gateBytes + downBytes + 2 * sizeof(float), down.scales.data(), sizeof(float));
+    memset(record + gateBytes + downBytes + 3 * sizeof(float), 0, sizeof(float));
+}
+
+bool BindSharedNVFP4(const OffloadLayout &l, const fastllm::Data &w, int part,
+                     fastllm::cuda::SharedWeightView &view) {
+    const int columns = part == 0 ? l.hidden : l.inter;
+    if (w.blockK != 1 || w.blockM != 16) return false;
+    view.rowBytes = (columns + 1) / 2;
+    if (w.dataType == fastllm::DataType::NVFP4_BLOCK_16_PLANAR) {
+        view.tileRows = fastllm::NVFP4_PLANAR_TILE_ROWS;
+        view.tileStride = view.tileRows * ((columns + 15) / 16) * 12;
+        view.rowStride = ((columns + 15) / 16) * 8;
+        view.blockBytes = view.blockStride = view.rowStride;
+    } else if (w.dataType == fastllm::DataType::NVFP4_BLOCK_16) {
+        view.tileStride = view.rowStride = ((columns + 15) / 16) * 12;
+        view.blockBytes = 8; view.blockStride = 12;
+    } else return false;
+    return true;
+}
+
+bool PlanSharedFP8(const OffloadLayout &l, fastllm::cuda::SharedExpertLayout &plan) {
+    if (l.weightType == fastllm::DataType::FP8_E4M3) {
+        if ((l.gateBlockM != 128 && l.gateBlockM != l.hidden) ||
+            (l.downBlockM != 128 && l.downBlockM != l.inter)) return false;
+        plan.auxiliaryBytes = AlignUp(l.gateScaleBytes + l.downScaleBytes, 16);
+        plan.auxiliary[0] = {0, uint32_t(l.scalesOffset), plan.auxiliaryBytes};
+    }
+    return true;
+}
+
+void SnapshotFP8Metadata(const OffloadLayout &l, const fastllm::Data &gate,
+                        const fastllm::Data &down, uint8_t *record) {
+    if (!l.gateScaleBytes) return;
+    memcpy(record, gate.scales.data(), l.gateScaleBytes);
+    memcpy(record + l.gateScaleBytes, down.scales.data(), l.downScaleBytes);
+    const size_t bytes = l.gateScaleBytes + l.downScaleBytes;
+    memset(record + bytes, 0, AlignUp(bytes, 16) - bytes);
+}
+
+bool BindSharedFP8(const OffloadLayout &l, const fastllm::Data &w, int part,
+                   fastllm::cuda::SharedWeightView &view) {
+    const uint32_t columns = part == 0 ? l.hidden : l.inter;
+    if (l.weightType == fastllm::DataType::FP8_E4M3_BLOCK_128) {
+        // Identical packed row payload: only undo gate/up row interleaving.
+        if (w.dataType != l.weightType) return false;
+        view.rowBytes = fastllm::GetDataBytes(w.dataType, 1, columns);
+        view.tileStride = view.rowStride = view.blockBytes = view.blockStride = view.rowBytes;
+    } else {
+        const int block = part == 0 ? l.gateBlockM : l.downBlockM;
+        const auto expected = block == 128 ? fastllm::DataType::FP8_E4M3_BLOCK_128
+                                         : fastllm::DataType::FP8_E4M3_PERCHANNEL;
+        if (w.dataType != expected) return false;
+        view.rowBytes = columns;
+        view.blockBytes = block;
+        view.blockStride = block + sizeof(float);
+        view.tileStride = view.rowStride = fastllm::GetDataBytes(w.dataType, 1, columns);
+    }
+    return true;
+}
+
+bool BindNumaWeights(OffloadGroup &group, const std::vector<fastllm::Data *> &weights,
+                     const SharedCacheStorage &storage) {
     const OffloadLayout &layout = group.layout;
     const int nodes = weights.front()->numasData.size();
-    if (nodes <= 0 || (layout.inter * 2) % nodes != 0 ||
-        layout.hidden % nodes != 0) return false;
-    const fastllm::DataType storageTypes[]{weights[0]->dataType, weights[1]->dataType};
-    int planarParts = 0;
+    if (nodes <= 0 || (layout.inter * 2) % nodes || layout.hidden % nodes) return false;
+    auto &plan = group.sharedLayout;
+    plan.shards = nodes;
+    plan.recordBytes = layout.recordStride;
     for (int part = 0; part < 2; ++part) {
-        if (storageTypes[part] == fastllm::DataType::NVFP4_BLOCK_16_PLANAR) {
-            const int rows = part == 0 ? 2 * layout.inter : layout.hidden;
-            if ((rows / nodes) % fastllm::NVFP4_PLANAR_TILE_ROWS != 0) return false;
-            planarParts |= 1 << part;
-        } else if (storageTypes[part] != fastllm::DataType::NVFP4_BLOCK_16) {
-            return false;
-        }
+        auto &view = plan.weights[part];
+        view.rows = part == 0 ? layout.inter * 2 : layout.hidden;
+        view.rowsPerShard = view.rows / nodes;
+        view.rowGroups = part == 0 ? 2 : 1;
+        view.destinationOffset = part == 0 ? 0 : layout.downOffset;
+        if (!storage.bind(layout, *weights[part], part, view)) return false;
     }
+    if (!plan.Prepare()) return false;
     std::vector<void *> pointers;
     pointers.reserve(weights.size() * nodes);
     for (size_t index = 0; index < weights.size(); ++index) {
         const fastllm::Data &weight = *weights[index];
-        const int rows = index % 2 == 0 ? 2 * layout.inter : layout.hidden;
-        const int columns = index % 2 == 0 ? layout.hidden : layout.inter;
-        if (weight.dataType != storageTypes[index % 2] ||
+        const int part = index % 2;
+        const int rows = part == 0 ? 2 * layout.inter : layout.hidden;
+        const int columns = part == 0 ? layout.hidden : layout.inter;
+        if (weight.dataType != weights[part]->dataType ||
+            weight.blockK != weights[part]->blockK || weight.blockM != weights[part]->blockM ||
             weight.dims.size() != 2 || weight.dims[0] != rows || weight.dims[1] != columns ||
-            weight.blockK != 1 || weight.blockM != 16 ||
             weight.dataDevice != fastllm::DataDevice::CPU ||
             !weight.isPinned || weight.cpuData != nullptr ||
             weight.numasData.size() != size_t(nodes)) return false;
         for (uint8_t *source : weight.numasData) {
             void *mapped = nullptr;
             if (source == nullptr || (reinterpret_cast<uintptr_t>(source) & 15) != 0 ||
-                cudaHostGetDevicePointer(&mapped, source, 0) != cudaSuccess ||
-                mapped == nullptr) {
+                cudaHostGetDevicePointer(&mapped, source, 0) != cudaSuccess || !mapped) {
                 cudaGetLastError();
                 return false;
             }
             pointers.push_back(source);
         }
     }
-    group.numaCount = nodes;
-    group.numaPlanarParts = planarParts;
     group.numaPointers = std::move(pointers);
     return true;
 }
@@ -1025,75 +1099,6 @@ bool LaunchNVFP4Cache(const fastllm::Data &input, fastllm::Data &gateOutput,
     return cudaGetLastError() == cudaSuccess;
 }
 
-// Gather NUMA weight bytes and append original E4M3/global scales. Planar
-// 32-row tiles keep FP32 scales out of the weight loads crossing PCIe; legacy
-// inline shards remain supported when a matrix cannot form complete tiles.
-template<class Unit, int PlanarParts>
-__device__ Unit LoadNumaWeightWord(
-        void *const *pointers, int nodes, int expert, int part,
-        int rows, int columns, uint32_t offset) {
-    const int rowBytes = columns / 2, rowsPerNode = rows / nodes;
-    int row = offset / rowBytes;
-    const int columnByte = offset % rowBytes;
-    if (part == 0) {
-        row = row < rows / 2 ? row * 2 : (row - rows / 2) * 2 + 1;
-    }
-    const int node = row / rowsPerNode;
-    const uint8_t *source = static_cast<const uint8_t *>(
-        pointers[(expert * 2 + part) * nodes + node]);
-    if (PlanarParts & (1 << part)) {
-        const int localRow = row % rowsPerNode;
-        source += fastllm::NVFP4PlanarWeightOffset(localRow, columns / 16) + columnByte;
-    } else {
-        source += size_t(row % rowsPerNode) * (columns / 16) * 12 +
-                  (columnByte / 8) * 12 + columnByte % 8;
-    }
-    return *reinterpret_cast<const Unit *>(source);
-}
-
-template<class Unit, int PlanarParts>
-__global__ void CopyNumaNVFP4Records(
-        OffloadLayout layout, void *const *pointers, int nodes,
-        const uint8_t *scales, size_t scaleStride, uint8_t *records,
-        const int32_t *sourceIds, const int32_t *destinationIds,
-        const int32_t *count) {
-    const uint32_t units = layout.recordStride / sizeof(Unit);
-    const uint32_t gateWeightBytes = layout.inter * layout.hidden;
-    const uint32_t downWeightBytes = gateWeightBytes / 2;
-    const uint32_t gateScales = layout.gateBytes - gateWeightBytes;
-    const uint32_t downScales = layout.downBytes - downWeightBytes;
-    const uint32_t total = *count * units;
-    for (uint32_t flat = blockIdx.x * blockDim.x + threadIdx.x;
-         flat < total; flat += gridDim.x * blockDim.x) {
-        const uint32_t request = flat / units;
-        const uint32_t offset = (flat % units) * sizeof(Unit);
-        const int expert = sourceIds[request];
-        const uint8_t *sourceScales = scales + size_t(expert) * scaleStride;
-        Unit value{};
-        if (offset < gateWeightBytes) {
-            value = LoadNumaWeightWord<Unit, PlanarParts>(pointers, nodes, expert, 0,
-                layout.inter * 2, layout.hidden, offset);
-        } else if (offset < layout.gateBytes) {
-            value = *reinterpret_cast<const Unit *>(
-                sourceScales + offset - gateWeightBytes);
-        } else if (offset >= layout.downOffset &&
-                   offset < layout.downOffset + downWeightBytes) {
-            value = LoadNumaWeightWord<Unit, PlanarParts>(pointers, nodes, expert, 1,
-                layout.hidden, layout.inter, offset - layout.downOffset);
-        } else if (offset >= layout.downOffset + downWeightBytes &&
-                   offset < layout.downOffset + layout.downBytes) {
-            value = *reinterpret_cast<const Unit *>(sourceScales + gateScales +
-                offset - layout.downOffset - downWeightBytes);
-        } else if (offset >= layout.scalesOffset &&
-                   offset < layout.scalesOffset + 3 * sizeof(float)) {
-            value = *reinterpret_cast<const Unit *>(sourceScales + gateScales +
-                downScales + offset - layout.scalesOffset);
-        }
-        *reinterpret_cast<Unit *>(records +
-            size_t(destinationIds[request]) * layout.recordStride + offset) = value;
-    }
-}
-
 } // namespace
 
 bool FastllmCudaMoeCacheRequested() {
@@ -1179,107 +1184,80 @@ bool FastllmCudaPrepareMoeCache(
             kMaxTopK, requestedSlots);
         return false;
     }
-    // Capture scales directly from compact checkpoint tensors, before NUMA
-    // registration releases them. Never allocate a duplicate weight snapshot.
-    group->hostScaleStride = registerNumaWeights ? NumaScaleStride(layout) : 0;
-    const bool shareNuma = group->hostScaleStride > 0;
-    const size_t hostStride = shareNuma ? group->hostScaleStride : layout.recordStride;
+    // A registered backend supplies byte layouts and only the metadata that
+    // its CPU representation cannot preserve. Never snapshot shared weights,
+    // including transiently during load; registration retains sole ownership.
+    const auto *backend = FindExpertCacheBackend(layout.weightType);
+    const auto *storage = backend ? backend->storage : nullptr;
+    const bool shareNuma = bool(registerNumaWeights);
+    if (shareNuma && (!storage || layout.recordStride > UINT32_MAX / kMaxTopK ||
+                      !storage->plan(layout, group->sharedLayout))) return false;
+    const size_t hostStride = shareNuma ? group->sharedLayout.auxiliaryBytes : layout.recordStride;
     const size_t hostBytes = group->totalRecords * hostStride;
     void *host = nullptr;
-    cudaError_t state = cudaHostAlloc(
-        &host, hostBytes, cudaHostAllocMapped | cudaHostAllocPortable);
-    if (state != cudaSuccess || host == nullptr) {
-        std::fprintf(stderr,
-            "[Fastllm] CUDA expert cache could not allocate %.3f GiB of mapped "
-            "host storage: %s. The normal MoE backend remains active.\n",
-            static_cast<double>(hostBytes) /
-                (1024.0 * 1024.0 * 1024.0),
-            cudaGetErrorString(state));
-        cudaGetLastError();
-        return false;
+    std::unique_ptr<void, decltype(&cudaFreeHost)> hostOwner(nullptr, cudaFreeHost);
+    if (hostBytes) {
+        cudaError_t state = cudaHostAlloc(&host, hostBytes, cudaHostAllocMapped | cudaHostAllocPortable);
+        if (state != cudaSuccess || !host) {
+            std::fprintf(stderr, "[Fastllm] CUDA expert cache could not allocate %.3f GiB "
+                         "of mapped host metadata: %s.\n", double(hostBytes) / (1ULL << 30),
+                         cudaGetErrorString(state));
+            cudaGetLastError();
+            return false;
+        }
+        hostOwner.reset(host);
+        group->hostRecords = static_cast<uint8_t *>(host);
+        void *mapped = nullptr;
+        if (cudaHostGetDevicePointer(&mapped, host, 0) != cudaSuccess || !mapped) {
+            cudaGetLastError();
+            return false;
+        }
+        group->deviceHostRecords = static_cast<uint8_t *>(mapped);
     }
-    // Also releases the unpublished snapshot if registration fails or throws.
-    std::unique_ptr<void, decltype(&cudaFreeHost)> hostOwner(host, cudaFreeHost);
-    group->hostRecords = static_cast<uint8_t *>(host);
-    void *deviceHost = nullptr;
-    state = cudaHostGetDevicePointer(&deviceHost, host, 0);
-    if (state != cudaSuccess || deviceHost == nullptr) {
-        std::fprintf(stderr,
-            "[Fastllm] CUDA expert cache could not map host storage: %s.\n",
-            cudaGetErrorString(state));
-        cudaGetLastError();
-        return false;
-    }
-    group->deviceHostRecords = reinterpret_cast<uint8_t *>(deviceHost);
     group->tableKeys.reserve(layerCount);
     std::vector<fastllm::Data *> expertWeights;
     if (shareNuma) expertWeights.reserve(group->totalRecords * 2);
-
     for (int layer = 0; layer < layerCount; ++layer) {
-        fastllm::Data *tableKey = layers[layer].weights[2];
-        group->tableKeys.push_back(tableKey);
+        group->tableKeys.push_back(layers[layer].weights[2]);
         for (int expert = 0; expert < experts; ++expert) {
             const int position = (expert + 1) * 2;
             fastllm::Data *gate = layers[layer].weights[position];
             fastllm::Data *down = layers[layer].weights[position + 1];
-            uint8_t *record = group->hostRecords +
-                (static_cast<size_t>(layer) * experts + expert) *
-                hostStride;
+            uint8_t *record = hostBytes ? group->hostRecords +
+                (size_t(layer) * experts + expert) * hostStride : nullptr;
             if (shareNuma) {
                 expertWeights.push_back(gate);
                 expertWeights.push_back(down);
-                const size_t gateScales = layout.gateBytes - size_t(layout.inter) * layout.hidden;
-                const size_t downScales = layout.downBytes - size_t(layout.inter) * layout.hidden / 2;
-                std::memcpy(record, fastllm::GetNVFP4ScaleData(*gate), gateScales);
-                std::memcpy(record + gateScales, fastllm::GetNVFP4ScaleData(*down), downScales);
-                std::memcpy(record + gateScales + downScales, gate->scales.data(), 2 * sizeof(float));
-                std::memcpy(record + gateScales + downScales + 2 * sizeof(float),
-                            down->scales.data(), sizeof(float));
-                std::memset(record + gateScales + downScales + 3 * sizeof(float), 0,
-                            hostStride - gateScales - downScales - 3 * sizeof(float));
+                storage->snapshot(layout, *gate, *down, record);
             } else {
-                std::memcpy(record, gate->cpuData, layout.gateBytes);
-                std::memcpy(record + layout.downOffset,
-                            down->cpuData, layout.downBytes);
+                memcpy(record, gate->cpuData, layout.gateBytes);
+                memcpy(record + layout.downOffset, down->cpuData, layout.downBytes);
                 if (layout.gateScaleBytes) {
-                    std::memcpy(record + layout.scalesOffset,
-                            gate->scales.data(), layout.gateScaleBytes);
-                    std::memcpy(record + layout.scalesOffset + layout.gateScaleBytes,
-                            down->scales.data(), layout.downScaleBytes);
+                    memcpy(record + layout.scalesOffset, gate->scales.data(), layout.gateScaleBytes);
+                    memcpy(record + layout.scalesOffset + layout.gateScaleBytes,
+                           down->scales.data(), layout.downScaleBytes);
                 }
             }
         }
     }
-
     if (shareNuma) {
         registerNumaWeights();
-        if (!BindNumaWeights(*group, expertWeights)) {
+        if (!BindNumaWeights(*group, expertWeights, *storage)) {
             std::fprintf(stderr, "[Fastllm] CUDA expert cache requires matching pinned NUMA "
                          "shards after registration; using the configured MoE backend.\n");
             return false;
         }
-        std::fprintf(stderr,
-            "[Fastllm] NVFP4 expert cache shares %d NUMA shards per weight; "
-            "original scales use %.3f GiB, avoiding a %.3f GiB host weight snapshot.\n",
-            group->numaCount, double(hostBytes) / (1ULL << 30),
-            double(group->totalRecords * (layout.recordStride - hostStride)) / (1ULL << 30));
-    }
 #ifdef USE_NUMAS
-    // Storage sharing and CPU execution are separate capabilities. FP8 keeps
-    // its existing compact cache snapshot while the CPU uses its registered
-    // block128/per-channel shards; there is no new weight copy for hybrid.
-    const auto *backend = FindExpertCacheBackend(layout.weightType);
-    const bool registerForDecode = !shareNuma && registerNumaWeights && backend &&
-        backend->supportsNumaRegistration && backend->supportsNumaRegistration(layout);
-    if (registerForDecode) registerNumaWeights();
-    if (shareNuma || registerForDecode) {
         group->cpuDecodeReady = true;
         for (int layer = 0; layer < layerCount; ++layer)
             group->cpuDecodeReady &= fastllm::CanRunNumasMoeDecodeExperts(
                 layers[layer].weights, layers[layer].weightsBatch);
-        if (registerForDecode && !group->cpuDecodeReady) return false;
-    }
 #endif
+        std::fprintf(stderr, "[Fastllm] %s expert cache shares %d NUMA shards per weight; "
+                     "metadata uses %.3f GiB, avoiding a %.3f GiB host weight snapshot.\n",
+                     FormatName(layout.weightType), group->sharedLayout.shards, double(hostBytes) / (1ULL << 30),
+                     double(group->totalRecords * (layout.recordStride - hostStride)) / (1ULL << 30));
+    }
     OffloadGroup *rawGroup = group.get();
     for (int layer = 0; layer < layerCount; ++layer) {
         TableRegistry()[group->tableKeys[layer]] = {rawGroup, layer};
@@ -1428,17 +1406,14 @@ bool ComputeFP8Cache(const fastllm::Data &input, fastllm::Data &gateOutput,
 }
 
 bool FP8HybridShape(const OffloadLayout &) { return true; }
-bool FP8NumaStorage(const OffloadLayout &l) {
-    return l.weightType == fastllm::DataType::FP8_E4M3_BLOCK_128 ||
-        ((l.gateBlockM == 128 || l.gateBlockM == l.hidden) &&
-         (l.downBlockM == 128 || l.downBlockM == l.inter));
-}
 
 const ExpertCacheBackend *FindExpertCacheBackend(fastllm::DataType type) {
+    static const SharedCacheStorage nvfp4{PlanSharedNVFP4, SnapshotNVFP4Metadata, BindSharedNVFP4};
+    static const SharedCacheStorage fp8{PlanSharedFP8, SnapshotFP8Metadata, BindSharedFP8};
     static const ExpertCacheBackend backends[] = {
-        {fastllm::DataType::NVFP4_BLOCK_16_E4M3, SupportsNVFP4WideDecode, nullptr, ComputeNVFP4Cache},
-        {fastllm::DataType::FP8_E4M3, FP8HybridShape, FP8NumaStorage, ComputeFP8Cache},
-        {fastllm::DataType::FP8_E4M3_BLOCK_128, FP8HybridShape, FP8NumaStorage, ComputeFP8Cache},
+        {fastllm::DataType::NVFP4_BLOCK_16_E4M3, SupportsNVFP4WideDecode, &nvfp4, ComputeNVFP4Cache},
+        {fastllm::DataType::FP8_E4M3, FP8HybridShape, &fp8, ComputeFP8Cache},
+        {fastllm::DataType::FP8_E4M3_BLOCK_128, FP8HybridShape, &fp8, ComputeFP8Cache},
     };
     for (const auto &backend : backends) if (backend.type == type) return &backend;
     return nullptr;
@@ -1454,29 +1429,19 @@ bool EnsureCachedExperts(OffloadGroup *group, DeviceCache *cache, int tableId,
             metadata, indices, tableId * layout.experts, layout.experts, topk,
             cache->routeSlots, cache->missExperts, cache->missSlots, cache->missCount,
             cache->ensureThreads, cudaStreamPerThread)) return false;
-    const uint8_t *sourceTable = group->deviceHostRecords +
-        size_t(tableId) * layout.experts *
-            (group->numaCount > 0 ? group->hostScaleStride : layout.recordStride);
-    if (group->numaCount > 0) {
+    const auto &shared = group->sharedLayout;
+    if (shared.shards > 0) {
         void *const *pointers = cache->numaPointers +
-            size_t(tableId) * layout.experts * 2 * group->numaCount;
-#define FASTLLM_NUMA_COPY(Unit, Parts) \
-        CopyNumaNVFP4Records<Unit, Parts><<<cache->copyLaunch.blocks, cache->copyLaunch.threads, \
-            0, cudaStreamPerThread>>>(layout, pointers, group->numaCount, sourceTable, \
-            group->hostScaleStride, cache->records, cache->missExperts, cache->missSlots, cache->missCount)
-        if (group->numaPlanarParts == 3 && layout.hidden % 32 == 0 && layout.inter % 32 == 0) {
-            FASTLLM_NUMA_COPY(uint4, 3);
-        } else if (group->numaPlanarParts == 3) {
-            FASTLLM_NUMA_COPY(uint32_t, 3);
-        } else if (group->numaPlanarParts == 1) {
-            FASTLLM_NUMA_COPY(uint32_t, 1);
-        } else if (group->numaPlanarParts == 2) {
-            FASTLLM_NUMA_COPY(uint32_t, 2);
-        } else {
-            FASTLLM_NUMA_COPY(uint32_t, 0);
-        }
-#undef FASTLLM_NUMA_COPY
-    } else if (!fastllm::cuda::CopyRecords(
+            size_t(tableId) * layout.experts * 2 * shared.shards;
+        const uint8_t *metadata = shared.auxiliaryBytes ? group->deviceHostRecords +
+            size_t(tableId) * layout.experts * shared.auxiliaryBytes : nullptr;
+        return fastllm::cuda::CopySharedExpertRecords(shared, pointers, metadata,
+            cache->records, cache->missExperts, cache->missSlots, cache->missCount,
+            topk, cache->copyLaunch, cudaStreamPerThread);
+    }
+    const uint8_t *sourceTable = group->deviceHostRecords +
+        size_t(tableId) * layout.experts * layout.recordStride;
+    if (!fastllm::cuda::CopyRecords(
             {sourceTable, cache->records, layout.recordStride,
              layout.recordStride, layout.recordStride},
             cache->missExperts, cache->missSlots, cache->missCount, topk,
