@@ -30,6 +30,7 @@
 #endif
 
 namespace fastllm {
+    struct RopeConfig;
     class Data;
 
     class FastllmEnv {
@@ -1384,7 +1385,7 @@ namespace fastllm {
         Data &insertIndexs, Data &insertPositions,
         int q_heads, int k_heads, int head_dim,
         int rotaryDim, float eps, float ropeTheta, float ropeScale,
-        int pageLen, int batch, bool doQKNorm = true, Data *lastPageLens = nullptr);
+        int pageLen, int batch, bool doQKNorm = true, Data *lastPageLens = nullptr, const RopeConfig *ropeConfig = nullptr);
 
     void Step3p5QKVRMSNormRopeSplitAppendPagedCache(
         Data &qkv, Data &qNormWeight, Data &kNormWeight,

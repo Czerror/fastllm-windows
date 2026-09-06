@@ -125,6 +125,7 @@ class DeployConfig:
     draft_tokens: str = "auto"
     max_batch: str = "auto"
     max_context_length: str = "auto"
+    rope_scaling: str = ""
     temperature: str = ""
     top_p: str = ""
     top_k: str = ""
@@ -387,9 +388,9 @@ FIELDS: Sequence[FormField] = (
         "max_context_length",
         "单会话上下文",
         "text",
-        "限制单会话输入和输出合计的最大 token 数；auto 表示取模型与 KV Cache 上限的较小值。",
-        visible=lambda c: c.command == "server",
+        "单会话输入和输出合计的最大 token 数；扩展需要有效 RoPE 配置，容量不足时启动失败。",
     ),
+    FormField("rope_scaling", "RoPE扩展", "text", "留空沿用模型配置；填 yarn 或 JSON 参数。"),
     FormField("moe_atype", "MOE激活类型", "choice", "MOE层激活类型，可使用 auto、float32、float16 或 bfloat16。", MOE_ATYPE_CHOICES),
     FormField("enable_thinking", "思考开关", "choice", "是否开启硬思考开关，需要模型支持。", ENABLE_THINKING_CHOICES),
     FormField("tokens", "tokens数量", "text", "设置总 token 数量；auto 表示不指定。"),
@@ -1187,12 +1188,13 @@ def build_fastllm_argv(config: DeployConfig) -> List[str]:
     if is_gguf_model(config.model):
         _add_option(argv, "--ori", _expand_user_path(config.ori.strip()))
 
+    _add_option(argv, "--max_context_length", _optional_text(config.max_context_length))
+    _add_option(argv, "--rope_scaling", config.rope_scaling.strip())
     if config.command == "server":
         _add_option(argv, "--model_name", effective_model_name(config))
         _add_option(argv, "--host", config.host.strip())
         _add_option(argv, "--port", config.port.strip())
         _add_option(argv, "--api_key", config.api_key.strip())
-        _add_option(argv, "--max_context_length", _optional_text(config.max_context_length))
         _add_option(argv, "--temperature", config.temperature.strip())
         _add_option(argv, "--top_p", config.top_p.strip())
         _add_option(argv, "--top_k", config.top_k.strip())

@@ -5785,13 +5785,13 @@ namespace fastllm {
                 int rotaryDim,
                 const std::vector<int> &sections,
                 float ropeTheta,
-                float ropeScale) {
-            if (positionIds.dims.size() == 2 && positionIds.dims[0] == 3) {
+                float ropeScale, const RopeConfig *ropeConfig) {
+            if (!ropeConfig && positionIds.dims.size() == 2 && positionIds.dims[0] == 3) {
                 Qwen35CudaInterleavedRope(runner, input, positionIds, rotaryDim,
                                           sections, ropeTheta, ropeScale);
             } else {
                 qwen3cuda::Qwen3CudaRopeEncoding(runner, input, positionIds,
-                                                 rotaryDim, ropeTheta, ropeScale);
+                                                 rotaryDim, ropeTheta, ropeScale, ropeConfig);
             }
         }
 
@@ -5818,7 +5818,7 @@ namespace fastllm {
                 int pageLen,
                 int batch,
                 bool doQKNorm,
-                Data *lastPageLens) {
+                Data *lastPageLens, const RopeConfig *ropeConfig) {
             AssertInFastLLM(qgatekv.dims.size() == 3,
                             "Qwen3.5 fused gated attention decode expects [bs, seq, dim].\n");
             int bsz = qgatekv.dims[0];
@@ -5847,16 +5847,19 @@ namespace fastllm {
                 datas["lastPageLens"] = lastPageLens;
                 outputs.push_back("lastPageLens");
             }
-            runner.Run("Qwen35QGateKVRMSNormRopeSplitAppendPagedCache",
-                       datas,
-                       FloatDict{{"eps", eps}, {"ropeTheta", ropeTheta}, {"ropeScale", ropeScale}},
-                       IntDict{{"q_heads", qHeads}, {"k_heads", kHeads}, {"head_dim", headDim},
+            FloatDict floats = {{"eps", eps}, {"ropeTheta", ropeTheta}, {"ropeScale", ropeScale}};
+            IntDict ints = {{"q_heads", qHeads}, {"k_heads", kHeads}, {"head_dim", headDim},
                                {"rotaryDim", rotaryDim},
                                {"sectionT", sections.size() > 0 ? sections[0] : 0},
                                {"sectionH", sections.size() > 1 ? sections[1] : 0},
                                {"sectionW", sections.size() > 2 ? sections[2] : 0},
                                {"pageLen", pageLen}, {"batch", batch},
-                               {"doQKNorm", (int)doQKNorm}},
+                               {"doQKNorm", (int)doQKNorm}};
+            if (ropeConfig) ropeConfig->AddFusedParams(floats, ints);
+            runner.Run("Qwen35QGateKVRMSNormRopeSplitAppendPagedCache",
+                       datas,
+                       floats,
+                       ints,
                        outputs);
         }
 
@@ -6584,7 +6587,7 @@ namespace fastllm {
                 int numAttentionHeads, int numKeyValueHeads, int headDim,
                 int rotaryDim, const std::vector<int> &mropeSections,
                 float rmsNormEps, float ropeBase, float ropeFactor,
-                int ropeType,
+                int ropeType, const RopeConfig *ropeConfig,
                 bool isPrefill,
                 Data *hiddenStates,
                 int pagedCacheLayerOffset,
@@ -6726,7 +6729,7 @@ namespace fastllm {
             }
 
             if (isPrefill) {
-                bool fusedPrefill = Qwen35CudaTryQGateKVPrefill(
+                bool fusedPrefill = !ropeConfig && Qwen35CudaTryQGateKVPrefill(
                     runner, *merged, *qNormWeight, *kNormWeight,
                     *allPositionIds, *q, *gate, *k, *v,
                     numAttentionHeads, numKeyValueHeads, headDim,
@@ -6749,9 +6752,9 @@ namespace fastllm {
                     Qwen3CudaRMSNorm(runner, *q, *qNormWeight, rmsNormEps, *q);
                     Qwen3CudaRMSNorm(runner, *k, *kNormWeight, rmsNormEps, *k);
                     Qwen35CudaApplyRotary(runner, *q, *allPositionIds,
-                                          rotaryDim, mropeSections, ropeBase, ropeScale);
+                                          rotaryDim, mropeSections, ropeBase, ropeScale, ropeConfig);
                     Qwen35CudaApplyRotary(runner, *k, *allPositionIds,
-                                          rotaryDim, mropeSections, ropeBase, ropeScale);
+                                          rotaryDim, mropeSections, ropeBase, ropeScale, ropeConfig);
 
                     Qwen3CudaPermuteSelf(runner, *q, {0, 2, 1, 3});
                     Qwen3CudaPermuteSelf(runner, *k, {0, 2, 1, 3});
@@ -6892,7 +6895,7 @@ namespace fastllm {
                     numAttentionHeads, numKeyValueHeads, headDim,
                     rotaryDim, mropeSections, rmsNormEps, ropeBase, ropeScale,
                     kCaches.pageLen, batch, true,
-                    fillLastPageLensOnDevice ? lastPageLens : nullptr);
+                    fillLastPageLensOnDevice ? lastPageLens : nullptr, ropeConfig);
 
                 if (!externalDecodeMeta) {
                     for (int b = 0; b < batch; b++) {
@@ -10887,7 +10890,7 @@ namespace fastllm {
                             localQHeads, localKVHeads, head_dim,
                             rotary_dim, mrope_sections,
                             rms_norm_eps, rope_base, rope_factor,
-                            rope_type, isPrefill,
+                            rope_type, YarnConfig(), isPrefill,
                             &buf.hiddenStates,
                         pagedCacheLayerOffset,
                         true, true, true, 1,
@@ -12369,7 +12372,7 @@ namespace fastllm {
                                 localQHeads, localKVHeads, head_dim,
                                 rotary_dim, mrope_sections,
                                 rms_norm_eps, rope_base, rope_factor,
-                                rope_type, false,
+                                rope_type, YarnConfig(), false,
                                 &hiddenStates,
                                 pagedCacheLayerOffset,
                                 true, true,
@@ -12465,7 +12468,7 @@ namespace fastllm {
                                     localQHeads, localKVHeads, head_dim,
                                     rotary_dim, mrope_sections,
                                     rms_norm_eps, rope_base, rope_factor,
-                                    rope_type, false,
+                                    rope_type, YarnConfig(), false,
                                     &rowHiddenStates,
                                     pagedCacheLayerOffset,
                                     true, packedExactPagedMeta,
@@ -12529,7 +12532,7 @@ namespace fastllm {
                             localQHeads, localKVHeads, head_dim,
                             rotary_dim, mrope_sections,
                             rms_norm_eps, rope_base, rope_factor,
-                            rope_type, isPrefill,
+                            rope_type, YarnConfig(), isPrefill,
                             &hiddenStates,
                             pagedCacheLayerOffset,
                             true, false,
@@ -23285,6 +23288,7 @@ namespace fastllm {
             rope_factor = atof(this->weight.dicts["rope_scaling.factor"].c_str());
         }
         mrope_sections = {11, 11, 10};
+        InitContextParams(rope_type, rope_base, rope_factor, rotary_dim);
         std::string mropeSection = getDictValue(
             "mrope_section",
             getDictValue("rope_parameters.mrope_section", "")
@@ -23311,6 +23315,7 @@ namespace fastllm {
                 mrope_sections = {base, base, half - base * 2};
             }
         }
+        if (YarnConfig()) mrope_sections = YarnConfig()->mropeSections;
         vision_depth = atoi(getDictValue("vision_config.depth", "0").c_str());
         vision_hidden_size = atoi(getDictValue("vision_config.hidden_size", "0").c_str());
         vision_num_heads = atoi(getDictValue("vision_config.num_heads", "0").c_str());
@@ -26059,6 +26064,10 @@ namespace fastllm {
     }
 
     void Qwen3_5Model::ApplyMultimodalRotary(Data &input, const Data &positionIds, float ropeScale) {
+        if (YarnConfig()) {
+            ApplyYarnRope(input, positionIds, *YarnConfig());
+            return;
+        }
         if (positionIds.dims.size() == 2 && positionIds.dims[0] == 3) {
             fastllm::Qwen35InterleavedRope(
                 input, positionIds, rotary_dim,

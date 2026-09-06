@@ -25,6 +25,7 @@ namespace fastllm {
         virtual ~Qwen3_5Model();
 
         virtual void InitParams(); // 初始化参数信息
+        ModelContextSpec GetContextSpec() const override { return {true, true, "text_config."}; }
 
         virtual std::map <std::string, std::vector <std::pair <std::string, DataType> > >
         GetTensorMap(const std::vector <std::string> &tensorNames) override;

@@ -141,7 +141,7 @@ function cacheElements() {
     "clear-profile-config", "automatic-config-status",
     "cuda-device-field", "tp-device-field", "cudapp-device-field", "moe-device-field",
     "moe-device-custom-field", "moe-layers-field", "server-model-name-field", "server-host-field",
-    "webui-max-token-field", "webui-think-field", "server-context-field",
+    "webui-max-token-field", "webui-think-field",
     "server-sampling-title", "server-sampling-fields", "server-api-key-field",
     "server-hide-input-field", "launch-command-kicker", "command-preview",
     "validation-messages", "save-profile",

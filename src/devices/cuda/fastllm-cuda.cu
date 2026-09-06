@@ -2663,13 +2663,15 @@ __global__ void FastllmYarnRopeEncodingKernel(float *data, float *positionIds,
                                                int len, int spatial, int n, int m,
                                                int positionStride, int rotateDim,
                                                float ropeTheta, float factor, float attentionFactor,
-                                               float correctionLow, float correctionHigh) {
+                                               float correctionLow, float correctionHigh, int mrope, int sectionH, int sectionW) {
     int token = blockIdx.x;
     int batch = token / len;
     int localToken = token % len;
     int dim = threadIdx.x;
     int halfDim = rotateDim / 2;
-    float position = (float)(int)positionIds[batch * positionStride + localToken];
+    int row = mrope ? ((dim % 3 == 1 && dim < sectionH * 3) ? 1 :
+              (dim % 3 == 2 && dim < sectionW * 3) ? 2 : 0) : batch;
+    float position = (float)(int)positionIds[row * positionStride + localToken];
     float angle = position * FastllmYarnInvFreq(
         dim, rotateDim, ropeTheta, factor, correctionLow, correctionHigh);
     float curSin, curCos;
@@ -2689,13 +2691,15 @@ __global__ void FastllmYarnRopeEncodingKernel(half *data, float *positionIds,
                                                int len, int spatial, int n, int m,
                                                int positionStride, int rotateDim,
                                                float ropeTheta, float factor, float attentionFactor,
-                                               float correctionLow, float correctionHigh) {
+                                               float correctionLow, float correctionHigh, int mrope, int sectionH, int sectionW) {
     int token = blockIdx.x;
     int batch = token / len;
     int localToken = token % len;
     int dim = threadIdx.x;
     int halfDim = rotateDim / 2;
-    float position = (float)(int)positionIds[batch * positionStride + localToken];
+    int row = mrope ? ((dim % 3 == 1 && dim < sectionH * 3) ? 1 :
+              (dim % 3 == 2 && dim < sectionW * 3) ? 2 : 0) : batch;
+    float position = (float)(int)positionIds[row * positionStride + localToken];
     float angle = position * FastllmYarnInvFreq(
         dim, rotateDim, ropeTheta, factor, correctionLow, correctionHigh);
     float curSin, curCos;
@@ -2716,13 +2720,15 @@ __global__ void FastllmYarnRopeEncodingKernel(__nv_bfloat16 *data, float *positi
                                                int len, int spatial, int n, int m,
                                                int positionStride, int rotateDim,
                                                float ropeTheta, float factor, float attentionFactor,
-                                               float correctionLow, float correctionHigh) {
+                                               float correctionLow, float correctionHigh, int mrope, int sectionH, int sectionW) {
     int token = blockIdx.x;
     int batch = token / len;
     int localToken = token % len;
     int dim = threadIdx.x;
     int halfDim = rotateDim / 2;
-    float position = (float)(int)positionIds[batch * positionStride + localToken];
+    int row = mrope ? ((dim % 3 == 1 && dim < sectionH * 3) ? 1 :
+              (dim % 3 == 2 && dim < sectionW * 3) ? 2 : 0) : batch;
+    float position = (float)(int)positionIds[row * positionStride + localToken];
     float angle = position * FastllmYarnInvFreq(
         dim, rotateDim, ropeTheta, factor, correctionLow, correctionHigh);
     float curSin, curCos;
@@ -13827,7 +13833,8 @@ __global__ void FastllmQwen35QGateKVRMSNormRopeSplitAppendPagedCacheKernel(
     float ropeScale,
     int pageLen,
     int batch,
-    int doQKNorm) {
+    int doQKNorm, int useYarn, float yarnFactor, float yarnAttentionFactor,
+    float yarnCorrectionLow, float yarnCorrectionHigh) {
     int totalHeads = qHeads + kHeads + kHeads;
     int blockId = blockIdx.x;
     int tokenId = blockId / totalHeads;
@@ -13918,9 +13925,12 @@ __global__ void FastllmQwen35QGateKVRMSNormRopeSplitAppendPagedCacheKernel(
                 rawPosition = positionIds[positionOffset];
             }
             float position = rawPosition / ropeScale;
-            float freq = position / powf(ropeTheta, (float)(2 * j) / rotaryDim);
+            float freq = useYarn ? rawPosition * FastllmYarnInvFreq(j, rotaryDim, ropeTheta,
+                yarnFactor, yarnCorrectionLow, yarnCorrectionHigh) :
+                position / powf(ropeTheta, (float)(2 * j) / rotaryDim);
             float curSin = sinf(freq);
             float curCos = cosf(freq);
+            if (useYarn) { curSin *= yarnAttentionFactor; curCos *= yarnAttentionFactor; }
             float va = FastllmCudaValueToFloat(base[j]);
             float vb = FastllmCudaValueToFloat(base[j + halfRotate]);
             base[j] = FastllmCudaFloatToValue<T>(va * curCos - vb * curSin);
@@ -13979,7 +13989,8 @@ bool FastllmCudaQwen35QGateKVRMSNormRopeSplitAppendPagedCache(
     int rotaryDim, int sectionT, int sectionH, int sectionW,
     float eps, float ropeTheta, float ropeScale,
     int pageLen, fastllm::DataType pagedDataType, int batch,
-    int doQKNorm) {
+    int doQKNorm, int useYarn, float yarnFactor, float yarnAttentionFactor,
+    float yarnCorrectionLow, float yarnCorrectionHigh) {
     fastllm::AssertInFastLLM(qgatekv.dims.size() == 3,
                              "FastllmCudaQwen35QGateKVRMSNormRopeSplitAppendPagedCache expects [bs, seq, dim].\n");
     int bs = qgatekv.dims[0];
@@ -14018,7 +14029,8 @@ bool FastllmCudaQwen35QGateKVRMSNormRopeSplitAppendPagedCache(
                 outer, totalDim, qHeads, kHeads, headDim,
                 bs, seqlen, positionStride, rotaryDim,
                 sectionH, sectionW, useInterleavedRope,
-                eps, ropeTheta, ropeScale, pageLen, batch, doQKNorm);
+                eps, ropeTheta, ropeScale, pageLen, batch, doQKNorm,
+                useYarn, yarnFactor, yarnAttentionFactor, yarnCorrectionLow, yarnCorrectionHigh);
     };
 
     auto launchByPagedType = [&](auto TPB, auto *qgatekvPtr, auto *qOutputPtr, auto *gateOutputPtr) {
@@ -14151,7 +14163,7 @@ bool FastllmCudaRopeEncoding(fastllm::Data &data, const fastllm::Data &positionI
 
 bool FastllmCudaYarnRopeEncoding(fastllm::Data &data, const fastllm::Data &positionIds, int rotaryDim,
                                  float ropeTheta, float factor, float attentionFactor,
-                                 float correctionLow, float correctionHigh) {
+                                 float correctionLow, float correctionHigh, int mrope, int sectionH, int sectionW) {
     fastllm::AssertInFastLLM(data.dims.size() == 4,
                              "YaRN RoPE expects [batch, seq, heads, dim] input.");
     fastllm::AssertInFastLLM(positionIds.dataType == fastllm::DataType::FLOAT32,
@@ -14164,6 +14176,9 @@ bool FastllmCudaYarnRopeEncoding(fastllm::Data &data, const fastllm::Data &posit
                              data.dataType == fastllm::DataType::BFLOAT16,
                              "CUDA YaRN RoPE supports FLOAT32, FLOAT16 and BFLOAT16 input.");
 
+    fastllm::AssertInFastLLM(positionIds.dims.size() == 2 && positionIds.dims.back() >= data.dims[1] &&
+        (mrope ? (data.dims[0] == 1 && positionIds.dims[0] == 3) : positionIds.dims[0] >= data.dims[0]),
+        "YaRN position shape does not match input/layout.");
     float *cudaData = (float *)FastllmCudaPrepareInput(data);
     float *cudaPositionIds = (float *)FastllmCudaPrepareInput(positionIds);
     int outer = data.dims[0] * data.dims[1];
@@ -14175,15 +14190,15 @@ bool FastllmCudaYarnRopeEncoding(fastllm::Data &data, const fastllm::Data &posit
     if (data.dataType == fastllm::DataType::FLOAT32) {
         FastllmYarnRopeEncodingKernel <<< outer, halfDim >>> (
             cudaData, cudaPositionIds, len, spatial, n, m, positionStride, rotaryDim,
-            ropeTheta, factor, attentionFactor, correctionLow, correctionHigh);
+            ropeTheta, factor, attentionFactor, correctionLow, correctionHigh, mrope, sectionH, sectionW);
     } else if (data.dataType == fastllm::DataType::FLOAT16) {
         FastllmYarnRopeEncodingKernel <<< outer, halfDim >>> (
             (half*)cudaData, cudaPositionIds, len, spatial, n, m, positionStride, rotaryDim,
-            ropeTheta, factor, attentionFactor, correctionLow, correctionHigh);
+            ropeTheta, factor, attentionFactor, correctionLow, correctionHigh, mrope, sectionH, sectionW);
     } else {
         FastllmYarnRopeEncodingKernel <<< outer, halfDim >>> (
             (__nv_bfloat16*)cudaData, cudaPositionIds, len, spatial, n, m, positionStride, rotaryDim,
-            ropeTheta, factor, attentionFactor, correctionLow, correctionHigh);
+            ropeTheta, factor, attentionFactor, correctionLow, correctionHigh, mrope, sectionH, sectionW);
     }
     FastllmCudaFinishInput(positionIds, cudaPositionIds);
     FastllmCudaFinishOutput(data, cudaData);

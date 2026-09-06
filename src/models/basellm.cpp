@@ -3945,6 +3945,9 @@ namespace fastllm {
     void basellm::AutoWarmup() {
         ReportModelLoadProgress("warmup", 0, 1);
         if (GetFastllmEnv().skipWarmup) {
+            if (contextPlan.requestedLength > 0) {
+                throw std::runtime_error("Explicit context length requires warmup to validate KV capacity.");
+            }
             ReportModelLoadProgress("warmup", 1, 1);
             return;
         }
@@ -3989,6 +3992,7 @@ namespace fastllm {
                 }
                 finishCudaWarmup();
                 if (!unwinding) {
+                    model->ValidateContextCapacity();
                     ReportModelLoadProgress("warmup", 1, 1);
                 }
             }

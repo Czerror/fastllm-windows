@@ -40,6 +40,7 @@ struct FASTLLM_PYTOOLS_INIT {
 } fastllm_pytools_init;
 
 static thread_local std::string fastllmPytoolsWarmupError;
+static thread_local std::string fastllmPytoolsContextResult;
 
 extern "C" {
     typedef void (*FastllmModelLoadProgressCallback)(const char *stage,
@@ -435,6 +436,38 @@ extern "C" {
         models.models[id] = fastllm::CreateLLMModelFromHF(path, (fastllm::DataType)dataType, groupCnt, skipTokenizer, (std::string)config);
         models.locker.unlock();
         return id;
+    }
+
+    DLL_EXPORT const char *get_llm_context_result() {
+        return fastllmPytoolsContextResult.c_str();
+    }
+
+    DLL_EXPORT const char *get_llm_context_config(int modelId) {
+        auto model = models.GetModel(modelId);
+        fastllmPytoolsContextResult = model->contextPlan.ToJson();
+        return fastllmPytoolsContextResult.c_str();
+    }
+
+    DLL_EXPORT int create_llm_model_fromhf_with_context(char *path, int dataType, int groupCnt,
+            bool skipTokenizer, char *lora, bool useMoe, int moeDataType, int moeGroupCnt,
+            char *dtypeConfigString, int maxLength, char *ropeScaling) {
+        fastllmPytoolsContextResult.clear();
+        try {
+            std::lock_guard<std::mutex> guard(models.locker);
+            auto model = fastllm::CreateLLMModelFromHF(path, (fastllm::DataType)dataType,
+                groupCnt, skipTokenizer, "", lora, false, useMoe, (fastllm::DataType)moeDataType,
+                moeGroupCnt, dtypeConfigString, {maxLength, ropeScaling == nullptr ? "" : ropeScaling});
+            int id = models.models.size();
+            models.models[id] = std::move(model);
+            return id;
+        } catch (const std::exception &error) {
+            fastllmPytoolsContextResult = error.what();
+        } catch (const char *error) {
+            fastllmPytoolsContextResult = error == nullptr ? "unknown model initialization error" : error;
+        } catch (...) {
+            fastllmPytoolsContextResult = "unknown model initialization error";
+        }
+        return -1;
     }
 
     DLL_EXPORT int create_llm_model_from_gguf(char *path, char *oriPath) {
@@ -1093,6 +1126,10 @@ extern "C" {
         auto model = models.GetModel(modelId);
         if (length > 0 && length < model->max_positions) {
             model->max_positions = length;
+            if (model->contextPlan.configured) {
+                model->contextPlan.requestedLength = length;
+                model->contextPlan.effectiveLength = std::min(model->contextPlan.effectiveLength, length);
+            }
         }
         return model->max_positions;
     }

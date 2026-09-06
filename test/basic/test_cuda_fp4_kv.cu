@@ -1,4 +1,5 @@
 #include "fastllm.h"
+#include "contextconfig.h"
 #include "fastllm-cuda.cuh"
 #include "attention/fastllm-paged-attention-native.cuh"
 #include "attention/fastllm-fp4-kv.cuh"
@@ -416,12 +417,12 @@ static void RunRaggedGraphCase(fastllm::DataType dtype, int dim, bool decode, in
 }
 
 template <typename T>
-static void RunFusedCase(fastllm::DataType dtype) {
+static void RunFusedCase(fastllm::DataType dtype, bool yarn = false) {
     using namespace fastllm;
     const int batch = 2, dim = 256, qHeads = 8, heads = 2, pageLen = 16;
     const int width = (qHeads + heads) * dim * 2;
     Data input(dtype, {1, batch, width}), norm(DataType::FLOAT32, {dim});
-    Data positions(DataType::FLOAT32, {1, batch});
+    Data positions(DataType::FLOAT32, {yarn ? 3 : 1, batch});
     Data q(dtype, {qHeads, batch, dim}), gate(dtype, {1, batch, qHeads * dim});
     Data indices, offsets, lastLens;
     for (auto *data : {&input, &norm, &positions, &q, &gate}) AllocateGpu(*data);
@@ -429,6 +430,13 @@ static void RunFusedCase(fastllm::DataType dtype) {
     std::vector<T> hostInput(input.Count(0));
     for (size_t i = 0; i < hostInput.size(); ++i) hostInput[i] = T(std::sin(float(i) * 0.11f));
     std::vector<float> weights(dim, 1), hostPositions{31, 7};
+    RopeConfig rope;
+    if (yarn) {
+        hostPositions = {999999, 1000000, 999998, 999999, 999997, 999998};
+        rope = ResolveContextOptions({{"max_position_embeddings", "262144"}, {"head_dim", "256"},
+            {"rope_parameters", R"({"rope_type":"default","rope_theta":10000000,"partial_rotary_factor":0.25,"mrope_section":[11,11,10],"mrope_interleaved":true})"}},
+            {true, true, ""}, {1000000, "yarn"}).rope;
+    }
     Check(cudaMemcpy(norm.cudaData, weights.data(), norm.GetBytes(), cudaMemcpyHostToDevice));
     Check(cudaMemcpy(positions.cudaData, hostPositions.data(), positions.GetBytes(), cudaMemcpyHostToDevice));
     Data kRef(dtype, {2, pageLen, heads, dim}), vRef(dtype, {2, pageLen, heads, dim});
@@ -442,8 +450,9 @@ static void RunFusedCase(fastllm::DataType dtype) {
         Require(FastllmCudaQwen35QGateKVRMSNormRopeSplitAppendPagedCache(
             input, norm, norm, positions, q, gate, (uint8_t*)kp.cudaData, (uint8_t*)vp.cudaData,
             (int32_t*)indices.cudaData, (int32_t*)offsets.cudaData, (int32_t*)lastLens.cudaData,
-            qHeads, heads, dim, 64, 0, 0, 0, 1e-6f, 10000.0f, 1.0f,
-            pageLen, kp.dataType, batch, 1), "fused Qwen3.5 append failed");
+            qHeads, heads, dim, 64, yarn ? 11 : 0, yarn ? 11 : 0, yarn ? 10 : 0,
+            1e-6f, yarn ? rope.theta : 10000.0f, 1.0f, pageLen, kp.dataType, batch, 1,
+            yarn, rope.factor, rope.attentionFactor, rope.correctionLow, rope.correctionHigh), "fused Qwen3.5 append failed");
     };
     auto download = [&](Data &data) {
         Check(cudaDeviceSynchronize());
@@ -483,7 +492,7 @@ static void RunFusedCase(fastllm::DataType dtype) {
             DataType::FP4_E2M1, (uint8_t*)append.cudaData, dtype, true);
         Require(download(expected) == download(*pair.second), "fused FP4 differs from standalone quantization");
     }
-    std::printf("fused FP4 append and graph replay passed: dtype=%d\n", int(dtype));
+    std::printf("fused FP4 append and graph replay passed: dtype=%d yarn=%d\n", int(dtype), int(yarn));
 }
 
 int main() {
@@ -521,6 +530,8 @@ int main() {
         }
         RunFusedCase<half>(fastllm::DataType::FLOAT16);
         RunFusedCase<__nv_bfloat16>(fastllm::DataType::BFLOAT16);
+        RunFusedCase<half>(fastllm::DataType::FLOAT16, true);
+        RunFusedCase<__nv_bfloat16>(fastllm::DataType::BFLOAT16, true);
         std::puts("FP4 KV cache tests passed");
     } catch (const std::exception &error) {
         std::fprintf(stderr, "%s\n", error.what());

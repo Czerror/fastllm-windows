@@ -132,6 +132,8 @@
     "显存利用率": "显存利用率",
     "总 Token 数": "总 Token 数",
     "单会话上下文": "单会话上下文",
+    "RoPE 扩展": "RoPE 扩展",
+    "沿用配置；可填 yarn 或 JSON": "沿用配置；可填 yarn 或 JSON",
     "分块 Prefill": "分块 Prefill",
     "KV Cache 类型": "KV Cache 类型",
     "思考开关": "思考开关",

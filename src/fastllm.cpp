@@ -5,6 +5,7 @@
 #include "utils.h"
 
 #include "fastllm.h"
+#include "contextconfig.h"
 
 #include "executor.h"
 
@@ -5207,7 +5208,7 @@ namespace fastllm {
         Data &insertIndexs, Data &insertPositions,
         int q_heads, int k_heads, int head_dim,
         int rotaryDim, float eps, float ropeTheta, float ropeScale,
-        int pageLen, int batch, bool doQKNorm, Data *lastPageLens) {
+        int pageLen, int batch, bool doQKNorm, Data *lastPageLens, const RopeConfig *ropeConfig) {
         DataDict datas = {
                 {"qkv", &qkv}, {"qNormWeight", &qNormWeight}, {"kNormWeight", &kNormWeight},
                 {"positionIds", (Data*)&positionIds},
@@ -5218,8 +5219,10 @@ namespace fastllm {
         if (lastPageLens != nullptr) {
             datas["lastPageLens"] = lastPageLens;
         }
-        curExecutor->Run("QKVRMSNormRopeSplitAppendPagedCache", datas, {{"eps", eps}, {"ropeTheta", ropeTheta}, {"ropeScale", ropeScale}},
-           {{"q_heads", q_heads}, {"k_heads", k_heads}, {"head_dim", head_dim}, {"rotaryDim", rotaryDim}, {"pageLen", pageLen}, {"batch", batch}, {"doQKNorm", (int)doQKNorm}});
+        FloatDict floats = {{"eps", eps}, {"ropeTheta", ropeTheta}, {"ropeScale", ropeScale}};
+        IntDict ints = {{"q_heads", q_heads}, {"k_heads", k_heads}, {"head_dim", head_dim}, {"rotaryDim", rotaryDim}, {"pageLen", pageLen}, {"batch", batch}, {"doQKNorm", (int)doQKNorm}};
+        if (ropeConfig) ropeConfig->AddFusedParams(floats, ints);
+        curExecutor->Run("QKVRMSNormRopeSplitAppendPagedCache", datas, floats, ints);
     }
 
     void Step3p5QKVRMSNormRopeSplitAppendPagedCache(

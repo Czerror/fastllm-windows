@@ -132,6 +132,8 @@
     "显存利用率": "GPU memory ratio",
     "总 Token 数": "Total tokens",
     "单会话上下文": "Per-session context",
+    "RoPE 扩展": "RoPE extension",
+    "沿用配置；可填 yarn 或 JSON": "Use model config; yarn or JSON",
     "分块 Prefill": "Chunked prefill",
     "KV Cache 类型": "KV Cache type",
     "思考开关": "Thinking switch",

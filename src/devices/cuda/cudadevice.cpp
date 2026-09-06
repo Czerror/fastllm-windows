@@ -7927,7 +7927,10 @@ namespace fastllm {
         float correctionHigh = floatParams.find("correctionHigh") != floatParams.end() ? floatParams.find("correctionHigh")->second : 1.0f;
 
         FastllmCudaYarnRopeEncoding(data, positionIds, rotaryDim, ropeTheta, factor,
-                                    attentionFactor, correctionLow, correctionHigh);
+                                    attentionFactor, correctionLow, correctionHigh,
+                                    intParams.count("mrope") ? intParams.at("mrope") : 0,
+                                    intParams.count("sectionH") ? intParams.at("sectionH") : 0,
+                                    intParams.count("sectionW") ? intParams.at("sectionW") : 0);
     }
 
     void CudaQwen35InterleavedRopeOp::Run(const std::string &opType, const fastllm::DataDict &datas,
@@ -8137,7 +8140,12 @@ namespace fastllm {
             qHeads, kHeads, headDim, rotaryDim,
             sectionT, sectionH, sectionW,
             eps, ropeTheta, ropeScale, pageLen,
-            pagedKCacheData.dataType, batch, doQKNorm);
+            pagedKCacheData.dataType, batch, doQKNorm,
+            intParams.count("useYarn") ? intParams.at("useYarn") : 0,
+            floatParams.count("yarnFactor") ? floatParams.at("yarnFactor") : 1,
+            floatParams.count("yarnAttentionFactor") ? floatParams.at("yarnAttentionFactor") : 1,
+            floatParams.count("yarnCorrectionLow") ? floatParams.at("yarnCorrectionLow") : 0,
+            floatParams.count("yarnCorrectionHigh") ? floatParams.at("yarnCorrectionHigh") : 1);
     }
 
     void CudaRepeatPenaltyOp::Run(const std::string &opType, const fastllm::DataDict &datas,
