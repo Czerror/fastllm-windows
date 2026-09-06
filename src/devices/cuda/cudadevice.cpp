@@ -37,6 +37,11 @@
 #define FASTLLM_SOURCE_DIR "."
 #endif
 
+#ifdef FASTLLM_ENABLE_DEEPGEMM_FP8_SM90
+bool FastllmCudaDeepGemmLinearFp8Sm90(const fastllm::Data &input, fastllm::Data &weight,
+    const fastllm::Data &bias, fastllm::Data &output, int n, int m, int k);
+#endif
+
 namespace fastllm {
     // CUDA graph replay cannot reuse a MergeMOE path that picked experts on CPU.
     static thread_local bool cudaMergeMOEUsedGraphUnsafeFallback = false;
@@ -2338,6 +2343,17 @@ namespace fastllm {
         meta = &it->second;
         return true;
     }
+
+#ifdef FASTLLM_ENABLE_DEEPGEMM_FP8_SM90
+    static bool TryCudaDeepGemmLinearFp8Sm90(
+        Data &input, Data &weight, const Data &bias, Data &output, int n, int m, int k) {
+        if (FastllmCudaDeepGemmLinearFp8Sm90(input, weight, bias, output, n, m, k)) {
+            TraceCudaLinearFp8Path("deepgemm-sm90-fp8-block128", n, m, k);
+            return true;
+        }
+        return false;
+    }
+#endif
 
     static bool TryCudaCutlassLinearFp8Block128(
         Data &input, Data &weight, const Data &bias, Data &output, int n, int m, int k) {
@@ -6141,7 +6157,11 @@ namespace fastllm {
             } else if (weight.dataType == DataType::INT4_NOZERO) {
                 FastllmCudaHalfMatMulFloatInt4NoZero(input, weight, bias, output, n, m, k);
             } else if (weight.dataType == DataType::FP8_E4M3) {
-                if (!TryCudaCutlassLinearFp8PerChannel(input, weight, bias, output, n, m, k) &&
+                if (
+#ifdef FASTLLM_ENABLE_DEEPGEMM_FP8_SM90
+                    !TryCudaDeepGemmLinearFp8Sm90(input, weight, bias, output, n, m, k) &&
+#endif
+                    !TryCudaCutlassLinearFp8PerChannel(input, weight, bias, output, n, m, k) &&
                     !TryCudaCutlassLinearFp8Block128(input, weight, bias, output, n, m, k) &&
                     !TryCudaTritonLinearFp8Block128(input, weight, bias, output, n, m, k)) {
                     TraceCudaLinearFp8Path("native-fp8-e4m3", n, m, k);
@@ -6212,7 +6232,11 @@ namespace fastllm {
             } else if (weight.dataType == DataType::INT4_GROUP32) {
                 FastllmCudaBFloat16MatMulInt4Group32(input, weight, bias, output, n, m, k);
             } else if (weight.dataType == DataType::FP8_E4M3) {
-                if (!TryCudaCutlassLinearFp8PerChannel(input, weight, bias, output, n, m, k) &&
+                if (
+#ifdef FASTLLM_ENABLE_DEEPGEMM_FP8_SM90
+                    !TryCudaDeepGemmLinearFp8Sm90(input, weight, bias, output, n, m, k) &&
+#endif
+                    !TryCudaCutlassLinearFp8PerChannel(input, weight, bias, output, n, m, k) &&
                     !TryCudaCutlassLinearFp8Block128(input, weight, bias, output, n, m, k) &&
                     !TryCudaTritonLinearFp8Block128(input, weight, bias, output, n, m, k)) {
                     TraceCudaLinearFp8Path("native-fp8-e4m3", n, m, k);

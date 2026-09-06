@@ -299,6 +299,7 @@ if (USE_CUDA)
     set(FASTLLM_CUTLASS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/cutlass")
     set(FASTLLM_CUTLASS_FP8_ARCH_ENABLED OFF)
     set(FASTLLM_CUTLASS_FP8_SM89_ENABLED OFF)
+    set(FASTLLM_DEEPGEMM_FP8_SM90_ENABLED OFF)
     set(FASTLLM_CUTLASS_FP8_SM120_ENABLED OFF)
     set(FASTLLM_CUTLASS_FP8_SM121_ENABLED OFF)
     foreach(FASTLLM_CUDA_ARCH IN LISTS FASTLLM_CUDA_ARCHITECTURES)
@@ -308,6 +309,9 @@ if (USE_CUDA)
         # batched FP8 kernel from its multi-architecture wheel.
         string(REGEX MATCH "^[0-9]+" FASTLLM_CUDA_ARCH_NUMBER
             "${FASTLLM_CUDA_ARCH}")
+        if (FASTLLM_CUDA_ARCH_NUMBER STREQUAL "90")
+            set(FASTLLM_DEEPGEMM_FP8_SM90_ENABLED ON)
+        endif()
         if (FASTLLM_CUDA_ARCH_NUMBER STREQUAL "89")
             set(FASTLLM_CUTLASS_FP8_SM89_ENABLED ON)
         endif()
@@ -376,6 +380,16 @@ if (USE_CUDA)
         src/devices/cuda/models/dots3-note-kernels.cu
         src/devices/cuda/models/deepseekv4-kernels.cu
         src/devices/cuda/models/qwen4-kernels.cu)
+
+    if (FASTLLM_DEEPGEMM_FP8_SM90_ENABLED AND NOT CUDA_NO_TENSOR_CORE AND
+        CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL 12.8 AND
+        EXISTS "${FASTLLM_CUTLASS_DIR}/include/cutlass/cutlass.h")
+        set(FASTLLM_CUDA_SM90_SOURCES src/devices/cuda/linear/fastllm-linear-fp8-sm90.cu)
+        set_property(SOURCE src/devices/cuda/cudadevice.cpp
+            src/devices/cuda/linear/fastllm-linear-fp8-marlin.cu
+            APPEND PROPERTY COMPILE_DEFINITIONS FASTLLM_ENABLE_DEEPGEMM_FP8_SM90)
+        message(STATUS "Hopper SM90 DeepGEMM FP8 linear: ON")
+    endif()
 
     # FlashInfer's DeepSeek-V4 sparse MLA decode kernel uses SM120-only
     # block-scaled FP8 MMA instructions.  Compile it as a separate fatbin so a
@@ -558,6 +572,16 @@ if (USE_TOPS) # For suiyuan
     #target_link_libraries(main rtcu)
 endif()
 
+if (FASTLLM_CUDA_SM90_SOURCES)
+    add_library(fastllm_cuda_sm90 OBJECT ${FASTLLM_CUDA_SM90_SOURCES})
+    set_target_properties(fastllm_cuda_sm90 PROPERTIES
+        CUDA_ARCHITECTURES "90a" POSITION_INDEPENDENT_CODE ON)
+    target_include_directories(fastllm_cuda_sm90 BEFORE PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/third_party/deep_gemm/include"
+        "${FASTLLM_CUTLASS_DIR}/include")
+    set(FASTLLM_CUDA_SM90_OBJECTS $<TARGET_OBJECTS:fastllm_cuda_sm90>)
+endif()
+
 if (FASTLLM_CUDA_SM120_SOURCES)
     # CUDA_ARCHITECTURES is a target property.  Setting it on source files is
     # ignored by CMake, which made these SM120-only kernels inherit every
@@ -583,7 +607,7 @@ if (PY_API)
 
     include_directories(third_party/pybind11/include)
     file(GLOB FASTLLM_CXX_HEADERS include/**/*.h)
-    add_library(pyfastllm MODULE src/pybinding.cpp ${FASTLLM_CXX_SOURCES} ${FASTLLM_CXX_HEADERS} ${FASTLLM_CUDA_SOURCES} ${FASTLLM_CUDA_SM120_OBJECTS} ${FASTLLM_TFACC_SOURCES} ${FASTLLM_TOPS_SOURCES})
+    add_library(pyfastllm MODULE src/pybinding.cpp ${FASTLLM_CXX_SOURCES} ${FASTLLM_CXX_HEADERS} ${FASTLLM_CUDA_SOURCES} ${FASTLLM_CUDA_SM120_OBJECTS} ${FASTLLM_CUDA_SM90_OBJECTS} ${FASTLLM_TFACC_SOURCES} ${FASTLLM_TOPS_SOURCES})
     target_link_libraries(pyfastllm PUBLIC pybind11::module ${FASTLLM_LINKED_LIBS})
     pybind11_extension(pyfastllm)
 else()
@@ -594,6 +618,9 @@ add_library(fastllm OBJECT
             ${FASTLLM_TOPS_SOURCES}
             )
 target_link_libraries(fastllm PUBLIC ${FASTLLM_LINKED_LIBS})
+if (FASTLLM_CUDA_SM90_SOURCES)
+    target_link_libraries(fastllm INTERFACE $<TARGET_OBJECTS:fastllm_cuda_sm90>)
+endif()
 if (FASTLLM_CUDA_SM120_SOURCES)
     # Nested object-library sources are not propagated when an executable
     # links an OBJECT target.  Publish the SM120 objects explicitly so every
@@ -705,7 +732,7 @@ if (BUILD_CLI)
     target_link_libraries(FastllmStudio_cli fastllm)
 endif()
 
-add_library(fastllm_tools SHARED ${FASTLLM_CXX_SOURCES} ${FASTLLM_CUDA_SOURCES} ${FASTLLM_CUDA_SM120_OBJECTS} ${FASTLLM_TFACC_SOURCES} ${FASTLLM_TOPS_SOURCES} tools/src/pytools.cpp)
+add_library(fastllm_tools SHARED ${FASTLLM_CXX_SOURCES} ${FASTLLM_CUDA_SOURCES} ${FASTLLM_CUDA_SM120_OBJECTS} ${FASTLLM_CUDA_SM90_OBJECTS} ${FASTLLM_TFACC_SOURCES} ${FASTLLM_TOPS_SOURCES} tools/src/pytools.cpp)
 target_link_libraries(fastllm_tools PUBLIC ${FASTLLM_LINKED_LIBS})
 
 set(BUILD_INFO_USE_CUDA "false")
