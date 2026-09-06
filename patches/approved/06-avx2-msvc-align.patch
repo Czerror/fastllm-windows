@@ -1,0 +1,13 @@
+diff --git a/src/devices/cpu/avx2.cpp b/src/devices/cpu/avx2.cpp
+index 00afba66..3a3a0feb 100644
+--- a/src/devices/cpu/avx2.cpp
++++ b/src/devices/cpu/avx2.cpp
+@@ -632,7 +632,7 @@ namespace fastllm {
+ 
+ #ifdef __AVX2__
+     void print_m256i_epi16_v2(const char* name, __m256i vec) {
+-        int16_t values[16] __attribute__((aligned(32)));
++        alignas(32) int16_t values[16];
+         _mm256_store_si256((__m256i*)values, vec);
+         
+         printf("%s: ", name);

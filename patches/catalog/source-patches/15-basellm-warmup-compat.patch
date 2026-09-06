@@ -1,0 +1,21 @@
+diff --git a/include/models/basellm.h b/include/models/basellm.h
+index 66de5efe..8eab67b4 100644
+--- a/include/models/basellm.h
++++ b/include/models/basellm.h
+@@ -175,7 +175,7 @@ namespace fastllm {
+     enum class LogEvent {
+         KVCacheConfig, KVCacheHit, KVCacheMiss,
+         PrefillProgress, PrefillComplete, BatchStatus,
+-        ModelLoadProgress, ModelLoadComplete, General
++        ModelLoadProgress, ModelLoadComplete, WarmUp, General
+     };
+     struct LogData {
+         LogEvent event = LogEvent::General;
+@@ -196,6 +196,7 @@ namespace fastllm {
+             int cacheEntries = 0;
+             float skipPercent = 0;
+             float kvCacheMB = 0;
++            bool isComplete = false;
+             std::string device;
+         } data;
+     };

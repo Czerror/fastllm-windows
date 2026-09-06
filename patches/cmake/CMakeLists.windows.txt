@@ -1,0 +1,749 @@
+cmake_minimum_required(VERSION 3.5)
+
+project(fastllm LANGUAGES CXX)
+
+# ===== Windows 最小构建适配(仅构建系统,不修改上游源码) =====
+# 统一 C++20: 上游默认 C++17,但 gguf.cpp 使用 C++20 designated initializers
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+# MSVC __attribute__ 垫片(仅用于 avx2/avx512vnni 两个上游文件)
+set(FASTLLM_MSVC_ATTR_SHIM "${CMAKE_CURRENT_SOURCE_DIR}/include/utils/msvc_attr_shim.h")
+# MSVC 标准库传递包含垫片(全局强制包含,补齐 <chrono> 等)
+set(FASTLLM_MSVC_STD_SHIM "${CMAKE_CURRENT_SOURCE_DIR}/include/utils/msvc_std_shim.h")
+
+option(USE_NUMAS "use numas" ON)
+
+option(USE_CUDA "use CUDA" OFF)
+option(CUDA_NO_TENSOR_CORE "Optimize for legacy CUDA GPUs which has Tensor Core." OFF)
+option(CUDA_MEM_DEBUG "Enable CUDA memory pool debug logging" OFF)
+
+option(USE_ROCM "use ROCm" OFF)
+
+option(USE_TFACC "use tfacc" OFF)
+
+option(PY_API "python api" OFF)
+
+option(USE_MMAP "use mmap" OFF)
+
+option(USE_SENTENCEPIECE "use sentencepiece" OFF)
+
+option(USE_IVCOREX "use iluvatar corex gpu" OFF)
+
+option(BUILD_CLI "build cli" OFF)
+
+option(UNIT_TEST "build unit tests" OFF)
+
+# libnuma 为 Linux 专用,Windows 默认关闭
+if(WIN32)
+    set(USE_NUMAS OFF)
+endif()
+
+if(NOT DEFINED CUDA_ARCH)
+    if(DEFINED CMAKE_CUDA_ARCHITECTURES)
+        set(CUDA_ARCH "${CMAKE_CUDA_ARCHITECTURES}")
+    else()
+        set(CUDA_ARCH "native")
+    endif()
+endif()
+
+# ROCm device detection function
+function(detect_rocm_devices)
+    if(USE_ROCM)
+        # Try to find rocminfo
+        find_program(ROCMINFO rocminfo PATHS ${ROCM_PATH}/bin /opt/rocm/bin)
+        
+        if(ROCMINFO)
+            # Execute rocminfo to get device info
+            execute_process(
+                COMMAND ${ROCMINFO}
+                OUTPUT_VARIABLE ROCMINFO_OUTPUT
+                ERROR_QUIET
+                OUTPUT_STRIP_TRAILING_WHITESPACE
+            )
+            
+            # Parse the output to find device architectures
+            set(DETECTED_ARCHS "")
+            set(HAS_MI50 FALSE)
+            
+            # Extract gfx architectures from rocminfo output
+            string(REGEX MATCHALL "Name:[ \t]+gfx[0-9a-f]+" GFX_MATCHES "${ROCMINFO_OUTPUT}")
+            foreach(MATCH ${GFX_MATCHES})
+                string(REGEX REPLACE "Name:[ \t]+" "" ARCH ${MATCH})
+                list(APPEND DETECTED_ARCHS ${ARCH})
+                if(${ARCH} STREQUAL "gfx906")
+                    set(HAS_MI50 TRUE)
+                endif()
+            endforeach()
+            
+            # Also check for device names containing MI50
+            string(REGEX MATCH "Marketing Name:[ \t]+[^\n]*MI50" MI50_MATCH "${ROCMINFO_OUTPUT}")
+            if(MI50_MATCH)
+                set(HAS_MI50 TRUE)
+            endif()
+            
+            # Remove duplicates
+            if(DETECTED_ARCHS)
+                list(REMOVE_DUPLICATES DETECTED_ARCHS)
+            endif()
+            
+            # Set parent scope variables
+            set(ROCM_DETECTED_ARCHS "${DETECTED_ARCHS}" PARENT_SCOPE)
+            set(ROCM_HAS_MI50 ${HAS_MI50} PARENT_SCOPE)
+        else()
+            message(WARNING "rocminfo not found, cannot auto-detect ROCm devices")
+            set(ROCM_DETECTED_ARCHS "" PARENT_SCOPE)
+            set(ROCM_HAS_MI50 FALSE PARENT_SCOPE)
+        endif()
+    endif()
+endfunction()
+
+# Call device detection
+detect_rocm_devices()
+
+# Set ROCM_ARCH based on detection or use default
+if(USE_ROCM)
+    if(NOT DEFINED ROCM_ARCH)
+        if(ROCM_DETECTED_ARCHS)
+            # Use detected architectures
+            set(ROCM_ARCH "${ROCM_DETECTED_ARCHS}")
+            message(STATUS "Auto-detected ROCm architectures: ${ROCM_ARCH}")
+        else()
+            # Use default if detection failed
+            set(ROCM_ARCH "gfx908;gfx90a;gfx1100")
+            message(STATUS "ROCM_ARCH not set and auto-detection failed, using default: ${ROCM_ARCH}")
+        endif()
+    else()
+        message(STATUS "Using user-specified ROCM_ARCH: ${ROCM_ARCH}")
+        # Check if user specified gfx906
+        if("gfx906" IN_LIST ROCM_ARCH)
+            set(ROCM_HAS_MI50 TRUE)
+            message(STATUS "gfx906 (MI50) found in user-specified ROCM_ARCH")
+        endif()
+    endif()
+    
+    # Report MI50 detection status
+    if(ROCM_HAS_MI50)
+        message(STATUS "MI50 device detected (gfx906)")
+    endif()
+endif()
+
+message(STATUS "USE_NUMAS: ${USE_NUMAS}")
+
+message(STATUS "USE_CUDA: ${USE_CUDA}")
+
+message(STATUS "USE_ROCM: ${USE_ROCM}")
+
+message(STATUS "CUDA_ARCH: ${CUDA_ARCH}")
+
+message(STATUS "USE_TFACC: ${USE_TFACC}")
+
+message(STATUS "For legacy CUDA GPUs: ${CUDA_NO_TENSOR_CORE}")
+
+message(STATUS "CUDA_MEM_DEBUG: ${CUDA_MEM_DEBUG}")
+
+message(STATUS "PYTHON_API: ${PY_API}")
+
+message(STATUS "BUILD_CLI: ${BUILD_CLI}")
+
+message(STATUS "USE_SENTENCEPIECE: ${USE_SENTENCEPIECE}")
+
+message(STATUS "USE_IVCOREX: ${USE_IVCOREX}")
+
+message(STATUS "MAKE_WHL_X86: ${MAKE_WHL_X86}")
+
+set(CMAKE_BUILD_TYPE "Release")
+
+string(REGEX REPLACE "^([0-9]+)\\.[0-9]+\\.[0-9]+$" "\\1" CXX_MAJOR_VERSION "${CMAKE_CXX_COMPILER_VERSION}")
+
+if (CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -pthread --std=c++17 -O2")
+elseif(CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
+    string(REPLACE "/Ob2" "/Ob1 /Gy" CMAKE_CXX_FLAGS_RELEASE ${CMAKE_CXX_FLAGS_RELEASE})
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DNOMINMAX /std:c++20 /arch:AVX2 /source-charset:utf-8 /execution-charset:utf-8 /D_USE_MATH_DEFINES /Zc:char8_t- /wd4244 /wd4267 /wd4996 /FI${FASTLLM_MSVC_STD_SHIM}")
+    if (CXX_MAJOR_VERSION GREATER_EQUAL 19 AND (CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64" OR CMAKE_SYSTEM_PROCESSOR MATCHES "AMD64"))
+        set_source_files_properties(
+            "src/devices/cpu/avx512f.cpp"
+            PROPERTIES
+            COMPILE_FLAGS "${CMAKE_CXX_FLAGS} /arch:AVX512"
+        )
+        set_source_files_properties(
+            "src/devices/cpu/avx512bf16.cpp"
+            PROPERTIES
+            COMPILE_FLAGS "${CMAKE_CXX_FLAGS} /arch:AVX512"
+        )
+        set_source_files_properties(
+            "src/devices/cpu/avx512vnni.cpp"
+            PROPERTIES
+            COMPILE_FLAGS "${CMAKE_CXX_FLAGS} /arch:AVX512"
+        )
+        # avx2.cpp / avx512vnni.cpp 使用 GCC 风格 __attribute__,MSVC 下强制包含垫片头
+        set_source_files_properties(
+            "src/devices/cpu/avx2.cpp"
+            PROPERTIES
+            COMPILE_FLAGS "/FI${FASTLLM_MSVC_ATTR_SHIM}"
+        )
+        set_source_files_properties(
+            "src/devices/cpu/avx512vnni.cpp"
+            PROPERTIES
+            COMPILE_FLAGS "/FI${FASTLLM_MSVC_ATTR_SHIM}"
+        )
+    endif()
+else()
+    if (MAKE_WHL_X86)
+        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -pthread --std=c++17 -O2 -mavx -mavx2 -mf16c -mfma -static-libstdc++ -static-libgcc -fPIC -Wl,-Bsymbolic -Wl,--exclude-libs,ALL")
+    else()
+        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -pthread --std=c++17 -O2 -march=native")
+    endif()
+    message(STATUS "CMAKE_SYSTEM_PROCESSOR: ${CMAKE_SYSTEM_PROCESSOR}")
+    if (CXX_MAJOR_VERSION GREATER_EQUAL 10 AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64")
+        set_source_files_properties(
+            "src/devices/cpu/avx512f.cpp"
+            PROPERTIES
+            COMPILE_OPTIONS "-mavx512f;-mavx512bw;-mavx512vl"
+        )
+        
+        set_source_files_properties(
+            "src/devices/cpu/avx512bf16.cpp"
+            PROPERTIES
+            COMPILE_OPTIONS "-mavx512bf16;-mavx512f;-mavx512bw;-mavx512vl"
+        )
+        set_source_files_properties(
+            "src/devices/cpu/avx512vnni.cpp"
+            PROPERTIES
+            COMPILE_OPTIONS "-mavx512vnni;-mavx512f"
+        )
+        set(AMX_COMPILE_OPTIONS "-mavx512bf16;-mavx512f;-mavx512bw;-mavx512vl")
+        if (CXX_MAJOR_VERSION GREATER_EQUAL 11)
+            list(APPEND AMX_COMPILE_OPTIONS "-mamx-tile" "-mamx-bf16")
+            message(STATUS "AMX support enabled (g++ >= 11)")
+        endif()
+        set_source_files_properties(
+            "src/devices/cpu/amx.cpp"
+            PROPERTIES
+            COMPILE_OPTIONS "${AMX_COMPILE_OPTIONS}"
+        )
+    endif()
+endif()
+
+
+message(STATUS "CMAKE_CXX_FLAGS: ${CMAKE_CXX_FLAGS}")
+file(GLOB GRAPH_MODEL_FILES "src/models/graph/*.cpp")
+file(GLOB BLOCK_FILES "src/blocks/*.cpp")
+file(GLOB CPU_DEVICE_FILES "src/devices/cpu/*.cpp")
+set(FASTLLM_CXX_SOURCES src/fastllm.cpp src/device.cpp src/model.cpp src/executor.cpp src/template.cpp src/graph.cpp src/tokenizer.cpp
+        src/models/graphllm.cpp src/models/chatglm.cpp src/models/moss.cpp src/models/llama.cpp src/models/qwen.cpp src/models/basellm.cpp
+        src/models/glm.cpp src/models/minicpm.cpp src/models/minicpm3.cpp src/models/internlm2.cpp src/models/bert.cpp src/models/moe.cpp src/models/deepseekv2.cpp src/models/deepseekv4.cpp
+        src/models/phi3.cpp src/models/xlmroberta.cpp src/models/cogvlm.cpp src/models/qwen3.cpp src/models/qwen3_moe.cpp src/models/hy_v3.cpp src/models/qwen3_next.cpp src/models/kimi_k3.cpp
+        src/models/minimax.cpp src/models/hunyuan.cpp
+        src/models/ernie4_5.cpp src/models/pangu_moe.cpp src/models/glm4_moe.cpp src/models/glm5_moe_dsa.cpp src/models/gpt_oss.cpp
+        src/models/minimax_m2.cpp src/models/qwen2.cpp src/models/qwen3_5.cpp src/models/gemma4.cpp src/models/step3p5.cpp src/models/laguna.cpp
+        third_party/json11/json11.cpp
+        third_party/gguf/gguf.cpp third_party/gguf/ggml-quant.cpp third_party/gguf/ggml-iqk.cpp third_party/gguf/ggml-dequantize.cpp
+        third_party/gguf/gguf-adapter.cpp
+        ${CPU_DEVICE_FILES}
+        ${BLOCK_FILES}
+        ${GRAPH_MODEL_FILES})
+
+# diskdevice.cpp 通过新增的 sys/mman.h / unistd.h 兼容垫片在 Windows 编译,功能完整保留
+list(APPEND FASTLLM_CXX_SOURCES src/devices/disk/diskdevice.cpp)
+
+include_directories(include)
+include_directories(include/utils)
+include_directories(include/models)
+include_directories(include/blocks)
+include_directories(include/devices/cpu)
+include_directories(include/devices/disk)
+include_directories(third_party/json11)
+include_directories(third_party/gguf)
+include_directories(third_party/flashinfer)
+
+if (USE_MMAP)
+    if(WIN32)
+        message(STATUS "USE_MMAP disabled on Windows (no sys/mman.h)")
+        set(USE_MMAP OFF)
+    else()
+        add_compile_definitions(USE_MMAP)
+    endif()
+endif()
+
+if (USE_SENTENCEPIECE)
+    add_compile_definitions(USE_SENTENCEPIECE)
+    # 优先使用 vcpkg/系统安装的 sentencepiece,否则从子模块源码构建
+    find_package(sentencepiece CONFIG QUIET)
+    if(sentencepiece_FOUND)
+        message(STATUS "Found sentencepiece via vcpkg/find_package")
+        set(FASTLLM_LINKED_LIBS ${FASTLLM_LINKED_LIBS} sentencepiece::sentencepiece)
+    else()
+        set(SENTENCEPIECE_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/sentencepiece")
+        if(EXISTS "${SENTENCEPIECE_SOURCE_DIR}/CMakeLists.txt")
+            message(STATUS "Building sentencepiece from source (submodule)")
+            # sentencepiece 内部使用 /utf-8,与全局 /source-charset /execution-charset 冲突,临时剥离
+            set(SAVED_CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}")
+            string(REPLACE "/source-charset:utf-8" "" CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}")
+            string(REPLACE "/execution-charset:utf-8" "" CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}")
+            set(SPM_ENABLE_SHARED OFF CACHE BOOL "" FORCE)
+            set(SPM_ENABLE_TCMALLOC OFF CACHE BOOL "" FORCE)
+            set(SPM_ENABLE_NFKC_COMPILE OFF CACHE BOOL "" FORCE)
+            add_subdirectory(${SENTENCEPIECE_SOURCE_DIR} ${CMAKE_BINARY_DIR}/sentencepiece EXCLUDE_FROM_ALL)
+            set(CMAKE_CXX_FLAGS "${SAVED_CMAKE_CXX_FLAGS}")
+            include_directories(${SENTENCEPIECE_SOURCE_DIR}/src)
+            include_directories(${CMAKE_BINARY_DIR}/sentencepiece)
+            set(FASTLLM_LINKED_LIBS ${FASTLLM_LINKED_LIBS} sentencepiece-static)
+        else()
+            message(WARNING "sentencepiece submodule not found; install via vcpkg or run apply-patches.sh")
+        endif()
+    endif()
+endif()
+
+if (USE_CUDA)
+    enable_language(CUDA)
+    if (MSVC)
+        # nvcc 宿主编译使用 cl:必须指定 UTF-8 源码字符集(否则中文注释按 GBK 误读),
+        # 注意: 不能使用 /Zc:preprocessor 或 /FI 强制包含 STL(nvcc+MSVC 19.4x 会导致 UCRT 头双重定义);
+        # chrono 缺失问题由 approved/04-alivethreadpool-chrono.patch 在源码层解决。
+        set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -Xcompiler=/source-charset:utf-8,/execution-charset:utf-8 -DCCCL_IGNORE_MSVC_TRADITIONAL_PREPROCESSOR_WARNING")
+    endif()
+    if (CMAKE_BUILD_TYPE STREQUAL "Release" AND CMAKE_CUDA_FLAGS_RELEASE STREQUAL "")
+        set(CMAKE_CUDA_FLAGS_RELEASE "-O3 -DNDEBUG" CACHE STRING "CUDA release flags" FORCE)
+    endif()
+    if ("cuda_std_20" IN_LIST CMAKE_CUDA_COMPILE_FEATURES)
+        set(CMAKE_CUDA_STANDARD 20)
+    else()
+        set(CMAKE_CUDA_STANDARD 17)
+        message(STATUS "CUDA20 is unavailable for this CMake/NVCC combination, falling back to CUDA17")
+    endif()
+    set(CMAKE_CUDA_STANDARD_REQUIRED ON)
+    add_compile_options($<$<COMPILE_LANGUAGE:CUDA>:--default-stream=per-thread>)
+    # TurboMind s884 内核（third_party/turbomind）依赖这些 nvcc 特性。
+    add_compile_options($<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>)
+    add_compile_options($<$<COMPILE_LANGUAGE:CUDA>:--expt-extended-lambda>)
+    set(FASTLLM_CUDA_ARCHITECTURES ${CUDA_ARCH})
+    if (CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL 12.9)
+        set(FASTLLM_CUDA_ARCHITECTURES_NORMALIZED "")
+        foreach(FASTLLM_CUDA_ARCH IN LISTS FASTLLM_CUDA_ARCHITECTURES)
+            if (FASTLLM_CUDA_ARCH STREQUAL "120")
+                list(APPEND FASTLLM_CUDA_ARCHITECTURES_NORMALIZED "120f")
+            elseif (FASTLLM_CUDA_ARCH STREQUAL "121")
+                list(APPEND FASTLLM_CUDA_ARCHITECTURES_NORMALIZED "121f")
+            else()
+                list(APPEND FASTLLM_CUDA_ARCHITECTURES_NORMALIZED "${FASTLLM_CUDA_ARCH}")
+            endif()
+        endforeach()
+        set(FASTLLM_CUDA_ARCHITECTURES ${FASTLLM_CUDA_ARCHITECTURES_NORMALIZED})
+    endif()
+    message(STATUS "Effective CUDA architectures: ${FASTLLM_CUDA_ARCHITECTURES}")
+    add_compile_definitions(USE_CUDA)
+    if(WIN32)
+        # Windows 无 NCCL: 配合上游 multicuda 源码中的最小 FASTLLM_NO_NCCL 守卫(已批准的源码修改)
+        add_compile_definitions(FASTLLM_NO_NCCL)
+    endif()
+    if (CUDA_NO_TENSOR_CORE)
+        add_compile_definitions(CUDA_NO_TENSOR_CORE)
+    endif()
+    if (CUDA_MEM_DEBUG)
+        add_compile_definitions(CUDA_MEM_DEBUG)
+    endif()
+    include_directories(include/devices/cuda)
+    include_directories(${CMAKE_CURRENT_SOURCE_DIR}/src/devices/cuda/linear/marlin_dense_fp8)
+    set(FASTLLM_CUTLASS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/cutlass")
+    set(FASTLLM_CUTLASS_FP8_ARCH_ENABLED OFF)
+    set(FASTLLM_CUTLASS_FP8_SM89_ENABLED OFF)
+    set(FASTLLM_CUTLASS_FP8_SM120_ENABLED OFF)
+    set(FASTLLM_CUTLASS_FP8_SM121_ENABLED OFF)
+    foreach(FASTLLM_CUDA_ARCH IN LISTS FASTLLM_CUDA_ARCHITECTURES)
+        if (FASTLLM_CUDA_ARCH STREQUAL "89")
+            set(FASTLLM_CUTLASS_FP8_SM89_ENABLED ON)
+        endif()
+        if (FASTLLM_CUDA_ARCH STREQUAL "120f")
+            set(FASTLLM_CUTLASS_FP8_SM120_ENABLED ON)
+        elseif (FASTLLM_CUDA_ARCH STREQUAL "121f")
+            set(FASTLLM_CUTLASS_FP8_SM121_ENABLED ON)
+        endif()
+    endforeach()
+    if (FASTLLM_CUTLASS_FP8_SM89_ENABLED AND
+        CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL 12.4)
+        set(FASTLLM_CUTLASS_FP8_ARCH_ENABLED ON)
+    endif()
+    if ((FASTLLM_CUTLASS_FP8_SM120_ENABLED OR FASTLLM_CUTLASS_FP8_SM121_ENABLED) AND
+        CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL 12.9)
+        set(FASTLLM_CUTLASS_FP8_ARCH_ENABLED ON)
+    endif()
+    if (NOT FASTLLM_CUTLASS_DIR STREQUAL "" AND EXISTS "${FASTLLM_CUTLASS_DIR}/include/cutlass/cutlass.h" AND
+        FASTLLM_CUTLASS_FP8_ARCH_ENABLED)
+        message(STATUS "CUTLASS FP8 kernels: ON (${FASTLLM_CUTLASS_DIR})")
+        include_directories("${FASTLLM_CUTLASS_DIR}/include")
+        if (EXISTS "${FASTLLM_CUTLASS_DIR}/tools/util/include")
+            include_directories("${FASTLLM_CUTLASS_DIR}/tools/util/include")
+        endif()
+        add_compile_definitions(FASTLLM_ENABLE_CUTLASS_FP8)
+        if (FASTLLM_CUTLASS_FP8_SM89_ENABLED AND
+            CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL 12.4)
+            add_compile_definitions(FASTLLM_CUTLASS_FP8_ENABLE_SM89)
+        endif()
+        if (FASTLLM_CUTLASS_FP8_SM120_ENABLED AND
+            CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL 12.9)
+            add_compile_definitions(FASTLLM_CUTLASS_FP8_ENABLE_SM120)
+        endif()
+        if (FASTLLM_CUTLASS_FP8_SM121_ENABLED AND
+            CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL 12.9)
+            add_compile_definitions(FASTLLM_CUTLASS_FP8_ENABLE_SM121)
+        endif()
+    else()
+        message(STATUS "CUTLASS FP8 kernels: OFF (${FASTLLM_CUTLASS_DIR})")
+    endif()
+    #message(${CMAKE_CUDA_IMPLICIT_LINK_DIRECTORIES})
+    set(FASTLLM_CUDA_SOURCES src/devices/cuda/cudadevice.cpp src/devices/cuda/cudadevicebatch.cpp 
+        src/devices/cuda/fastllm-cuda.cu 
+        src/devices/cuda/fastllm-triton-cuda.cu
+        src/devices/cuda/fastllm-ggml-cuda.cu
+        src/devices/cuda/attention/fastllm-attention.cu
+        src/devices/cuda/attention/paged/fastllm-paged-attention-native.cu
+        src/devices/cuda/linear/fastllm-linear-fp32.cu
+        src/devices/cuda/linear/fastllm-linear-fp16.cu
+        src/devices/cuda/linear/fastllm-linear-bf16.cu
+        src/devices/cuda/linear/fastllm-linear-fp8.cu
+        src/devices/cuda/linear/fastllm-linear-fp8-marlin.cu
+        src/devices/cuda/linear/fastllm-linear-nvfp4-marlin.cu
+        src/devices/cuda/linear/fastllm-marlin-fp8-dense.cu
+        src/devices/cuda/linear/fastllm-linear-fp8-cutlass.cu
+        src/devices/cuda/linear/fastllm-linear-fp8-cutlass-sm89.cu
+        src/devices/cuda/moe/fastllm-moe-fp8.cu
+        src/devices/cuda/moe/fastllm-moe-vllm-marlin.cu
+        src/devices/cuda/linear/fastllm-linear-int8.cu
+        src/devices/cuda/linear/fastllm-linear-int4.cu
+        src/devices/cuda/linear/fastllm-linear-int4group.cu
+        src/devices/cuda/linear/fastllm-marlin.cu
+        src/devices/cuda/linear/fastllm-linear-int4nozero.cu
+        src/devices/cuda/models/deepseekv4-kernels.cu)
+
+    # FlashInfer's DeepSeek-V4 sparse MLA decode kernel uses SM120-only
+    # block-scaled FP8 MMA instructions.  Compile it as a separate fatbin so a
+    # multi-architecture FastLLM build keeps the generic sparse-attention path
+    # for older GPUs instead of embedding unsupported PTX in their code.
+    # DeepGemm 仅支持 Linux(__int128_t 等), Windows 下始终禁用 SM120 特化内核,
+    # 运行时回退到通用 sparse-attention/朴素 MoE 路径。
+    if (FASTLLM_CUTLASS_FP8_SM120_ENABLED AND
+        NOT WIN32 AND
+        CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL 12.9)
+        include_directories(
+            "${CMAKE_CURRENT_SOURCE_DIR}/third_party/deep_gemm/include")
+        set(FASTLLM_DSV4_SPARSE_MLA_SM120_SOURCE
+            src/devices/cuda/models/fastllm-deepseekv4-sparse-mla-sm120.cu)
+        set(FASTLLM_DSV4_MOE_DEEPGEMM_SM120_SOURCE
+            src/devices/cuda/moe/fastllm-moe-deepgemm-sm120.cu)
+        set(FASTLLM_DSV4_WOA_DEEPGEMM_SM120_SOURCE
+            src/devices/cuda/models/fastllm-deepseekv4-woa-deepgemm-sm120.cu)
+        list(APPEND FASTLLM_CUDA_SOURCES
+            ${FASTLLM_DSV4_SPARSE_MLA_SM120_SOURCE}
+            ${FASTLLM_DSV4_MOE_DEEPGEMM_SM120_SOURCE}
+            ${FASTLLM_DSV4_WOA_DEEPGEMM_SM120_SOURCE})
+        set_source_files_properties(
+            ${FASTLLM_DSV4_SPARSE_MLA_SM120_SOURCE}
+            ${FASTLLM_DSV4_MOE_DEEPGEMM_SM120_SOURCE}
+            ${FASTLLM_DSV4_WOA_DEEPGEMM_SM120_SOURCE}
+            PROPERTIES CUDA_ARCHITECTURES "120f")
+        add_compile_definitions(FASTLLM_ENABLE_DSV4_SPARSE_MLA_SM120)
+        add_compile_definitions(FASTLLM_ENABLE_DSV4_MOE_DEEPGEMM_SM120)
+        add_compile_definitions(FASTLLM_ENABLE_DSV4_WOA_DEEPGEMM_SM120)
+        message(STATUS "DeepSeek-V4 SM120 sparse MLA kernel: ON")
+        message(STATUS "DeepSeek-V4 SM120 DeepGEMM MoE kernel: ON")
+        message(STATUS "DeepSeek-V4 SM120 DeepGEMM WoA kernel: ON")
+    else()
+        message(STATUS "DeepSeek-V4 SM120 sparse MLA kernel: OFF")
+        message(STATUS "DeepSeek-V4 SM120 DeepGEMM MoE kernel: OFF")
+        message(STATUS "DeepSeek-V4 SM120 DeepGEMM WoA kernel: OFF")
+    endif()
+
+    # Marlin 内核需要 sm_75+，但通过 __CUDA_ARCH__ 宏保护可在低算力（如 sm_70）下编译为占位实现，
+    # 运行期再根据设备算力回退到朴素 int4 linear，因此这里始终编译 marlin.cu 以兼容多 CUDA_ARCH 打包。
+
+    # SM70 (V100) AWQ W4A16: 移植的 TurboMind s884 内核子集 + fastllm 对接层。
+    # 仅在编译目标包含 sm_70 时编译；其它算力下这些 .cu 编译为占位实现（运行期不调度）。
+    include_directories(${CMAKE_CURRENT_SOURCE_DIR}/third_party/turbomind)
+    set(TURBOMIND_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/third_party/turbomind/src/turbomind)
+    set(FASTLLM_CUDA_SOURCES ${FASTLLM_CUDA_SOURCES}
+        src/devices/cuda/awq_sm70/fastllm-awq-sm70.cu
+        src/devices/cuda/awq_sm70/tm_registry_sm70.cu
+        ${TURBOMIND_ROOT}/core/check.cc
+        ${TURBOMIND_ROOT}/core/layout.cc
+        ${TURBOMIND_ROOT}/core/context.cc
+        ${TURBOMIND_ROOT}/core/allocator.cc
+        ${TURBOMIND_ROOT}/core/buffer.cc
+        ${TURBOMIND_ROOT}/core/stream.cc
+        ${TURBOMIND_ROOT}/utils/logger.cc
+        ${TURBOMIND_ROOT}/utils/parser.cc
+        ${TURBOMIND_ROOT}/kernels/gemm/gemm.cu
+        ${TURBOMIND_ROOT}/kernels/gemm/kernel.cu
+        ${TURBOMIND_ROOT}/kernels/gemm/dispatch_cache.cu
+        ${TURBOMIND_ROOT}/kernels/gemm/context.cu
+        ${TURBOMIND_ROOT}/kernels/gemm/convert_v3.cu
+        ${TURBOMIND_ROOT}/kernels/gemm/cast.cu
+        ${TURBOMIND_ROOT}/kernels/gemm/unpack.cu
+        ${TURBOMIND_ROOT}/kernels/gemm/tuner/cache_utils.cu
+        ${TURBOMIND_ROOT}/kernels/gemm/tuner/measurer.cu
+        ${TURBOMIND_ROOT}/kernels/gemm/tuner/sampler.cu
+        ${TURBOMIND_ROOT}/kernels/gemm/tuner/stopping_criterion.cc
+        ${TURBOMIND_ROOT}/kernels/gemm/tuner/params.cc
+        ${TURBOMIND_ROOT}/kernels/gemm/kernel/sm70_884_4.cu
+        ${TURBOMIND_ROOT}/kernels/gemm/kernel/sm70_884_8.cu
+        ${TURBOMIND_ROOT}/kernels/gemm/kernel/sm70_884_16.cu)
+
+    # TurboMind 的 .cc 为主机代码但依赖 CUDA 头文件，强制用 nvcc 编译以获得 CUDA include/链接。
+    set_source_files_properties(
+        ${TURBOMIND_ROOT}/core/check.cc
+        ${TURBOMIND_ROOT}/core/layout.cc
+        ${TURBOMIND_ROOT}/core/context.cc
+        ${TURBOMIND_ROOT}/core/allocator.cc
+        ${TURBOMIND_ROOT}/core/buffer.cc
+        ${TURBOMIND_ROOT}/core/stream.cc
+        ${TURBOMIND_ROOT}/utils/logger.cc
+        ${TURBOMIND_ROOT}/utils/parser.cc
+        ${TURBOMIND_ROOT}/kernels/gemm/tuner/stopping_criterion.cc
+        ${TURBOMIND_ROOT}/kernels/gemm/tuner/params.cc
+        PROPERTIES LANGUAGE CUDA)
+
+    include_directories(include/devices/multicuda)
+    set(FASTLLM_CUDA_SOURCES ${FASTLLM_CUDA_SOURCES}
+        src/devices/multicuda/multicudadevice.cpp
+        src/devices/multicuda/fastllm-multicuda.cu
+        src/devices/multicuda/fastllm-custom-allreduce.cu)
+
+    add_compile_definitions(FASTLLM_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+    if(WIN32)
+    set(FASTLLM_LINKED_LIBS ${FASTLLM_LINKED_LIBS} cublas cuda)
+else()
+    set(FASTLLM_LINKED_LIBS ${FASTLLM_LINKED_LIBS} cublas nccl cuda)
+endif()
+    set(CMAKE_CUDA_ARCHITECTURES ${FASTLLM_CUDA_ARCHITECTURES})
+endif()
+
+if(USE_ROCM)
+    list(APPEND CMAKE_MODULE_PATH "${PROJECT_SOURCE_DIR}/third_party/hipify_torch/cmake")
+    include(Hipify)
+    enable_language(HIP)
+
+    # remove target hip dirs first
+    EXECUTE_PROCESS(COMMAND rm -rf ${PROJECT_SOURCE_DIR}/src/devices/hip)
+    EXECUTE_PROCESS(COMMAND rm -rf ${PROJECT_SOURCE_DIR}/src/devices/multihip)
+    hipify(CUDA_SOURCE_DIR ${PROJECT_SOURCE_DIR}/src/devices/cuda HIP_SOURCE_DIR "${PROJECT_SOURCE_DIR}/src/devices/hip")
+    hipify(CUDA_SOURCE_DIR ${PROJECT_SOURCE_DIR}/src/devices/multicuda HIP_SOURCE_DIR "${PROJECT_SOURCE_DIR}/src/devices/multihip")
+    include_directories(include/devices/cuda)
+    include_directories(include/devices/multicuda)
+    set(FASTLLM_CUDA_SOURCES src/devices/cuda/cudadevice.cpp src/devices/cuda/cudadevicebatch.cpp 
+        src/devices/hip/fastllm-hip.hip src/devices/hip/fastllm-ggml-hip.hip 
+        src/devices/multicuda/multicudadevice.cpp src/devices/multihip/fastllm-multihip.hip)
+    add_compile_definitions(USE_ROCM)
+    add_compile_definitions(USE_CUDA)
+    if (DEFINED $ENV{ROCM_PATH})
+        set(ROCM_PATH $ENV{ROCM_PATH})
+    else()
+        set(ROCM_PATH /opt/rocm)
+    endif()
+    set(CMAKE_HIP_COMPILER_ROCM_ROOT ${ROCM_PATH})
+    set(CMAKE_CXX_COMPILER "${CMAKE_HIP_COMPILER_ROCM_ROOT}/bin/amdclang++")
+    message(STATUS "CMAKE_HIP_COMPILER_ROCM_ROOT: ${CMAKE_HIP_COMPILER_ROCM_ROOT}")
+    message(STATUS "CMAKE_HIP_COMPILER: ${CMAKE_HIP_COMPILER}")
+    message(STATUS "CMAKE_CXX_COMPILER: ${CMAKE_CXX_COMPILER}")
+    
+    set(CMAKE_PREFIX_PATH ${ROCM_PATH})
+    find_package(hip REQUIRED) 
+    find_package(hipblas REQUIRED)
+    find_package(rocprim REQUIRED)
+    list(APPEND FASTLLM_LINKED_LIBS hip::device roc::hipblas roc::rocprim)
+    set(CMAKE_HIP_ARCHITECTURES ${ROCM_ARCH})
+    add_compile_definitions(HIPBLAS_V2)
+
+    # Check if gfx906(MI50) is in the architecture list
+    set(HAS_MI50_IN_TARGETS FALSE)
+    foreach(ARCH IN LISTS CMAKE_HIP_ARCHITECTURES)
+        if(${ARCH} STREQUAL "gfx906")
+            set(HAS_MI50_IN_TARGETS TRUE)
+            break()
+        endif()
+    endforeach()
+    
+    # Enable MI50 workaround if MI50 is detected or in target architectures
+    if(ROCM_HAS_MI50 OR HAS_MI50_IN_TARGETS)
+        add_compile_definitions(USE_MI50_WORKAROUND)
+        add_compile_definitions(HIP_NO_TENSOR_CORE)
+        message(STATUS "MI50 support enabled (USE_MI50_WORKAROUND defined)")
+    endif()
+endif()
+
+if (USE_IVCOREX)
+    set(FASTLLM_LINKED_LIBS ${FASTLLM_LINKED_LIBS} cudart)
+    set(CMAKE_CUDA_ARCHITECTURES ${IVCOREX_ARCH})
+endif()
+
+if (USE_TFACC)
+    #execute_process(
+    #    COMMAND "./insmodTFDriver.sh"
+    #    WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/third_party/thinkforce"
+    #)
+
+    add_compile_definitions(USE_TFACC)
+    set(FASTLLM_TFACC_SOURCES src/devices/tfacc/tfaccdevice.cpp src/devices/tfacc/fastllm-tfacc.cpp)
+    include_directories(include/devices/tfacc)
+endif()
+
+if (USE_NUMAS)
+    add_compile_definitions(USE_NUMAS)
+    set(FASTLLM_CXX_SOURCES ${FASTLLM_CXX_SOURCES} src/devices/numas/numasdevice.cpp src/devices/numas/numas.cpp)
+    include_directories(include/devices/numas)
+    set(FASTLLM_LINKED_LIBS ${FASTLLM_LINKED_LIBS} numa)
+endif()
+
+if (USE_TOPS) # For suiyuan
+    add_compile_definitions(USE_TOPS)
+    set(FASTLLM_TOPS_SOURCES src/devices/tops/topsdevice.cpp)
+    include_directories(include/devices/tops)
+
+    include_directories(/usr/include/gcu/)
+    include_directories(/opt/tops/include)
+    include_directories(/usr/include/gcu/topsdnn)
+    include_directories(/usr/src/topsaten_samples/common)
+
+    link_directories(/usr/lib)
+    link_directories(/opt/tops/lib)
+    set(FASTLLM_LINKED_LIBS ${FASTLLM_LINKED_LIBS} topsaten /opt/tops/lib/libtopsrt.so)
+    #target_link_libraries(main rtcu)
+endif()
+
+if (PY_API)
+    if(POLICY CMP0148)
+        cmake_policy(SET CMP0148 NEW)
+    endif()
+    set(PYBIND third_party/pybind11)
+    add_subdirectory(${PYBIND})
+    
+    if(NOT WIN32)
+        set(Python3_ROOT_DIR "/usr/local/python3.10.6/bin/")
+    endif()
+    find_package(Python3 REQUIRED COMPONENTS Interpreter Development)
+
+    include_directories(third_party/pybind11/include)
+    file(GLOB FASTLLM_CXX_HEADERS include/**/*.h)
+    add_library(pyfastllm MODULE src/pybinding.cpp ${FASTLLM_CXX_SOURCES} ${FASTLLM_CXX_HEADERS} ${FASTLLM_CUDA_SOURCES} ${FASTLLM_TFACC_SOURCES} ${FASTLLM_TOPS_SOURCES})
+    # PY_API 仅对 pyfastllm 目标生效,避免污染其他目标的 Python.h 包含
+    target_compile_definitions(pyfastllm PRIVATE PY_API)
+    target_link_libraries(pyfastllm PUBLIC pybind11::module ${FASTLLM_LINKED_LIBS})
+    pybind11_extension(pyfastllm)
+endif()
+
+add_library(fastllm OBJECT
+            ${FASTLLM_CXX_SOURCES}
+            ${FASTLLM_CUDA_SOURCES}
+            ${FASTLLM_TFACC_SOURCES}
+            ${FASTLLM_TOPS_SOURCES}
+            )
+target_link_libraries(fastllm PUBLIC ${FASTLLM_LINKED_LIBS})
+
+add_executable(main main.cpp)
+target_link_libraries(main fastllm)
+
+add_executable(quant tools/src/quant.cpp)
+target_link_libraries(quant fastllm)
+
+if (UNIT_TEST)
+    add_executable(optest test/ops/cppOps.cpp)
+    target_link_libraries(optest fastllm)
+    set_target_properties(optest PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${PROJECT_SOURCE_DIR}
+    )
+
+    add_executable(testTokenizer test/ops/tokenizerTest.cpp)
+    target_link_libraries(testTokenizer fastllm)
+
+    add_executable(regressionOps test/ops/regressionOps.cpp)
+    target_link_libraries(regressionOps fastllm)
+    if (USE_CUDA AND NOT USE_ROCM)
+        target_include_directories(regressionOps PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
+    endif()
+
+    if (USE_CUDA AND NOT USE_ROCM)
+        add_executable(cudaGraphPoolMissRegression test/ops/cudaGraphPoolMissRegression.cpp)
+        target_link_libraries(cudaGraphPoolMissRegression fastllm)
+        target_include_directories(cudaGraphPoolMissRegression PRIVATE ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
+    endif()
+endif()
+
+add_executable(webui example/webui/webui.cpp)
+target_link_libraries(webui fastllm)
+add_custom_command(
+        TARGET webui
+        POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E make_directory web
+        COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_CURRENT_SOURCE_DIR}/example/webui/web ${CMAKE_BINARY_DIR}/web
+)
+
+add_executable(benchmark example/benchmark/benchmark.cpp)
+target_link_libraries(benchmark fastllm)
+
+add_executable(apiserver example/apiserver/apiserver.cpp)
+target_link_libraries(apiserver fastllm)
+
+# ftllm 统一命令行客户端(新增文件,仅调用 Win32 API + console/help 新增头文件)
+add_executable(ftllm ftllm.cpp)
+set_target_properties(ftllm PROPERTIES OUTPUT_NAME "ftllm" CXX_STANDARD 20 CXX_STANDARD_REQUIRED ON)
+
+if (BUILD_CLI)
+    add_executable(FastllmStudio_cli example/FastllmStudio/cli/cli.cpp example/FastllmStudio/cli/ui.cpp)
+    target_link_libraries(FastllmStudio_cli fastllm)
+endif()
+
+add_library(fastllm_tools SHARED ${FASTLLM_CXX_SOURCES} ${FASTLLM_CUDA_SOURCES} ${FASTLLM_TFACC_SOURCES} ${FASTLLM_TOPS_SOURCES} tools/src/pytools.cpp)
+target_link_libraries(fastllm_tools PUBLIC ${FASTLLM_LINKED_LIBS})
+
+set(BUILD_INFO_USE_CUDA "false")
+set(BUILD_INFO_USE_ROCM "false")
+set(BUILD_INFO_USE_NUMAS "false")
+set(BUILD_INFO_USE_TFACC "false")
+set(BUILD_INFO_USE_TOPS "false")
+set(BUILD_INFO_USE_IVCOREX "false")
+if (USE_CUDA)
+    set(BUILD_INFO_USE_CUDA "true")
+endif()
+if (USE_ROCM)
+    set(BUILD_INFO_USE_ROCM "true")
+endif()
+if (USE_NUMAS)
+    set(BUILD_INFO_USE_NUMAS "true")
+endif()
+if (USE_TFACC)
+    set(BUILD_INFO_USE_TFACC "true")
+endif()
+if (USE_TOPS)
+    set(BUILD_INFO_USE_TOPS "true")
+endif()
+if (USE_IVCOREX)
+    set(BUILD_INFO_USE_IVCOREX "true")
+endif()
+file(WRITE ${CMAKE_BINARY_DIR}/build_info.json
+"{\n  \"USE_CUDA\": ${BUILD_INFO_USE_CUDA},\n  \"USE_ROCM\": ${BUILD_INFO_USE_ROCM},\n  \"USE_NUMAS\": ${BUILD_INFO_USE_NUMAS},\n  \"USE_TFACC\": ${BUILD_INFO_USE_TFACC},\n  \"USE_TOPS\": ${BUILD_INFO_USE_TOPS},\n  \"USE_IVCOREX\": ${BUILD_INFO_USE_IVCOREX}\n}\n")
+
+if (${CMAKE_HOST_WIN32})
+    add_custom_command(
+            TARGET fastllm_tools
+            POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E make_directory tools
+            COMMAND ${CMAKE_COMMAND} -E make_directory tools/ftllm
+            COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_CURRENT_SOURCE_DIR}/tools/fastllm_pytools ${CMAKE_BINARY_DIR}/tools/ftllm/.
+            COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_CURRENT_SOURCE_DIR}/tools/scripts ${CMAKE_BINARY_DIR}/tools/.
+            COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_BINARY_DIR}/$(Configuration)/fastllm_tools.dll ${CMAKE_BINARY_DIR}/tools/ftllm/.
+            COMMAND ${CMAKE_COMMAND} -E remove ${CMAKE_BINARY_DIR}/$(Configuration)/fastllm_tools.dll
+            COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_BINARY_DIR}/build_info.json ${CMAKE_BINARY_DIR}/tools/ftllm/.
+    )
+else()
+    add_custom_command(
+            TARGET fastllm_tools
+            POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E make_directory tools
+            COMMAND ${CMAKE_COMMAND} -E make_directory tools/ftllm
+            COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_CURRENT_SOURCE_DIR}/tools/fastllm_pytools ${CMAKE_BINARY_DIR}/tools/ftllm/.
+            COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_CURRENT_SOURCE_DIR}/tools/scripts ${CMAKE_BINARY_DIR}/tools/.
+            COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_BINARY_DIR}/libfastllm_tools.* ${CMAKE_BINARY_DIR}/tools/ftllm/.
+            COMMAND ${CMAKE_COMMAND} -E remove ${CMAKE_BINARY_DIR}/libfastllm_tools.*
+            COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_BINARY_DIR}/build_info.json ${CMAKE_BINARY_DIR}/tools/ftllm/.
+    )
+endif()
