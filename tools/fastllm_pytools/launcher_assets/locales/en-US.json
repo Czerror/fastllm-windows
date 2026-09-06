@@ -2,6 +2,9 @@
   "locale": "en-US",
   "name": "English",
   "static": {
+    "推理状态": "Inference status",
+    "上下文": "Context",
+    "并发时显示总速度，3 秒无新采样时归零。": "Combined throughput across requests; resets to zero after 3 seconds without a new sample.",
     "打开推测解码": "Enable speculative decoding",
     "自动配置时检查模型，仅在模型自带 MTP 且支持当前设备时开启。": "During automatic configuration, enable only when the model includes MTP and the device supports it.",
     "选择模型和配置模式，保存后即可启动。": "Choose a model and configuration mode, then save to launch.",
@@ -218,6 +221,8 @@
     "打开工作室": "Open Studio"
   },
   "messages": {
+    "Available context per session (input + output): {tokens} tokens. 1K = 1024 tokens.": "Available context per session (input + output): {tokens} tokens. 1K = 1024 tokens.",
+    "Context capacity has not been reported yet.": "Context capacity has not been reported yet.",
     "Choose a model and configuration mode, then save or start your service.": "Choose a model and configuration mode, then save or start your service.",
     "Edit all settings, or click Automatic configuration to choose a mode.": "Edit all settings, or click Automatic configuration to choose a mode.",
     "Apply configuration": "Apply configuration",

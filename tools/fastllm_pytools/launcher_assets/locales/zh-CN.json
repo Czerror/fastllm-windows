@@ -2,6 +2,9 @@
   "locale": "zh-CN",
   "name": "简体中文",
   "static": {
+    "推理状态": "推理状态",
+    "上下文": "上下文",
+    "并发时显示总速度，3 秒无新采样时归零。": "并发时显示总速度，3 秒无新采样时归零。",
     "打开推测解码": "打开推测解码",
     "自动配置时检查模型，仅在模型自带 MTP 且支持当前设备时开启。": "自动配置时检查模型，仅在模型自带 MTP 且支持当前设备时开启。",
     "选择模型和配置模式，保存后即可启动。": "选择模型和配置模式，保存后即可启动。",
@@ -218,6 +221,8 @@
     "打开工作室": "打开工作室"
   },
   "messages": {
+    "Available context per session (input + output): {tokens} tokens. 1K = 1024 tokens.": "单会话可用上下文上限（输入与输出合计）：{tokens} tokens。1K = 1024 tokens。",
+    "Context capacity has not been reported yet.": "上下文容量尚未上报。",
     "Choose a model and configuration mode, then save or start your service.": "选择模型和配置模式，保存配置或直接启动服务。",
     "Edit all settings, or click Automatic configuration to choose a mode.": "可修改全部参数，或点击自动配置后选择模式。",
     "Apply configuration": "应用配置",

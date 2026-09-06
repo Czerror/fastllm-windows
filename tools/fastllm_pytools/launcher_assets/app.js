@@ -11,6 +11,7 @@ const DEFAULT_LOCALE = "zh-CN";
 const SUPPORTED_LOCALES = new Set(["zh-CN", "en-US"]);
 const LOCALE_STORAGE_KEY = "ftllm-launcher-locale";
 const WEBUI_LOAD_TIMEOUT_MS = 30000;
+const INFERENCE_SPEED_TIMEOUT_MS = 3000;
 const AUTOMATIC_CONFIGURATION_DEFAULTS = Object.freeze({
   device: "auto",
   cuda_device_id: "0",
@@ -53,6 +54,8 @@ const state = {
   editingConfig: null,
   automaticConfigDialogPreviousStatus: null,
   runtime: null,
+  inferenceSpeedSession: null,
+  inferenceSpeedSamples: {},
   download: null,
   downloadDefaults: null,
   downloadCatalog: [],
@@ -132,6 +135,8 @@ async function request(path, options = {}) {
 function cacheElements() {
   const ids = [
     "app-version", "shutdown-launcher", "status-dot", "status-title", "status-message",
+    "inference-status-bar", "prefill-speed", "decode-speed",
+    "context-window-metric", "context-window",
     "open-endpoint", "stop-runtime", "profile-count", "profile-list", "new-profile",
     "current-view-title", "profile-search", "profile-results",
     "open-webui", "webui-placeholder", "webui-status",
@@ -151,7 +156,7 @@ function cacheElements() {
     "server-context-field", "server-sampling-title", "server-sampling-fields", "server-api-key-field",
     "server-hide-input-field", "launch-command-kicker", "command-preview",
     "validation-messages", "save-profile",
-    "start-runtime", "clear-logs", "log-count", "log-output", "log-activity",
+    "start-runtime", "clear-logs", "log-count", "log-output",
     "refresh-hardware", "hardware-status", "hardware-grid", "path-suggestions",
     "choose-model-folder", "folder-picker-modal", "folder-picker-title",
     "folder-picker-close", "folder-picker-current", "folder-picker-up",
@@ -213,6 +218,8 @@ async function initialize() {
     schedulePreview(0);
     scheduleDownloadPreview(0);
     window.setInterval(refreshRuntime, 700);
+    // Expire speed samples even if a runtime request stalls or the connection drops.
+    window.setInterval(renderInferenceSpeed, 250);
     window.setInterval(refreshDownload, 700);
     window.setInterval(refreshLogs, 700);
   } catch (error) {
@@ -590,10 +597,7 @@ function switchView(view) {
   document.querySelector(".app-shell").classList.toggle("webui-active", view === "webui");
   elements.openWebui.classList.toggle("hidden", view === "webui");
   if (view === "webui") renderWebUIAvailability();
-  if (view === "logs") {
-    document.querySelector('[data-view-button="logs"]').classList.remove("has-activity");
-    scrollLogsToBottom();
-  }
+  if (view === "logs") scrollLogsToBottom();
   if (view === "download") {
     document.querySelector('[data-view-button="download"]').classList.remove("has-activity");
   }
@@ -1627,9 +1631,59 @@ function renderRuntime() {
   elements.stopRuntime.disabled = phase === "stopping";
   elements.openEndpoint.disabled = !runtime.ready;
   elements.openEndpoint.textContent = isWebui ? t("Open WebUI") : t("Open API documentation");
+  renderInferenceSpeed();
+  renderContextWindow();
   renderWebUIAvailability();
   renderProfiles();
   updateActionAvailability();
+}
+
+function renderInferenceSpeed() {
+  const runtime = state.runtime || {};
+  const visible = runtime.command === "server" && runtime.phase === "running" && runtime.ready;
+  elements.inferenceStatusBar.classList.toggle("hidden", !visible);
+  if (!visible || state.inferenceSpeedSession !== runtime.sessionId) {
+    state.inferenceSpeedSamples = {};
+    state.inferenceSpeedSession = runtime.sessionId;
+  }
+  const now = performance.now();
+  for (const kind of ["prefill", "decode"]) {
+    const speed = runtime.speed?.[`${kind}TokensPerSecond`];
+    const updatedAt = runtime.speed?.[`${kind}UpdatedAt`];
+    let sample = state.inferenceSpeedSamples[kind];
+    const valid = visible && typeof updatedAt === "number" && Number.isFinite(updatedAt);
+    if (valid && sample?.updatedAt !== updatedAt) {
+      // Use the server clock for sample age and a local monotonic deadline.
+      // Repeated polls of the same sample must not extend its lifetime.
+      const age = typeof runtime.reportedAt === "number" && Number.isFinite(runtime.reportedAt)
+        ? Math.max(0, (runtime.reportedAt - updatedAt) * 1000) : 0;
+      sample = { updatedAt, expiresAt: now + Math.max(0, INFERENCE_SPEED_TIMEOUT_MS - age) };
+      state.inferenceSpeedSamples[kind] = sample;
+    }
+    const active = valid && sample && now < sample.expiresAt
+      && typeof speed === "number" && Number.isFinite(speed) && speed > 0;
+    const value = elements[`${kind}Speed`];
+    value.textContent = active
+      ? speed.toLocaleString(state.locale, { maximumFractionDigits: 1 })
+      : "0";
+    value.classList.toggle("active", active);
+  }
+}
+
+function renderContextWindow() {
+  const tokens = state.runtime?.contextWindowTokens;
+  const known = Number.isSafeInteger(tokens) && tokens > 0;
+  elements.contextWindow.textContent = known
+    ? (tokens >= 1024
+      ? `${(Math.floor(tokens / 1024 * 100) / 100).toLocaleString(state.locale, { maximumFractionDigits: 2 })}K`
+      : tokens.toLocaleString(state.locale))
+    : "—";
+  elements.contextWindow.classList.toggle("active", known);
+  elements.contextWindowMetric.title = known
+    ? t("Available context per session (input + output): {tokens} tokens. 1K = 1024 tokens.", {
+      tokens: tokens.toLocaleString(state.locale)
+    })
+    : t("Context capacity has not been reported yet.");
 }
 
 function updateActionAvailability() {
@@ -1921,9 +1975,6 @@ async function refreshLogs() {
       if (state.logs.length > 1500) state.logs.splice(0, state.logs.length - 1500);
       state.lastLogId = Number(result.lastId || state.lastLogId);
       renderLogs(wasNearBottom);
-      if (state.currentView !== "logs") {
-        document.querySelector('[data-view-button="logs"]').classList.add("has-activity");
-      }
     }
   } catch (_error) {
     // Ignore transient polling errors while the launcher exits.

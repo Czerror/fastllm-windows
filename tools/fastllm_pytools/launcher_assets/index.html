@@ -46,7 +46,6 @@
           <button class="nav-button" type="button" data-view-button="logs">
             <svg class="icon" aria-hidden="true"><use href="#icon-terminal"/></svg>
             <span><strong>运行日志</strong></span>
-            <i id="log-activity" class="activity-dot"></i>
           </button>
           <button class="nav-button" type="button" data-view-button="hardware">
             <svg class="icon" aria-hidden="true"><use href="#icon-cpu"/></svg>
@@ -83,12 +82,28 @@
         <header class="topbar">
           <div class="workspace-breadcrumb"><span class="management-label">模型管理</span><span aria-hidden="true">/</span><strong id="current-view-title">启动服务</strong></div>
           <div class="service-controls">
+          <div class="service-status">
           <div class="topbar-status">
             <span id="status-dot" class="status-dot stopped"></span>
             <div>
               <strong id="status-title">服务未启动</strong>
               <small id="status-message">选择启动项目后即可启动服务</small>
             </div>
+          </div>
+          <dl id="inference-status-bar" class="inference-status-bar hidden" aria-label="推理状态">
+            <div class="inference-metric" title="并发时显示总速度，3 秒无新采样时归零。">
+              <dt>Prefill</dt>
+              <dd><strong id="prefill-speed">0</strong><span>tps</span></dd>
+            </div>
+            <div class="inference-metric" title="并发时显示总速度，3 秒无新采样时归零。">
+              <dt>Decode</dt>
+              <dd><strong id="decode-speed">0</strong><span>tps</span></dd>
+            </div>
+            <div id="context-window-metric" class="inference-metric">
+              <dt>上下文</dt>
+              <dd><strong id="context-window">—</strong></dd>
+            </div>
+          </dl>
           </div>
           <div class="topbar-actions">
             <button id="open-webui" class="primary-button" type="button" data-open-view="webui" disabled>打开工作室</button>

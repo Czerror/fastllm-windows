@@ -154,6 +154,106 @@ class LauncherWebUIBrowserTest(unittest.TestCase):
         expect(editor).to_be_hidden()
         self.assertEqual(self.runtime.profiles()[0]['config_mode'], 'custom')
 
+    def test_inference_speed_bar_updates_across_views_and_service_restarts(self):
+        bar = self.page.locator('#inference-status-bar')
+        expect(bar).to_be_visible()
+        expect(self.page.locator('.topbar #inference-status-bar')).to_be_visible()
+        expect(self.page.locator('#prefill-speed')).to_have_text('0')
+        expect(self.page.locator('#decode-speed')).to_have_text('0')
+        self.runtime._handle_inference_speed(
+            '[Prompt] 8192 Tokens. Speed: 4321.25 tokens / s.', self.runtime._generation)
+        self.runtime._handle_inference_speed(
+            '[Decode] alive = 1, pending = 0, context usages: 5.0%, Speed: 108.65 tokens / s.',
+            self.runtime._generation)
+        self.page.clock.fast_forward(1000)
+        expect(self.page.locator('#prefill-speed')).to_have_text('4,321.3')
+        expect(self.page.locator('#decode-speed')).to_have_text('108.7')
+        self.page.locator('[data-view-button="logs"]').click()
+        expect(bar).to_be_visible()
+        self.page.clock.fast_forward(1500)
+        expect(self.page.locator('#decode-speed')).to_have_text('108.7')
+        self.page.clock.fast_forward(2000)
+        expect(self.page.locator('#prefill-speed')).to_have_text('0')
+        expect(self.page.locator('#decode-speed')).to_have_text('0')
+        self.runtime._handle_inference_speed(
+            '[Decode] alive = 1, pending = 0, context usages: 5.0%, Speed: 108.65 tokens / s.',
+            self.runtime._generation)
+        self.page.clock.fast_forward(1000)
+        expect(self.page.locator('#decode-speed')).to_have_text('108.7')
+        expect(self.page.locator('#prefill-speed')).to_have_text('0')
+        self.page.locator('#open-webui').click()
+        self.assert_loaded()
+        expect(bar).to_be_visible()
+        expect(self.page.locator('#decode-speed')).to_have_text('0')
+        with self.runtime._lock:
+            self.runtime._state.update(phase='stopped', ready=False)
+        self.page.clock.fast_forward(1000)
+        expect(bar).to_be_hidden()
+        with self.runtime._lock:
+            self.runtime._state.update(phase='starting', ready=False,
+                                       speed={key: None for key in self.runtime.state()['speed']})
+        self.page.clock.fast_forward(1000)
+        expect(bar).to_be_hidden()
+        with self.runtime._lock:
+            self.runtime._state.update(phase='running', ready=True, sessionId='model-b')
+        self.page.clock.fast_forward(1000)
+        expect(bar).to_be_visible()
+        expect(self.page.locator('#decode-speed')).to_have_text('0')
+
+    def test_context_capacity_stays_visible_when_speeds_expire_and_resets_on_restart(self):
+        context = self.page.locator('#context-window')
+        metric = self.page.locator('#context-window-metric')
+        expect(context).to_have_text('—')
+        expect(metric).to_have_attribute('title', 'Context capacity has not been reported yet.')
+        self.runtime._handle_context_window(
+            'INFO: Model context window: 262144 tokens per session '
+            '(model=262144, shared KV cache=335360, configured limit=None)', self.runtime._generation)
+        self.page.clock.fast_forward(1000)
+        expect(context).to_have_text('256K')
+        expect(metric).to_have_attribute('title',
+            'Available context per session (input + output): 262,144 tokens. 1K = 1024 tokens.')
+        self.page.locator('[data-view-button="logs"]').click()
+        self.page.clock.fast_forward(4000)
+        expect(context).to_be_visible()
+        expect(context).to_have_text('256K')
+        expect(self.page.locator('#decode-speed')).to_have_text('0')
+        self.page.reload()
+        expect(context).to_have_text('256K')
+        self.page.clock.install()
+        with self.runtime._lock:
+            self.runtime._state.update(phase='starting', ready=False,
+                                       sessionId='model-b', contextWindowTokens=None)
+        self.page.clock.fast_forward(1000)
+        expect(context).to_be_hidden()
+        with self.runtime._lock:
+            self.runtime._state.update(phase='running', ready=True)
+        self.page.clock.fast_forward(1000)
+        expect(context).to_be_visible()
+        expect(context).to_have_text('—')
+        self.runtime._handle_context_window(
+            'INFO: Model context window: 167168 tokens per session '
+            '(model=262144, shared KV cache=167168, configured limit=None)', self.runtime._generation)
+        self.page.clock.fast_forward(1000)
+        expect(context).to_have_text('163.25K')
+
+    def test_speed_timeout_works_while_runtime_poll_is_stalled(self):
+        self.runtime._handle_inference_speed(
+            '[Decode] alive = 1, pending = 0, contextLen = 128, Speed: 42.0 tokens / s.',
+            self.runtime._generation)
+        self.page.clock.fast_forward(1000)
+        expect(self.page.locator('#decode-speed')).to_have_text('42')
+        pending = []
+        self.page.route('**/api/runtime', lambda route: pending.append(route), times=1)
+        with self.page.expect_request('**/api/runtime'):
+            self.page.clock.fast_forward(700)
+        self.page.clock.fast_forward(3000)
+        expect(self.page.locator('#decode-speed')).to_have_text('0')
+        with self.page.expect_response('**/api/runtime') as response:
+            pending[0].fulfill(status=200, content_type='application/json', body=json.dumps(self.runtime.state()))
+        response.value.body()
+        expect(self.page.locator('#decode-speed')).to_have_text('0')
+        self.assertEqual(len(pending), 1)
+
     def test_presets_stay_simple_and_editing_reuses_the_saved_mode(self):
         model_path = os.path.join(self.temp.name, 'model')
         os.mkdir(model_path)

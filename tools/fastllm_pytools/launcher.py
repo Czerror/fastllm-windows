@@ -4,6 +4,7 @@ import hmac
 import importlib.util
 import ipaddress
 import json
+import math
 import os
 import platform
 import re
@@ -69,6 +70,14 @@ MODELSCOPE_INSTALL_ERROR = (
 )
 ANSI_ESCAPE_PATTERN = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))")
 CONTROL_CHARACTER_PATTERN = re.compile(r"[\x00-\x1f\x7f]")
+INFERENCE_SPEED_PATTERN = re.compile(
+    r"^\[(Prompt|Decode)\]\s+.+?\bSpeed:\s*"
+    r"((?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)\s+tokens\s*/\s*s\.?\s*$"
+)
+CONTEXT_WINDOW_PATTERN = re.compile(
+    r"\bModel context window:\s*(\d{1,10})\s+tokens per session "
+    r"\(model=(?:\d+|None), shared KV cache=(?:\d+|None), configured limit=(?:\d+|None)\)\s*$"
+)
 GIB = 1024 ** 3
 MODEL_CONFIG_SIZE_LIMIT = 8 * 1024 * 1024
 MODEL_WEIGHT_ENTRY_LIMIT = 4096
@@ -349,6 +358,15 @@ def _log_level(line: str) -> str:
     return "info"
 
 
+def _empty_runtime_speed() -> Dict[str, Any]:
+    return {
+        "prefillTokensPerSecond": None,
+        "decodeTokensPerSecond": None,
+        "prefillUpdatedAt": None,
+        "decodeUpdatedAt": None,
+    }
+
+
 def _empty_runtime_state() -> Dict[str, Any]:
     return {
         "phase": "stopped",
@@ -367,6 +385,8 @@ def _empty_runtime_state() -> Dict[str, Any]:
         "startedAt": None,
         "sessionId": "",
         "exitCode": None,
+        "speed": _empty_runtime_speed(),
+        "contextWindowTokens": None,
     }
 
 
@@ -556,7 +576,7 @@ class LauncherRuntime:
 
     def state(self) -> Dict[str, Any]:
         with self._lock:
-            return dict(self._state)
+            return {**self._state, "reportedAt": time.time(), "speed": dict(self._state["speed"])}
 
     def download_state(self) -> Dict[str, Any]:
         with self._lock:
@@ -865,6 +885,8 @@ class LauncherRuntime:
                 "startedAt": time.time(),
                 "sessionId": secrets.token_hex(16),
                 "exitCode": None,
+                "speed": _empty_runtime_speed(),
+                "contextWindowTokens": None,
             })
             self._last_progress_stage = ""
             self._append_log(
@@ -922,6 +944,8 @@ class LauncherRuntime:
                 if source == "stderr" and line.startswith(PROGRESS_PREFIX):
                     self._handle_progress(line[len(PROGRESS_PREFIX):], generation)
                     continue
+                self._handle_inference_speed(line, generation)
+                self._handle_context_window(line, generation)
                 self._append_log("ftllm", _log_level(line), line)
         except Exception as error:
             self._append_log("launcher", "warning", f"Failed to read {source}: {error}")
@@ -930,6 +954,37 @@ class LauncherRuntime:
                 stream.close()
             except Exception:
                 pass
+
+    def _handle_inference_speed(self, line: str, generation: int):
+        """Capture the engine's latest throughput samples without estimating tokens."""
+        match = INFERENCE_SPEED_PATTERN.fullmatch(line)
+        if not match:
+            return
+        value = float(match[2])
+        if not math.isfinite(value):
+            return
+        kind = "prefill" if match[1] == "Prompt" else "decode"
+        with self._lock:
+            if (generation != self._generation or self._state["command"] != "server"
+                    or self._state["phase"] not in ("starting", "running")):
+                return
+            self._state["speed"] = {
+                **self._state["speed"],
+                kind + "TokensPerSecond": value,
+                kind + "UpdatedAt": time.time(),
+            }
+
+    def _handle_context_window(self, line: str, generation: int):
+        # server.py reports the effective per-session limit after warmup,
+        # accounting for model, shared KV capacity, and explicit context settings.
+        match = CONTEXT_WINDOW_PATTERN.search(line)
+        if not match or int(match[1]) <= 0:
+            return
+        with self._lock:
+            if (generation != self._generation or self._state["command"] != "server"
+                    or self._state["phase"] not in ("starting", "running")):
+                return
+            self._state["contextWindowTokens"] = int(match[1])
 
     def _handle_progress(self, raw_event: str, generation: int):
         try:
