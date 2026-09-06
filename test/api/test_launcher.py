@@ -122,6 +122,50 @@ class LauncherConfigTest(unittest.TestCase):
         result = self.runtime.delete_profile(0)
         self.assertEqual(result["profiles"], [])
 
+    def test_configuration_mode_is_saved_without_changing_legacy_profiles(self):
+        self.assertEqual(self.runtime.default_profile()["config_mode"], "long_context")
+        self.assertTrue(self.runtime.default_profile()["low_gpu_mem"])
+        for mode in ("long_context", "high_concurrency", "custom"):
+            saved = self.runtime.save_profile(None, self.config(config_mode=mode))
+            self.assertEqual(self.runtime.profiles()[saved["index"]]["config_mode"], mode)
+            self.assertNotIn("--config_mode", self.runtime.preview(saved["profile"])["command"])
+        legacy = config_from_dict({"max_batch": "3", "max_context_length": "12345"})
+        self.assertEqual(legacy.config_mode, "custom")
+        self.assertFalse(legacy.low_gpu_mem)
+        self.assertEqual(legacy.max_batch, "3")
+        self.assertEqual(legacy.max_context_length, "12345")
+
+    def test_configuration_modes_preserve_model_weight_context_and_chunk_defaults(self):
+        model_path = os.path.join(self.temp.name, "mode-test")
+        self.write_model(model_path, {
+            "architectures": ["Qwen3ForCausalLM"], "max_position_embeddings": 32768,
+        }, 4)
+        for mode, batch in (("long_context", "1"), ("high_concurrency", "auto"), ("custom", "4")):
+            recommendation = recommend_launch_config(model_path, self.hardware((24,)), config_mode=mode)
+            config = recommendation["config"]
+            self.assertEqual(config["config_mode"], mode)
+            self.assertEqual(config["max_batch"], batch)
+            self.assertEqual(config["max_context_length"], "auto")
+            self.assertEqual(config["low_gpu_mem"], mode == "long_context")
+            for field in ("dtype", "moe_dtype", "chunked_prefill_size"):
+                self.assertNotIn(field, config)
+            argv = build_fastllm_argv(config_from_dict({"model": model_path, **config}))
+            self.assertEqual("--low_gpu_mem" in argv, mode == "long_context")
+            for option in ("--dtype", "--moe_dtype", "--chunked_prefill_size", "--max_context_length"):
+                self.assertNotIn(option, argv)
+        with self.assertRaisesRegex(LauncherError, "Unknown configuration mode"):
+            recommend_launch_config(model_path, config_mode="invalid")
+
+    def test_insufficient_gpu_memory_does_not_trigger_weight_conversion(self):
+        model_path = os.path.join(self.temp.name, "Dense-20B")
+        self.write_model(model_path, {
+            "architectures": ["Qwen3ForCausalLM"], "torch_dtype": "float16",
+        }, 40)
+        for mode in ("long_context", "high_concurrency", "custom"):
+            recommendation = recommend_launch_config(model_path, self.hardware((24,)), config_mode=mode)
+            self.assertEqual(recommendation["strategy"], "numa")
+            self.assertNotIn("dtype", recommendation["config"])
+
     def test_invalid_dflash_configuration_is_reported(self):
         preview = self.runtime.preview(self.config(
             speculative_algorithm="dflash",
@@ -512,7 +556,7 @@ class LauncherConfigTest(unittest.TestCase):
         ]
         self.assertNotRegex("\n".join(english_values), r"[一-龥]")
 
-    def test_folder_browser_lists_only_directories_and_resolves_file_path(self):
+    def test_folder_browser_lists_folders_and_files_and_resolves_file_path(self):
         browser_root = os.path.join(self.temp.name, "browser")
         os.makedirs(os.path.join(browser_root, "zeta"))
         os.makedirs(os.path.join(browser_root, "Alpha"))
@@ -528,9 +572,21 @@ class LauncherConfigTest(unittest.TestCase):
         )
         self.assertFalse(listing["truncated"])
         self.assertNotIn("model.gguf", [folder["name"] for folder in listing["folders"]])
+        self.assertEqual(listing["files"], [{"name": "model.gguf", "path": model_file}])
 
         file_listing = browse_folders(model_file)
         self.assertEqual(file_listing["path"], browser_root)
+        self.assertEqual(file_listing["selectedFile"], model_file)
+
+    def test_file_browser_bounds_combined_directory_and_file_entries(self):
+        for name in ("a.gguf", "b.flm", "c.bin"):
+            with open(os.path.join(self.model_path, name), "w"):
+                pass
+        os.mkdir(os.path.join(self.model_path, "folder"))
+        with patch("fastllm_pytools.launcher.FOLDER_BROWSER_ENTRY_LIMIT", 2):
+            listing = browse_folders(self.model_path)
+        self.assertEqual(len(listing["folders"]) + len(listing["files"]), 2)
+        self.assertTrue(listing["truncated"])
 
     def test_folder_browser_api_returns_server_directories(self):
         from fastapi.testclient import TestClient

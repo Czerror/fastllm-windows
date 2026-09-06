@@ -138,6 +138,9 @@ class DeployConfig:
     ori: str = ""
     extra_args: str = ""
     env_vars: str = ""
+    config_mode: str = "custom"
+    enable_speculative_decoding: bool = False
+    low_gpu_mem: bool = False
 
 
 @dataclass
@@ -349,6 +352,12 @@ FIELDS: Sequence[FormField] = (
         "choice",
         "Qwen4 等模型的大型 PLE 表默认放在 CPU；内存不足时可选 Disk。",
         NGRAM_DEVICE_CHOICES,
+    ),
+    FormField(
+        "low_gpu_mem",
+        "低显存模式",
+        "bool",
+        "减少运行时显存占用，为上下文缓存留出更多空间。",
     ),
     FormField(
         "gpu_mem_ratio",
@@ -986,6 +995,8 @@ def config_from_dict(data: dict) -> DeployConfig:
         elif isinstance(default, str):
             value = "" if value is None else str(value)
         setattr(config, key, value)
+    if config.config_mode not in ("long_context", "high_concurrency", "custom"):
+        config.config_mode = "custom"
     normalize_main_device_config(config)
     normalize_moe_hybrid_config(
         config,
@@ -1162,6 +1173,8 @@ def build_fastllm_argv(config: DeployConfig) -> List[str]:
         _optional_text(str(config.ngram_device).strip().lower()),
     )
     _add_option(argv, "--gpu_mem_ratio", _optional_text(config.gpu_mem_ratio))
+    if config.low_gpu_mem:
+        argv.append("--low_gpu_mem")
     _add_option(argv, "--chunked_prefill_size", _optional_text(config.chunked_prefill_size))
     _add_option(argv, "--kv_cache_dtype", _optional_text(config.kv_cache_dtype))
     _add_option(argv, "--moe_atype", _optional_text(config.moe_atype))
