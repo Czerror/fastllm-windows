@@ -1,7 +1,14 @@
 #include "fastllm.h"
+#include "devices/moe_decode_scheduler.h"
 #include "fastllm-cuda.cuh"
 #include "devices/cpu/cpudevice.h"
 #include "devices/cuda/cudadevice.h"
+#ifdef USE_NUMAS
+#include "devices/numas/numasdevice.h"
+#include "devices/numas/numas.h"
+#include "executor.h"
+namespace fastllm { NumaConfig *GetNumaConfig(); }
+#endif
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
 #include <algorithm>
@@ -93,7 +100,7 @@ static void Run(fastllm::DataType dtype, int hidden, int inter,
         weights[2]->blockM = 128;
     }
     std::function<void()> unsupportedCallback;
-    if (weightType != fastllm::DataType::NVFP4_BLOCK_16_E4M3 || hidden % 16 || inter % 16) {
+    if (weightType == fastllm::DataType::NVFP4_BLOCK_16_E4M3 && (hidden % 16 || inter % 16)) {
         unsupportedCallback = [] { throw std::runtime_error("unsupported NUMA callback invoked"); };
     }
     Require(FastllmCudaPrepareMoeCache(&layer, 1, unsupportedCallback), "valid table rejected");
@@ -304,8 +311,10 @@ static void CompareFP8(fastllm::DataType dtype, fastllm::DataType weightType,
 }
 
 template<class T>
-static void CompareNumaNVFP4(fastllm::DataType dtype, int nodes, int batch,
-                            int hidden = 128, int inter = 64, bool planar = false) {
+static void CompareNumaCache(fastllm::DataType dtype, int nodes, int batch,
+                            int hidden = 128, int inter = 64, bool planar = false,
+                            bool hybrid = false,
+                            fastllm::DataType weightType = fastllm::DataType::NVFP4_BLOCK_16_E4M3) {
     constexpr int experts = 24, topk = 7, tables = 2;
     std::mt19937 rng(171);
     std::vector<std::unique_ptr<fastllm::Data>> owned[3];
@@ -321,16 +330,29 @@ static void CompareNumaNVFP4(fastllm::DataType dtype, int nodes, int batch,
                 for (int part = 0; part < 2; ++part) {
                     const int rows = part == 0 ? 2 * inter : hidden;
                     const int cols = part == 0 ? hidden : inter;
-                    auto w = std::make_unique<fastllm::Data>(fastllm::DataType::NVFP4_BLOCK_16_E4M3);
-                    w->blockK = 1; w->blockM = 16;
+                    const bool nvfp4 = weightType == fastllm::DataType::NVFP4_BLOCK_16_E4M3;
+                    auto w = std::make_unique<fastllm::Data>(weightType);
+                    w->blockK = nvfp4 ? 1 : 128; w->blockM = nvfp4 ? 16 : 128;
                     w->Resize({rows, cols}); w->Allocate(false);
-                    for (size_t b = 0; b < size_t(rows) * cols / 2; ++b)
-                        w->cpuData[b] = rng() % 256;
-                    auto *scale = fastllm::GetNVFP4ScaleData(*w);
-                    for (int b = 0; b < rows * cols / 16; ++b)
-                        scale[b] = 0x28 + rng() % 24;
-                    w->scales = part == 0 ? std::vector<float>{0.73f, 1.31f}
-                                         : std::vector<float>{0.39f};
+                    if (nvfp4) {
+                        for (size_t b = 0; b < size_t(rows) * cols / 2; ++b) w->cpuData[b] = rng() % 256;
+                        auto *scale = fastllm::GetNVFP4ScaleData(*w);
+                        for (int b = 0; b < rows * cols / 16; ++b) scale[b] = 0x28 + rng() % 24;
+                        w->scales = part == 0 ? std::vector<float>{0.73f, 1.31f} : std::vector<float>{0.39f};
+                    } else if (weightType == fastllm::DataType::FP8_E4M3) {
+                        for (size_t b = 0; b < size_t(rows) * cols; ++b)
+                            w->cpuData[b] = (rng() % 2 ? 128 : 0) | (0x28 + rng() % 24);
+                        w->scales.resize(((rows + 127) / 128) * (cols / 128));
+                        for (float &scale : w->scales) scale = (1 + rng() % 16) / 64.0f;
+                    } else {
+                        const size_t pitch = fastllm::GetDataBytes(weightType, 1, cols);
+                        for (int row = 0; row < rows; ++row) for (int c = 0; c < cols; c += 128) {
+                            auto *block = w->cpuData + row * pitch + (c / 128) * 132;
+                            for (int j = 0; j < 128; ++j) block[j] = (rng() % 2 ? 128 : 0) | (0x28 + rng() % 24);
+                            const float scale = (1 + rng() % 16) / 64.0f;
+                            memcpy(block + 128, &scale, sizeof(scale));
+                        }
+                    }
                     weights[backend][table][2 * (expert + 1) + part] = w.get();
                     owned[backend].push_back(std::move(w));
                 }
@@ -344,26 +366,45 @@ static void CompareNumaNVFP4(fastllm::DataType dtype, int nodes, int batch,
             for (size_t i = 0; i < owned[backend].size(); ++i) {
                 auto &w = *owned[backend][i];
                 const int rows = w.dims[0], cols = w.dims[1];
-                const bool usePlanar = planar && (rows / nodes) % fastllm::NVFP4_PLANAR_TILE_ROWS == 0;
-                const size_t bytes = fastllm::GetDataBytes(fastllm::DataType::NVFP4_BLOCK_16, rows / nodes, cols);
+                const bool nvfp4 = weightType == fastllm::DataType::NVFP4_BLOCK_16_E4M3;
+                const bool usePlanar = nvfp4 && planar && (rows / nodes) % fastllm::NVFP4_PLANAR_TILE_ROWS == 0;
+                const auto storageType = nvfp4 ? fastllm::DataType::NVFP4_BLOCK_16 : fastllm::DataType::FP8_E4M3_BLOCK_128;
+                const size_t pitch = fastllm::GetDataBytes(storageType, 1, cols);
+                const size_t bytes = pitch * (rows / nodes);
                 for (int node = 0; node < nodes; ++node) {
                     void *ptr = nullptr;
                     Check(cudaHostAlloc(&ptr, bytes, cudaHostAllocMapped | cudaHostAllocPortable));
-                    fastllm::PackCompactE4M3NVFP4Block16Rows(rows, cols, w.cpuData,
-                        fastllm::GetNVFP4ScaleData(w), w.scales, 1, 16,
-                        static_cast<uint8_t *>(ptr), node * (rows / nodes), rows / nodes, i % 2 == 0, usePlanar);
+                    if (nvfp4) {
+                        fastllm::PackCompactE4M3NVFP4Block16Rows(rows, cols, w.cpuData,
+                            fastllm::GetNVFP4ScaleData(w), w.scales, 1, 16,
+                            static_cast<uint8_t *>(ptr), node * (rows / nodes), rows / nodes, i % 2 == 0, usePlanar);
+                    } else {
+                        auto *dest = static_cast<uint8_t *>(ptr);
+                        for (int r = 0; r < rows / nodes; ++r) {
+                            const int row = node * (rows / nodes) + r;
+                            const int originalRow = i % 2 == 0 ? row / 2 + (row % 2) * (rows / 2) : row;
+                            if (weightType == fastllm::DataType::FP8_E4M3_BLOCK_128) {
+                                memcpy(dest + r * pitch, w.cpuData + originalRow * pitch, pitch);
+                            } else for (int c = 0; c < cols; c += 128) {
+                                auto *block = dest + r * pitch + (c / 128) * 132;
+                                memcpy(block, w.cpuData + originalRow * cols + c, 128);
+                                const float scale = w.scales[(originalRow / 128) * (cols / 128) + c / 128];
+                                memcpy(block + 128, &scale, sizeof(scale));
+                            }
+                        }
+                    }
                     shards.push_back(ptr);
                     w.numasData.push_back(static_cast<uint8_t *>(ptr));
                 }
                 w.FreeSpace();
                 w.dataType = usePlanar ? fastllm::DataType::NVFP4_BLOCK_16_PLANAR
-                                    : fastllm::DataType::NVFP4_BLOCK_16;
+                                    : storageType;
                 w.isPinned = true;
                 w.UpdateUnitSize();
             }
         };
         if (backend == 0) {
-            Require(FastllmCudaPrepareMoeCache(layers[0], tables), "NVFP4 snapshot failed");
+            Require(FastllmCudaPrepareMoeCache(layers[0], tables), "cache snapshot failed");
             registerWeights();
         } else if (backend == 1) {
             bool called = false;
@@ -384,7 +425,9 @@ static void CompareNumaNVFP4(fastllm::DataType dtype, int nodes, int batch,
         } else {
             Require(!FastllmCudaPrepareMoeCache(layers[2], tables, [&] {
                 registerWeights();
-                owned[2][0]->isPinned = false;
+                if (weightType == fastllm::DataType::NVFP4_BLOCK_16_E4M3)
+                    owned[2][0]->isPinned = false;
+                else owned[2][0]->numasData[0] = nullptr;
             }), "unpinned NUMA source accepted");
             for (int table = 0; table < tables; ++table)
                 Require(!FastllmCudaCanRunMoeCache(weights[2][table].data(), 2 * (experts + 1)),
@@ -422,7 +465,7 @@ static void CompareNumaNVFP4(fastllm::DataType dtype, int nodes, int batch,
                 Require(FastllmCudaMergeMOECache(input, gate[backend][table], output[backend][table],
                     weights[backend][table].data(), 2 * (experts + 1),
                     static_cast<int32_t *>(ids.cudaData), static_cast<float *>(scores.cudaData), topk),
-                    "NVFP4 cache compute failed");
+                    "cache compute failed");
             };
             if (exec[backend][table] == nullptr) {
                 launch(); Check(cudaStreamSynchronize(cudaStreamPerThread));
@@ -441,8 +484,86 @@ static void CompareNumaNVFP4(fastllm::DataType dtype, int nodes, int batch,
             std::vector<uint8_t> a(expected.GetBytes()), b(actual.GetBytes());
             Check(cudaMemcpy(a.data(), expected.cudaData, a.size(), cudaMemcpyDeviceToHost));
             Check(cudaMemcpy(b.data(), actual.cudaData, b.size(), cudaMemcpyDeviceToHost));
-            Require(a == b, "NUMA refill changed compact NVFP4 gate/output bits");
+            Require(a == b, "NUMA refill changed gate/output bits");
         }
+#ifdef USE_NUMAS
+        if (hybrid) {
+            using namespace fastllm;
+            Require(dtype == FLOAT32 && batch == 1, "invalid hybrid test shape");
+            // Independent existing NUMA and CUDA paths provide each expert's
+            // reference. Mixed execution must choose exactly one of them per
+            // route; FP32 CUDA and BF16 NUMA activations can differ slightly.
+            std::vector<float> lower(hidden, 0), upper(hidden, 0), exact(hidden, 0), subset(topk * hidden);
+            std::vector<int32_t> mask(topk, -1);
+            Data hostInput(FLOAT32, {1, hidden}); hostInput.Allocate(false);
+            memcpy(hostInput.cpuData, activation.data(), hidden * sizeof(float));
+            Data oneId(INT32, {1, 1}), oneScore(FLOAT32, {1, 1});
+            oneId.Allocate(false); oneScore.Allocate(false);
+            *reinterpret_cast<int32_t *>(oneId.cpuData) = 0;
+            *reinterpret_cast<float *>(oneScore.cpuData) = 1;
+            NumasMoeDecodeExperts(reinterpret_cast<float *>(hostInput.cpuData), subset.data(),
+                weights[1][table].data(), indices.data(), mask.data(), topk, table);
+            Data w1, w2, w3, currentInput, currentOutput, cpuResult;
+            for (int r = 0; r < topk; ++r) {
+                Data *single[]{nullptr, nullptr, weights[1][table][2 * (indices[r] + 1)],
+                                                weights[1][table][2 * (indices[r] + 1) + 1]};
+                Data *bias[4]{};
+                reinterpret_cast<Executor *>(GetExecutor())->RunOnDevice("numa", "MergeMOE",
+                    {{"input", &hostInput}, {"index", &oneId}, {"score", &oneScore},
+                     {"weights", reinterpret_cast<Data *>(single)}, {"biass", reinterpret_cast<Data *>(bias)},
+                     {"w1", &w1}, {"w2", &w2}, {"w3", &w3}, {"curInput", &currentInput},
+                     {"curOutput", &currentOutput}, {"output", &cpuResult}},
+                    {{"sharedScale", 1}}, {{"weights___batch", 4}, {"biass___batch", 4}, {"layer", table}});
+                std::vector<float> only(topk, 0), gpuResult(hidden);
+                only[r] = 1;
+                Check(cudaMemcpy(scores.cudaData, only.data(), topk * sizeof(float), cudaMemcpyHostToDevice));
+                Require(FastllmCudaMergeMOECache(input, gate[0][table], output[0][table],
+                    weights[0][table].data(), 2 * (experts + 1),
+                    static_cast<int32_t *>(ids.cudaData), static_cast<float *>(scores.cudaData), topk),
+                    "hybrid CUDA reference failed");
+                Check(cudaMemcpy(gpuResult.data(), output[0][table].cudaData, hidden * sizeof(float), cudaMemcpyDeviceToHost));
+                for (int c = 0; c < hidden; ++c) {
+                    const float cpu = reinterpret_cast<float *>(cpuResult.cpuData)[c];
+                    Require(std::abs(cpu - subset[r * hidden + c]) <= 1e-5f * (1 + std::abs(cpu)),
+                            "NUMA subset changed expert arithmetic");
+                    lower[c] += std::min(cpu, gpuResult[c]) * routes[r];
+                    upper[c] += std::max(cpu, gpuResult[c]) * routes[r];
+                    // Warmup populates all layers, then samples each split. Even steps have all
+                    // routes resident; odd steps evict all of this table.
+                    // Both cases keep original route order when admitting.
+                    exact[c] += (r < (step < tables ? topk : topk - (step - tables) % (topk + 1)) ? gpuResult[c] : cpu) * routes[r];
+                }
+            }
+            if (step % 2) {
+                // Evict this table between lookup/compute test calls. This
+                // exercises mixed misses as well as the fully resident case.
+                for (int pass = 0; pass < 3; ++pass) {
+                    std::vector<int32_t> other(topk);
+                    for (int r = 0; r < topk; ++r) other[r] = pass * topk + r;
+                    Check(cudaMemcpy(ids.cudaData, other.data(), topk * sizeof(int32_t), cudaMemcpyHostToDevice));
+                    Require(FastllmCudaMergeMOECache(input, gate[1][1 - table], output[1][1 - table],
+                        weights[1][1 - table].data(), 2 * (experts + 1),
+                        static_cast<int32_t *>(ids.cudaData), static_cast<float *>(scores.cudaData), topk),
+                        "hybrid eviction setup failed");
+                }
+                Check(cudaMemcpy(ids.cudaData, indices.data(), topk * sizeof(int32_t), cudaMemcpyHostToDevice));
+            }
+            Check(cudaMemcpy(scores.cudaData, routes.data(), topk * sizeof(float), cudaMemcpyHostToDevice));
+            Data result;
+            Require(FastllmCudaMergeMOEHybrid(input, ids, scores, result,
+                weights[1][table].data(), 2 * (experts + 1), table), "hybrid execution rejected");
+            std::vector<float> actual(hidden);
+            Check(cudaMemcpy(actual.data(), result.cudaData, hidden * sizeof(float), cudaMemcpyDeviceToHost));
+            for (int c = 0; c < hidden; ++c) {
+                const float tolerance = 2e-5f * (1 + std::max(std::abs(lower[c]), std::abs(upper[c])));
+                Require(std::isfinite(actual[c]) && actual[c] >= lower[c] - tolerance &&
+                        actual[c] <= upper[c] + tolerance, "hybrid lost or duplicated an expert contribution");
+                if (step < tables + 2 * (topk + 1))
+                    Require(std::abs(actual[c] - exact[c]) <= tolerance,
+                            "hybrid result disagrees with the assigned expert subsets");
+            }
+        }
+#endif
     }
     for (int backend = 0; backend < 2; ++backend) {
         for (int table = 0; table < tables; ++table) {
@@ -453,8 +574,8 @@ static void CompareNumaNVFP4(fastllm::DataType dtype, int nodes, int batch,
     }
     for (void *ptr : shards) Check(cudaFreeHost(ptr));
     fastllm::SetMoeCudaCacheBytes(0);
-    std::printf("PASS NVFP4 shared NUMA dtype=%d nodes=%d batch=%d hidden=%d inter=%d planar=%d: bitwise gate/output, graph, eviction, validation\n",
-                int(dtype), nodes, batch, hidden, inter, planar);
+    std::printf("PASS NUMA cache weight=%d dtype=%d nodes=%d batch=%d hidden=%d inter=%d planar=%d: bitwise gate/output, graph, eviction, validation\n",
+                int(weightType), int(dtype), nodes, batch, hidden, inter, planar);
 }
 
 template <class T>
@@ -498,8 +619,44 @@ static void ComparePlanarLinear(fastllm::DataType dtype, int columns, int batch)
                 int(dtype), columns, batch);
 }
 
+static void CheckDecodeScheduler() {
+    fastllm::MoeDecodeScheduler scheduler;
+    for (int call = 0; call < 48 + 2 * 11; ++call) {
+        scheduler.calls = call;
+        Require(scheduler.SelectGpuCount(10, 0, 48) == (call < 48 ? 10 : 10 - (call - 48) % 11),
+                "scheduler did not populate layers before calibrating splits");
+    }
+    std::vector<bool> visited(48, false);
+    for (int probe = 2; probe < 50; ++probe) {
+        scheduler.calls = probe * 1021;
+        Require(scheduler.SelectGpuCount(10, 0, 48) == 10 - probe % 11,
+                "scheduler did not refresh a sparse alternative");
+        visited[scheduler.calls % 48] = true;
+    }
+    Require(std::all_of(visited.begin(), visited.end(), [](bool v) { return v; }),
+            "scheduler probes were locked to a subset of layers");
+    for (int n = 1; n <= 10; ++n) {
+        scheduler.cpu[n].Observe(20 + n * 10);
+        scheduler.compute[n].Observe(5);
+    }
+    scheduler.dispatch.Observe(5);
+    scheduler.refill.Observe(40);
+    scheduler.calls = 33;
+    Require(scheduler.SelectGpuCount(10, 0) == 2, "scheduler did not balance CPU and refill");
+    Require(scheduler.SelectGpuCount(10, 5) == 6, "scheduler ignored resident experts");
+    Require(scheduler.SelectGpuCount(10, 10) == 10, "scheduler rejected a resident GPU batch");
+    for (int n = 0; n < 100; ++n) scheduler.refill.Observe(300);
+    Require(scheduler.SelectGpuCount(10, 0) == 0, "scheduler cannot fall back after transfer slowdown");
+    fastllm::MoeDecodeScheduler::Estimate cold;
+    cold.Observe(15000); cold.Observe(40);
+    Require(cold.us == 40, "cold-start cost poisoned estimate");
+    cold.Observe(15000);
+    Require(cold.us < 100, "isolated stall poisoned estimate");
+}
+
 int main() {
     try {
+        CheckDecodeScheduler();
         for (int columns : {17, 128, 640, 4096}) {
             for (int batch : {1, 4, 31, 32, 65}) {
                 ComparePlanarLinear<float>(fastllm::DataType::FLOAT32, columns, batch);
@@ -540,19 +697,28 @@ int main() {
         }
         for (int nodes : {1, 2, 4}) {
             for (int batch : {1, 4, FASTLLM_CUDA_MOE_CACHE_MAX_BATCH}) {
-                CompareNumaNVFP4<float>(fastllm::DataType::FLOAT32, nodes, batch);
-                CompareNumaNVFP4<half>(fastllm::DataType::FLOAT16, nodes, batch);
-                CompareNumaNVFP4<__nv_bfloat16>(fastllm::DataType::BFLOAT16, nodes, batch);
-                CompareNumaNVFP4<float>(fastllm::DataType::FLOAT32, nodes, batch, 128, 64, true);
-                CompareNumaNVFP4<half>(fastllm::DataType::FLOAT16, nodes, batch, 128, 64, true);
-                CompareNumaNVFP4<__nv_bfloat16>(fastllm::DataType::BFLOAT16, nodes, batch, 128, 64, true);
+                CompareNumaCache<float>(fastllm::DataType::FLOAT32, nodes, batch);
+                CompareNumaCache<half>(fastllm::DataType::FLOAT16, nodes, batch);
+                CompareNumaCache<__nv_bfloat16>(fastllm::DataType::BFLOAT16, nodes, batch);
+                CompareNumaCache<float>(fastllm::DataType::FLOAT32, nodes, batch, 128, 64, true);
+                CompareNumaCache<half>(fastllm::DataType::FLOAT16, nodes, batch, 128, 64, true);
+                CompareNumaCache<__nv_bfloat16>(fastllm::DataType::BFLOAT16, nodes, batch, 128, 64, true);
             }
         }
-        CompareNumaNVFP4<half>(fastllm::DataType::FLOAT16, 4, 4, 2560, 640);
-        CompareNumaNVFP4<half>(fastllm::DataType::FLOAT16, 4, 4, 2560, 640, true);
-        CompareNumaNVFP4<half>(fastllm::DataType::FLOAT16, 1, 4, 128, 16, true);
-        CompareNumaNVFP4<half>(fastllm::DataType::FLOAT16, 2, 4, 32, 64, true);
-        CompareNumaNVFP4<half>(fastllm::DataType::FLOAT16, 2, 4, 128, 16, true);
+        CompareNumaCache<half>(fastllm::DataType::FLOAT16, 4, 4, 2560, 640);
+        CompareNumaCache<half>(fastllm::DataType::FLOAT16, 4, 4, 2560, 640, true);
+        CompareNumaCache<half>(fastllm::DataType::FLOAT16, 1, 4, 128, 16, true);
+        CompareNumaCache<half>(fastllm::DataType::FLOAT16, 2, 4, 32, 64, true);
+        CompareNumaCache<half>(fastllm::DataType::FLOAT16, 2, 4, 128, 16, true);
+#ifdef USE_NUMAS
+        for (bool planar : {false, true})
+            CompareNumaCache<float>(fastllm::DataType::FLOAT32,
+                fastllm::GetNumaConfig()->numaCnt, 1, 2560, 640, planar, true);
+        for (auto type : {fastllm::DataType::FP8_E4M3, fastllm::DataType::FP8_E4M3_BLOCK_128})
+            CompareNumaCache<float>(fastllm::DataType::FLOAT32,
+                fastllm::GetNumaConfig()->numaCnt, 1, 2560, 640, false, true, type);
+        fastllm::ClearNumasMoeRuntimeCache();
+#endif
         std::puts("ALL_PASS"); return 0;
     } catch (const std::exception &e) {
         std::fprintf(stderr, "FAIL: %s\n", e.what()); return 1;

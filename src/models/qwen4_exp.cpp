@@ -5196,7 +5196,15 @@ namespace fastllm {
         }
         const std::string outputDevice = SelectDeviceFromMap(
             this->deviceMap, deviceLayer + 1, this->block_cnt);
-        const bool useMoeCudaCache = TryApplyMoeCudaCache(
+        bool hybridMoe = false;
+#if defined(USE_CUDA) && !defined(USE_ROCM)
+        if (Qwen4MtpDraftsPerStep() == 0 &&
+            outputDevice.find("cuda") == 0) {
+            hybridMoe = FastllmCudaMergeMOEHybrid(flattened, expertIndex, expertScore,
+                output, moeWeights.data(), moeWeights.size(), deviceLayer);
+        }
+#endif
+        const bool useMoeCudaCache = hybridMoe || TryApplyMoeCudaCache(
             flattened, expertIndex, expertScore, moeWeights,
             outputDevice, MoeGateSwiglu);
         const std::string routedDevice = useMoeCudaCache
@@ -5209,10 +5217,12 @@ namespace fastllm {
         Data routed;
         Data &routedOutput = writeRoutedDirectly ? output : routed;
         Data w1, w2, w3, temporaryInput, temporaryOutput;
-        MergeMOE(flattened, expertIndex, expertScore,
-                 moeWeights, moeBiass,
-                 w1, w2, w3, temporaryInput, temporaryOutput,
-                 1.0f, routedOutput, deviceLayer);
+        if (!hybridMoe) {
+            MergeMOE(flattened, expertIndex, expertScore,
+                     moeWeights, moeBiass,
+                     w1, w2, w3, temporaryInput, temporaryOutput,
+                     1.0f, routedOutput, deviceLayer);
+        }
 #ifdef USE_CUDA
         FastllmCudaGraphMarkParallelJoin(deviceLayer);
 #endif
@@ -6865,7 +6875,13 @@ namespace fastllm {
             (moeCudaCache &&
              Qwen4CudaOrNumaOnlyDeviceMap(this->moeDeviceMap) &&
              Qwen4CudaOrNumaOnlyDeviceMap(this->layeredMoeDeviceMap));
+        // Host decisions and NUMA execution cannot be captured in the full
+        // backbone graph. MTP and prefill retain their existing paths.
+        const bool hybridMoe = Qwen4MtpDraftsPerStep() == 0 &&
+            !this->weights.empty() && !this->weights[0].empty() &&
+            FastllmCudaCanRunMoeHybrid(this->weights[0].data(), this->weights[0].size());
         if (!GetFastllmEnv().cudaGraph ||
+            hybridMoe ||
             !supportedStart ||
             hiddenStates.dims.size() != 3 || hiddenStates.dims[0] != 1 ||
             (hiddenStates.dims[1] != 1 && !mtpTargetGraph) ||

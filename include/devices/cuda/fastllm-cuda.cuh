@@ -1599,15 +1599,23 @@ bool FastllmCudaMoeCacheRequested();
 // With a registration callback, supported compact NVFP4 layouts snapshot only
 // original scales, then register and borrow pinned NUMA block-16 weights
 // (interleaved gate/up rows, ordinary down rows). The callback must not reenter
-// cache APIs. Failed registration leaves no published cache; the configured
-// MoE backend can still use the weights. Unsupported layouts keep a full
-// snapshot without invoking the callback. Borrowed shards must remain alive
+// cache APIs. FP8 snapshots retain the existing compact representation and
+// register CPU shards for hybrid execution. Failed registration leaves no
+// published cache; the configured MoE backend can still use the weights.
+// Unsupported layouts keep a full snapshot without invoking the callback.
+// Borrowed shards must remain alive
 // and unchanged until cache release.
 bool FastllmCudaPrepareMoeCache(
         const FastllmCudaMoeCacheLayer *layers, int layerCount,
         const std::function<void()> &registerNumaWeights = {});
 bool FastllmCudaCanRunMoeCache(
         fastllm::Data **weights, int weightsBatch);
+// Eager single-token FP32 activation decode. Weight-format adapters execute
+// disjoint CPU/CUDA subsets; scheduling and top-k reduction are shared.
+bool FastllmCudaCanRunMoeHybrid(fastllm::Data **weights, int weightsBatch);
+bool FastllmCudaMergeMOEHybrid(const fastllm::Data &input,
+        const fastllm::Data &index, const fastllm::Data &score,
+        fastllm::Data &output, fastllm::Data **weights, int weightsBatch, int layer);
 bool FastllmCudaCanRunMoeCacheSmallBatch(
         const fastllm::Data &input, const fastllm::Data &index,
         const fastllm::Data &score, fastllm::Data **weights,
@@ -1632,7 +1640,8 @@ struct FastllmCudaMoeFP8CacheView {
 bool FastllmCudaMoeFP8CacheCompute(
         const fastllm::Data &input, fastllm::Data &gateOutput,
         fastllm::Data &output, const FastllmCudaMoeFP8CacheView &view,
-        const int32_t *slots, const float *scores, int topk);
+        const int32_t *slots, const float *scores, int topk,
+        float *perExpert = nullptr);
 #endif
 bool FastllmCudaNVFP4E4M3GroupedMoeSupported(int device);
 bool FastllmCudaHalfMatMulFloatInt4Group128(const fastllm::Data &input, fastllm::Data &weight, const fastllm::Data &bias, fastllm::Data &output, int n, int m, int k);
