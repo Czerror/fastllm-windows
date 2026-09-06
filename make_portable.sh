@@ -283,7 +283,7 @@ data = {
     "cuda": {
         "major": 12,
         "minimum_compute_capability": "6.0",
-        "embedded_native_targets": ["60", "70", "75", "80", "89", "90", "100", "120"],
+        "embedded_native_targets": ["60", "70", "75", "80", "86", "89", "90", "100", "120"],
         "minimum_linux_driver": min_driver,
         "recommended_linux_driver": recommended_driver,
     },

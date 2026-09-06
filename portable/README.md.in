@@ -69,7 +69,7 @@ ftllm launch --no-browser
 - x86_64 Linux；面向 Ubuntu 22.04、24.04、26.04。
 - glibc 2.35 或更高。构建脚本会扫描包内每个 ELF，阻止高于该基线的产物。
 - NVIDIA GPU Compute Capability 6.0 或更高；当前 ftllm wheel 含
-  SM60、70、75、80、89、90、100、120 原生代码。未来高于 SM120 的新架构需重新构建 wheel。
+  SM60、70、75、80、86、89、90、100、120 原生代码。未来高于 SM120 的新架构需重新构建 wheel。
 - CUDA 12 minor-version compatibility 的最低 Linux 驱动为
   @MIN_NVIDIA_DRIVER@；推荐 @RECOMMENDED_NVIDIA_DRIVER@ 或更新版本。
 - 不需要安装 Python、pip、CUDA Toolkit、cuBLAS 或 NCCL。NVIDIA 内核/用户态驱动
