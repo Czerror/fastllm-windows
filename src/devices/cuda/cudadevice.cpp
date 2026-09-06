@@ -6090,6 +6090,7 @@ namespace fastllm {
                    weightType == DataType::FP8_E4M3_PERCHANNEL ||
                    weightType == DataType::NVFP4 ||
                    weightType == DataType::NVFP4_BLOCK_16 ||
+                   weightType == DataType::NVFP4_BLOCK_16_PLANAR ||
                    weightType == DataType::NVFP4_BLOCK_16_E8M0 ||
                    weightType == DataType::NVFP4_BLOCK_32_E8M0 ||
                    weightType == DataType::DATA_GGUF_FORMAT;
@@ -6108,6 +6109,7 @@ namespace fastllm {
                    weightType == DataType::FP8_E4M3_PERCHANNEL ||
                    weightType == DataType::NVFP4 ||
                    weightType == DataType::NVFP4_BLOCK_16 ||
+                   weightType == DataType::NVFP4_BLOCK_16_PLANAR ||
                    weightType == DataType::NVFP4_BLOCK_16_E8M0 ||
                    weightType == DataType::NVFP4_BLOCK_32_E8M0 ||
                    weightType == DataType::DATA_GGUF_FORMAT;
@@ -6122,6 +6124,7 @@ namespace fastllm {
                    weightType == DataType::FP8_E4M3_PERCHANNEL ||
                    weightType == DataType::NVFP4 ||
                    weightType == DataType::NVFP4_BLOCK_16 ||
+                   weightType == DataType::NVFP4_BLOCK_16_PLANAR ||
                    weightType == DataType::NVFP4_BLOCK_16_E8M0 ||
                    weightType == DataType::NVFP4_BLOCK_32_E8M0 ||
                    weightType == DataType::DATA_GGUF_FORMAT;
@@ -6177,7 +6180,8 @@ namespace fastllm {
                 FastllmCudaHalfMatMulFloatFP8E4M3PerChannel(input, weight, bias, output, n, m, k);
             } else if (weight.dataType == DataType::NVFP4) {
                 FastllmCudaHalfMatMulFloatNVFP4(input, weight, bias, output, n, m, k);
-            } else if (weight.dataType == DataType::NVFP4_BLOCK_16) {
+            } else if (weight.dataType == DataType::NVFP4_BLOCK_16 ||
+                       weight.dataType == DataType::NVFP4_BLOCK_16_PLANAR) {
                 FastllmCudaHalfMatMulFloatNVFP4Block16(input, weight, bias, output, n, m, k);
             } else if (weight.dataType == DataType::NVFP4_BLOCK_16_E8M0 ||
                        weight.dataType == DataType::NVFP4_BLOCK_32_E8M0) {
@@ -6214,7 +6218,8 @@ namespace fastllm {
                 FastllmCudaMatMulFloatFP8E4M3PerChannel(input, weight, bias, output, n, m, k);
             } else if (weight.dataType == DataType::NVFP4) {
                 FastllmCudaMatMulFloatNVFP4(input, weight, bias, output, n, m, k);
-            } else if (weight.dataType == DataType::NVFP4_BLOCK_16) {
+            } else if (weight.dataType == DataType::NVFP4_BLOCK_16 ||
+                       weight.dataType == DataType::NVFP4_BLOCK_16_PLANAR) {
                 FastllmCudaMatMulFloatNVFP4Block16(input, weight, bias, output, n, m, k);
             } else if (weight.dataType == DataType::NVFP4_BLOCK_16_E8M0 ||
                        weight.dataType == DataType::NVFP4_BLOCK_32_E8M0) {
@@ -6252,7 +6257,8 @@ namespace fastllm {
                 FastllmCudaBFloat16MatMulFP8E4M3PerChannel(input, weight, bias, output, n, m, k);
             } else if (weight.dataType == DataType::NVFP4) {
                 FastllmCudaBFloat16MatMulNVFP4(input, weight, bias, output, n, m, k);
-            } else if (weight.dataType == DataType::NVFP4_BLOCK_16) {
+            } else if (weight.dataType == DataType::NVFP4_BLOCK_16 ||
+                       weight.dataType == DataType::NVFP4_BLOCK_16_PLANAR) {
                 FastllmCudaBFloat16MatMulNVFP4Block16(input, weight, bias, output, n, m, k);
             } else if (weight.dataType == DataType::NVFP4_BLOCK_16_E8M0 ||
                        weight.dataType == DataType::NVFP4_BLOCK_32_E8M0) {
@@ -8406,6 +8412,7 @@ namespace fastllm {
                weight.dataType == DataType::FP8_E4M3_PERCHANNEL ||
                weight.dataType == DataType::NVFP4 ||
                weight.dataType == DataType::NVFP4_BLOCK_16 ||
+               weight.dataType == DataType::NVFP4_BLOCK_16_PLANAR ||
                weight.dataType == DataType::NVFP4_BLOCK_16_E8M0 ||
                weight.dataType == DataType::NVFP4_BLOCK_32_E8M0;
     }

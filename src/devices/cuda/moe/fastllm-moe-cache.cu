@@ -117,6 +117,7 @@ struct OffloadGroup {
     // The weight shards are borrowed from the model's prefill backend.
     std::vector<void *> numaPointers;
     int numaCount = 0;
+    int numaPlanarParts = 0;
     size_t hostScaleStride = 0;
     std::unordered_map<int, std::unique_ptr<DeviceCache> > deviceCaches;
     std::mutex mutex;
@@ -143,13 +144,24 @@ bool BindNumaWeights(OffloadGroup &group, const std::vector<fastllm::Data *> &we
     const int nodes = weights.front()->numasData.size();
     if (nodes <= 0 || (layout.inter * 2) % nodes != 0 ||
         layout.hidden % nodes != 0) return false;
+    const fastllm::DataType storageTypes[]{weights[0]->dataType, weights[1]->dataType};
+    int planarParts = 0;
+    for (int part = 0; part < 2; ++part) {
+        if (storageTypes[part] == fastllm::DataType::NVFP4_BLOCK_16_PLANAR) {
+            const int rows = part == 0 ? 2 * layout.inter : layout.hidden;
+            if ((rows / nodes) % fastllm::NVFP4_PLANAR_TILE_ROWS != 0) return false;
+            planarParts |= 1 << part;
+        } else if (storageTypes[part] != fastllm::DataType::NVFP4_BLOCK_16) {
+            return false;
+        }
+    }
     std::vector<void *> pointers;
     pointers.reserve(weights.size() * nodes);
     for (size_t index = 0; index < weights.size(); ++index) {
         const fastllm::Data &weight = *weights[index];
         const int rows = index % 2 == 0 ? 2 * layout.inter : layout.hidden;
         const int columns = index % 2 == 0 ? layout.hidden : layout.inter;
-        if (weight.dataType != fastllm::DataType::NVFP4_BLOCK_16 ||
+        if (weight.dataType != storageTypes[index % 2] ||
             weight.dims.size() != 2 || weight.dims[0] != rows || weight.dims[1] != columns ||
             weight.blockK != 1 || weight.blockM != 16 ||
             weight.dataDevice != fastllm::DataDevice::CPU ||
@@ -167,6 +179,7 @@ bool BindNumaWeights(OffloadGroup &group, const std::vector<fastllm::Data *> &we
         }
     }
     group.numaCount = nodes;
+    group.numaPlanarParts = planarParts;
     group.numaPointers = std::move(pointers);
     return true;
 }
@@ -966,10 +979,11 @@ bool LaunchNVFP4Cache(const fastllm::Data &input, fastllm::Data &gateOutput,
     return cudaGetLastError() == cudaSuccess;
 }
 
-// NUMA block-16 storage has 8 weight bytes followed by a float scale. The
-// prefill layout stays untouched; decode refill gathers only the weight bytes
-// and restores the original planar E4M3 scales kept in the smaller snapshot.
-__device__ uint32_t LoadNumaWeightWord(
+// Gather NUMA weight bytes and append original E4M3/global scales. Planar
+// 32-row tiles keep FP32 scales out of the weight loads crossing PCIe; legacy
+// inline shards remain supported when a matrix cannot form complete tiles.
+template<class Unit, int PlanarParts>
+__device__ Unit LoadNumaWeightWord(
         void *const *pointers, int nodes, int expert, int part,
         int rows, int columns, uint32_t offset) {
     const int rowBytes = columns / 2, rowsPerNode = rows / nodes;
@@ -981,17 +995,23 @@ __device__ uint32_t LoadNumaWeightWord(
     const int node = row / rowsPerNode;
     const uint8_t *source = static_cast<const uint8_t *>(
         pointers[(expert * 2 + part) * nodes + node]);
-    source += size_t(row % rowsPerNode) * (columns / 16) * 12 +
-              (columnByte / 8) * 12 + columnByte % 8;
-    return *reinterpret_cast<const uint32_t *>(source);
+    if (PlanarParts & (1 << part)) {
+        const int localRow = row % rowsPerNode;
+        source += fastllm::NVFP4PlanarWeightOffset(localRow, columns / 16) + columnByte;
+    } else {
+        source += size_t(row % rowsPerNode) * (columns / 16) * 12 +
+                  (columnByte / 8) * 12 + columnByte % 8;
+    }
+    return *reinterpret_cast<const Unit *>(source);
 }
 
+template<class Unit, int PlanarParts>
 __global__ void CopyNumaNVFP4Records(
         OffloadLayout layout, void *const *pointers, int nodes,
         const uint8_t *scales, size_t scaleStride, uint8_t *records,
         const int32_t *sourceIds, const int32_t *destinationIds,
         const int32_t *count) {
-    const uint32_t units = layout.recordStride / sizeof(uint32_t);
+    const uint32_t units = layout.recordStride / sizeof(Unit);
     const uint32_t gateWeightBytes = layout.inter * layout.hidden;
     const uint32_t downWeightBytes = gateWeightBytes / 2;
     const uint32_t gateScales = layout.gateBytes - gateWeightBytes;
@@ -1000,30 +1020,30 @@ __global__ void CopyNumaNVFP4Records(
     for (uint32_t flat = blockIdx.x * blockDim.x + threadIdx.x;
          flat < total; flat += gridDim.x * blockDim.x) {
         const uint32_t request = flat / units;
-        const uint32_t offset = (flat % units) * sizeof(uint32_t);
+        const uint32_t offset = (flat % units) * sizeof(Unit);
         const int expert = sourceIds[request];
         const uint8_t *sourceScales = scales + size_t(expert) * scaleStride;
-        uint32_t value = 0;
+        Unit value{};
         if (offset < gateWeightBytes) {
-            value = LoadNumaWeightWord(pointers, nodes, expert, 0,
+            value = LoadNumaWeightWord<Unit, PlanarParts>(pointers, nodes, expert, 0,
                 layout.inter * 2, layout.hidden, offset);
         } else if (offset < layout.gateBytes) {
-            value = *reinterpret_cast<const uint32_t *>(
+            value = *reinterpret_cast<const Unit *>(
                 sourceScales + offset - gateWeightBytes);
         } else if (offset >= layout.downOffset &&
                    offset < layout.downOffset + downWeightBytes) {
-            value = LoadNumaWeightWord(pointers, nodes, expert, 1,
+            value = LoadNumaWeightWord<Unit, PlanarParts>(pointers, nodes, expert, 1,
                 layout.hidden, layout.inter, offset - layout.downOffset);
         } else if (offset >= layout.downOffset + downWeightBytes &&
                    offset < layout.downOffset + layout.downBytes) {
-            value = *reinterpret_cast<const uint32_t *>(sourceScales + gateScales +
+            value = *reinterpret_cast<const Unit *>(sourceScales + gateScales +
                 offset - layout.downOffset - downWeightBytes);
         } else if (offset >= layout.scalesOffset &&
                    offset < layout.scalesOffset + 3 * sizeof(float)) {
-            value = *reinterpret_cast<const uint32_t *>(sourceScales + gateScales +
+            value = *reinterpret_cast<const Unit *>(sourceScales + gateScales +
                 downScales + offset - layout.scalesOffset);
         }
-        *reinterpret_cast<uint32_t *>(records +
+        *reinterpret_cast<Unit *>(records +
             size_t(destinationIds[request]) * layout.recordStride + offset) = value;
     }
 }
@@ -1347,12 +1367,24 @@ bool FastllmCudaMergeMOECache(
                 cache->routeSlots, cache->missExperts, cache->missSlots, cache->missCount,
                 cache->ensureThreads, cudaStreamPerThread)) return false;
         if (group->numaCount > 0) {
-            CopyNumaNVFP4Records<<<cache->copyLaunch.blocks, cache->copyLaunch.threads,
-                                  0, cudaStreamPerThread>>>(
-                layout,
-                cache->numaPointers + size_t(tableId) * layout.experts * 2 * group->numaCount,
-                group->numaCount, sourceTable, group->hostScaleStride, cache->records,
-                cache->missExperts, cache->missSlots, cache->missCount);
+            void *const *pointers = cache->numaPointers +
+                size_t(tableId) * layout.experts * 2 * group->numaCount;
+#define FASTLLM_NUMA_COPY(Unit, Parts) \
+            CopyNumaNVFP4Records<Unit, Parts><<<cache->copyLaunch.blocks, cache->copyLaunch.threads, \
+                0, cudaStreamPerThread>>>(layout, pointers, group->numaCount, sourceTable, \
+                group->hostScaleStride, cache->records, cache->missExperts, cache->missSlots, cache->missCount)
+            if (group->numaPlanarParts == 3 && layout.hidden % 32 == 0 && layout.inter % 32 == 0) {
+                FASTLLM_NUMA_COPY(uint4, 3);
+            } else if (group->numaPlanarParts == 3) {
+                FASTLLM_NUMA_COPY(uint32_t, 3);
+            } else if (group->numaPlanarParts == 1) {
+                FASTLLM_NUMA_COPY(uint32_t, 1);
+            } else if (group->numaPlanarParts == 2) {
+                FASTLLM_NUMA_COPY(uint32_t, 2);
+            } else {
+                FASTLLM_NUMA_COPY(uint32_t, 0);
+            }
+#undef FASTLLM_NUMA_COPY
         } else if (!fastllm::cuda::CopyRecords(
                 {sourceTable, cache->records, layout.recordStride,
                  layout.recordStride, layout.recordStride},

@@ -47,7 +47,11 @@ not registered with this cache and retain their separately configured placement.
 For supported compact NVFP4 experts assigned entirely to NUMA, preparation
 copies only original E4M3/global scales, invokes the model's NUMA registration
 callback, then borrows its pinned block-16 shards. Refill restores compact GPU
-records without rounding; the CPU prefill layout and kernels stay unchanged.
+records without rounding. With the cache enabled, complete 32-row tiles place
+packed weights before their FP32 scale plane (`NVFP4_BLOCK_16_PLANAR`), using
+exactly the same storage size. CPU kernels and CUDA hybrid-prefill Linear read
+this layout directly with the existing arithmetic and scratch buffers. Shards
+without complete tiles keep the inline layout; gate/up and down may differ.
 The cache is published only after all shards validate. Failure or an exception
 releases the temporary snapshot; unsupported layouts retain a full snapshot.
 Repeated preparation reuses the group, preserving graph source addresses.
@@ -55,9 +59,12 @@ Borrowed weights must remain alive until the model releases the cache.
 
 For Qwen3.8-Flash-Next-NVFP4 this removes about 56.25 GiB of duplicate weights,
 retaining about 7.03 GiB of scales. No full snapshot is allocated during loading,
-though individual tensor conversions still need temporary storage. Refill must
-skip NUMA's FP32 scales, which can reduce decode throughput; measure this
-tradeoff at the intended GPU-cache size.
+though individual tensor conversions still need temporary storage. Planar
+weight ranges let refill use contiguous 16-byte loads without transferring
+inline FP32 scales; narrow or inline shards use 4-byte loads. Cache capacity,
+LRU replacement and configuration are unchanged. NUMA warmup also returns
+freed allocator pages on the final pass when all weights are already registered;
+this cleanup runs during warmup, outside request execution.
 
 For a native FP8 checkpoint, keep `--dtype auto` and use CUDA compute with
 `--moe_device numa --moe_cuda_cache 5g`. The same byte budget holds fewer FP8
@@ -192,7 +199,11 @@ and scores, eviction and both eager execution and graph replay.
 Shared-NUMA NVFP4 cases compare gate/output bytes with a full snapshot across
 NUMA shard counts, verifier sizes, eviction and eager/graph replay, including a
 2560-by-640 expert. They cover distinct gate/up scales, invalid shards,
-registration exceptions, retries and reuse of an already-active cache.
+registration exceptions, retries and reuse of an already-active cache. Planar
+and mixed-layout shards use the same full-snapshot oracle. CUDA Linear tests
+compare FP32/FP16/BF16 outputs bitwise with the inline layout, including bias,
+odd widths and GEMV/GEMM batch sizes. `nvfp4_planar_test` checks equal storage,
+packing and CPU outputs with and without AVX512-BF16 across row-tile boundaries.
 
 Architecture compilation and execution are distinct checks: compiling these
 tests for another SM does not establish its runtime correctness or performance.

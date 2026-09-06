@@ -719,6 +719,15 @@ namespace fastllm {
             fflush(stdout);
         }
 
+#if defined(__linux__) && defined(__GLIBC__)
+        // Return freed source-weight pages even on the post-forward warmup
+        // pass, when every NUMA weight is already registered. This keeps
+        // allocator-retained pages out of steady-state RSS without trimming
+        // during inference.
+        if (!pending.empty() || alreadyRegisteredCount > 0) {
+            malloc_trim(0);
+        }
+#endif
         if (pending.empty()) {
             return;
         }
@@ -726,12 +735,6 @@ namespace fastllm {
         printf("[Fastllm] AutoWarmup NUMA MoE: registering %zu expert weights (%.2f GiB).\n",
                pending.size(), totalBytes / 1024.0 / 1024.0 / 1024.0);
         fflush(stdout);
-#if defined(__linux__) && defined(__GLIBC__)
-        // PrepareMoeWeights may just have released thousands of source gate/up
-        // buffers. Return those pages before allocating the NUMA copies, then
-        // trim periodically so the allocator cache does not inflate warmup RSS.
-        malloc_trim(0);
-#endif
         int lastProgress = -1;
         for (int i = 0; i < (int)pending.size(); i++) {
             RegisterNumas(pending[i].data, pending[i].weightType);

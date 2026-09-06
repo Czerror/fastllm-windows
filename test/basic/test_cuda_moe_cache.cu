@@ -1,5 +1,7 @@
 #include "fastllm.h"
 #include "fastllm-cuda.cuh"
+#include "devices/cpu/cpudevice.h"
+#include "devices/cuda/cudadevice.h"
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
 #include <algorithm>
@@ -303,7 +305,7 @@ static void CompareFP8(fastllm::DataType dtype, fastllm::DataType weightType,
 
 template<class T>
 static void CompareNumaNVFP4(fastllm::DataType dtype, int nodes, int batch,
-                            int hidden = 128, int inter = 64) {
+                            int hidden = 128, int inter = 64, bool planar = false) {
     constexpr int experts = 24, topk = 7, tables = 2;
     std::mt19937 rng(171);
     std::vector<std::unique_ptr<fastllm::Data>> owned[3];
@@ -342,18 +344,20 @@ static void CompareNumaNVFP4(fastllm::DataType dtype, int nodes, int batch,
             for (size_t i = 0; i < owned[backend].size(); ++i) {
                 auto &w = *owned[backend][i];
                 const int rows = w.dims[0], cols = w.dims[1];
+                const bool usePlanar = planar && (rows / nodes) % fastllm::NVFP4_PLANAR_TILE_ROWS == 0;
                 const size_t bytes = fastllm::GetDataBytes(fastllm::DataType::NVFP4_BLOCK_16, rows / nodes, cols);
                 for (int node = 0; node < nodes; ++node) {
                     void *ptr = nullptr;
                     Check(cudaHostAlloc(&ptr, bytes, cudaHostAllocMapped | cudaHostAllocPortable));
                     fastllm::PackCompactE4M3NVFP4Block16Rows(rows, cols, w.cpuData,
                         fastllm::GetNVFP4ScaleData(w), w.scales, 1, 16,
-                        static_cast<uint8_t *>(ptr), node * (rows / nodes), rows / nodes, i % 2 == 0);
+                        static_cast<uint8_t *>(ptr), node * (rows / nodes), rows / nodes, i % 2 == 0, usePlanar);
                     shards.push_back(ptr);
                     w.numasData.push_back(static_cast<uint8_t *>(ptr));
                 }
                 w.FreeSpace();
-                w.dataType = fastllm::DataType::NVFP4_BLOCK_16;
+                w.dataType = usePlanar ? fastllm::DataType::NVFP4_BLOCK_16_PLANAR
+                                    : fastllm::DataType::NVFP4_BLOCK_16;
                 w.isPinned = true;
                 w.UpdateUnitSize();
             }
@@ -449,12 +453,60 @@ static void CompareNumaNVFP4(fastllm::DataType dtype, int nodes, int batch,
     }
     for (void *ptr : shards) Check(cudaFreeHost(ptr));
     fastllm::SetMoeCudaCacheBytes(0);
-    std::printf("PASS NVFP4 shared NUMA dtype=%d nodes=%d batch=%d hidden=%d inter=%d: bitwise gate/output, graph, eviction, validation\n",
-                int(dtype), nodes, batch, hidden, inter);
+    std::printf("PASS NVFP4 shared NUMA dtype=%d nodes=%d batch=%d hidden=%d inter=%d planar=%d: bitwise gate/output, graph, eviction, validation\n",
+                int(dtype), nodes, batch, hidden, inter, planar);
+}
+
+template <class T>
+static void ComparePlanarLinear(fastllm::DataType dtype, int columns, int batch) {
+    using namespace fastllm;
+    constexpr int rows = 64;
+    std::mt19937 rng(819);
+    std::vector<uint8_t> packed(GetNVFP4WeightBytes(rows, columns));
+    std::vector<uint8_t> scales(rows * ((columns + 15) / 16));
+    for (auto &v : packed) v = rng();
+    for (auto &v : scales) v = 0x28 + rng() % 24;
+    const std::vector<float> globals{0.73f, 1.31f};
+    Data weights[2]{{NVFP4_BLOCK_16, {rows, columns}},
+                    {NVFP4_BLOCK_16_PLANAR, {rows, columns}}};
+    Data input(dtype, {batch, columns}), bias(FLOAT32, {rows});
+    AllocateGpu(input); AllocateGpu(bias);
+    std::vector<T> activation(batch * columns);
+    for (auto &v : activation) v = T((int(rng() % 31) - 15) / 32.0f);
+    std::vector<float> biasValues(rows);
+    for (auto &v : biasValues) v = (int(rng() % 17) - 8) / 32.0f;
+    Check(cudaMemcpy(input.cudaData, activation.data(), activation.size() * sizeof(T), cudaMemcpyHostToDevice));
+    Check(cudaMemcpy(bias.cudaData, biasValues.data(), rows * sizeof(float), cudaMemcpyHostToDevice));
+    Data output[2]{{dtype, {batch, rows}}, {dtype, {batch, rows}}};
+    for (int layout = 0; layout < 2; ++layout) {
+        auto &weight = weights[layout];
+        Require(IsCudaLinearDataTypeSupported(dtype, weight.dataType, FLOAT32),
+                "planar CUDA Linear eligibility rejected");
+        std::vector<uint8_t> bytes(weight.GetBytes());
+        PackCompactE4M3NVFP4Block16Rows(rows, columns, packed.data(), scales.data(), globals,
+            1, 16, bytes.data(), 0, rows, true, layout != 0);
+        AllocateGpu(weight); AllocateGpu(output[layout]);
+        Check(cudaMemcpy(weight.cudaData, bytes.data(), bytes.size(), cudaMemcpyHostToDevice));
+        DoCudaLinear(input, weight, bias, output[layout]);
+    }
+    Check(cudaStreamSynchronize(cudaStreamPerThread));
+    std::vector<uint8_t> expected(output[0].GetBytes()), actual(expected.size());
+    Check(cudaMemcpy(expected.data(), output[0].cudaData, expected.size(), cudaMemcpyDeviceToHost));
+    Check(cudaMemcpy(actual.data(), output[1].cudaData, actual.size(), cudaMemcpyDeviceToHost));
+    Require(expected == actual, "planar CUDA Linear changed output bits");
+    std::printf("PASS planar CUDA Linear dtype=%d columns=%d batch=%d: bitwise outputs with bias\n",
+                int(dtype), columns, batch);
 }
 
 int main() {
     try {
+        for (int columns : {17, 128, 640, 4096}) {
+            for (int batch : {1, 4, 31, 32, 65}) {
+                ComparePlanarLinear<float>(fastllm::DataType::FLOAT32, columns, batch);
+                ComparePlanarLinear<half>(fastllm::DataType::FLOAT16, columns, batch);
+                ComparePlanarLinear<__nv_bfloat16>(fastllm::DataType::BFLOAT16, columns, batch);
+            }
+        }
         for (bool wide : {false, true}) {
             int hidden = wide ? 128 : 19, inter = wide ? 128 : 23;
             Run<float>(fastllm::DataType::FLOAT32, hidden, inter);
@@ -491,9 +543,16 @@ int main() {
                 CompareNumaNVFP4<float>(fastllm::DataType::FLOAT32, nodes, batch);
                 CompareNumaNVFP4<half>(fastllm::DataType::FLOAT16, nodes, batch);
                 CompareNumaNVFP4<__nv_bfloat16>(fastllm::DataType::BFLOAT16, nodes, batch);
+                CompareNumaNVFP4<float>(fastllm::DataType::FLOAT32, nodes, batch, 128, 64, true);
+                CompareNumaNVFP4<half>(fastllm::DataType::FLOAT16, nodes, batch, 128, 64, true);
+                CompareNumaNVFP4<__nv_bfloat16>(fastllm::DataType::BFLOAT16, nodes, batch, 128, 64, true);
             }
         }
         CompareNumaNVFP4<half>(fastllm::DataType::FLOAT16, 4, 4, 2560, 640);
+        CompareNumaNVFP4<half>(fastllm::DataType::FLOAT16, 4, 4, 2560, 640, true);
+        CompareNumaNVFP4<half>(fastllm::DataType::FLOAT16, 1, 4, 128, 16, true);
+        CompareNumaNVFP4<half>(fastllm::DataType::FLOAT16, 2, 4, 32, 64, true);
+        CompareNumaNVFP4<half>(fastllm::DataType::FLOAT16, 2, 4, 128, 16, true);
         std::puts("ALL_PASS"); return 0;
     } catch (const std::exception &e) {
         std::fprintf(stderr, "FAIL: %s\n", e.what()); return 1;
