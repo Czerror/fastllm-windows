@@ -17,6 +17,9 @@
 
 #ifdef USE_CUDA
 #include "fastllm-cuda.cuh"
+#ifndef USE_ROCM
+#include "devices/cuda/fastllm-cuda-moe-policy.h"
+#endif
 #endif
 #ifdef USE_TFACC
 #include "fastllm-tfacc.h"
@@ -6879,7 +6882,7 @@ namespace fastllm {
         // backbone graph. MTP and prefill retain their existing paths.
         const bool hybridMoe = Qwen4MtpDraftsPerStep() == 0 &&
             !this->weights.empty() && !this->weights[0].empty() &&
-            FastllmCudaCanRunMoeHybrid(this->weights[0].data(), this->weights[0].size());
+            FastllmCudaUseMoeHybrid(this->weights[0].data(), this->weights[0].size());
         if (!GetFastllmEnv().cudaGraph ||
             hybridMoe ||
             !supportedStart ||
@@ -9060,11 +9063,24 @@ namespace fastllm {
                 requestState->mtpState->proposals.clear();
                 requestState->mtpState->targetCheckpointPrepared = false;
             }
-            return ForwardTarget(
+#if defined(USE_CUDA) && !defined(USE_ROCM)
+            void *decodePolicy = nullptr;
+            if (Qwen4MtpDraftsPerStep() == 0 && inputIds.dims[1] == 1 &&
+                Qwen4CudaOnlyDeviceMap(this->deviceMap) &&
+                !this->weights.empty() && !this->weights[0].empty()) {
+                decodePolicy = FastllmCudaBeginMoeDecode(
+                    this->weights[0].data(), this->weights[0].size(), this->num_experts_per_tok);
+            }
+#endif
+            auto result = ForwardTarget(
                 batch, inputIds, attentionMask, positionIds,
                 pastKeyValues, generationConfig, lastTokens, retLogits,
                 nullptr, nullptr, nullptr, nullptr,
                 true, true, false);
+#if defined(USE_CUDA) && !defined(USE_ROCM)
+            FastllmCudaEndMoeDecode(decodePolicy);
+#endif
+            return result;
         }
 
         if (requestState->mtpState == nullptr) {

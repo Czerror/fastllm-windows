@@ -754,10 +754,45 @@ static void CheckDecodeScheduler() {
     Require(cold.us < 100, "isolated stall poisoned estimate");
 }
 
+static void CheckDecodePolicy() {
+    auto routeStep = [](fastllm::MoeDecodePolicy &policy, int step) {
+        int ids[10];
+        for (int i = 0; i < 10; ++i) ids[i] = (step % 2) * 10 + i;
+        for (int layer = 0; layer < 4; ++layer) policy.ObserveRoutes(layer * 128, ids, 10);
+        policy.ObserveStep(1000, 20, 20, 4, 10);
+    };
+    // The same access stream fits in the large cache and thrashes the small
+    // one. CPU-selected routes must contribute to the reuse estimate too.
+    fastllm::MoeDecodePolicy small(512, 16), large(512, 128);
+    for (int step = 0; step < 256; ++step) routeStep(small, step);
+    Require(!small.UseGpu() && small.gpuSteps == 0,
+            "small cache paid for an unprofitable GPU trial");
+    for (int step = 0; step < 32; ++step) routeStep(large, step);
+    Require(large.UseGpu() && large.MissRate() < 0.1,
+            "large cache did not explore reuse of CPU-selected experts");
+    for (int step = 0; step < 32; ++step) large.ObserveStep(10000, 20, 20, 4, 10);
+    Require(large.GetMode() == fastllm::MoeDecodePolicy::Mode::FillGpu,
+            "a still-cold GPU cache was judged before the bounded warmup");
+    for (int step = 0; step < 32; ++step) large.ObserveStep(600, 20, 20, 4, 10);
+    Require(large.GetMode() == fastllm::MoeDecodePolicy::Mode::Gpu,
+            "cold cache/graph creation hid a faster steady GPU path");
+    for (int step = 0; step < 96 && large.UseGpu(); ++step)
+        large.ObserveStep(2000, 20, 20, 4, 10);
+    Require(!large.UseGpu(), "GPU slowdown did not restore hybrid scheduling");
+
+    fastllm::MoeDecodePolicy slower(512, 128);
+    for (int step = 0; step < 32; ++step) routeStep(slower, step);
+    for (int step = 0; step < 160; ++step) slower.ObserveStep(1100, 20, 20, 4, 10);
+    Require(!slower.UseGpu(), "a high hit rate overrode slower whole-step timing");
+    for (int step = 0; step < 256; ++step) routeStep(slower, step);
+    Require(!slower.UseGpu(), "failed trial was immediately repeated");
+}
+
 int main() {
     try {
         CheckSharedByteViews();
         CheckDecodeScheduler();
+        CheckDecodePolicy();
         for (int columns : {17, 128, 640, 4096}) {
             for (int batch : {1, 4, 31, 32, 65}) {
                 ComparePlanarLinear<float>(fastllm::DataType::FLOAT32, columns, batch);

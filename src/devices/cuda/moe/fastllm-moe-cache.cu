@@ -15,6 +15,7 @@
 #include "fastllm.h"
 #include "utils.h"
 #include "devices/moe_decode_scheduler.h"
+#include "devices/cuda/fastllm-cuda-moe-policy.h"
 #ifdef USE_NUMAS
 #include "devices/numas/numasdevice.h"
 #endif
@@ -110,6 +111,14 @@ struct HybridWorkspace {
     }
 };
 
+struct DecodePolicyState {
+    fastllm::MoeDecodePolicy policy;
+    int layers, topk;
+    double startUs = 0;
+    DecodePolicyState(int records, int slots, int layers, int topk)
+        : policy(records, slots), layers(layers), topk(topk) {}
+};
+
 struct DeviceCache {
     bool attempted = false;
     bool ready = false;
@@ -133,6 +142,7 @@ struct DeviceCache {
     void **fp8Pointers = nullptr;
     void **numaPointers = nullptr;
     std::unique_ptr<HybridWorkspace> hybrid;
+    std::unique_ptr<DecodePolicyState> decode;
 };
 
 struct OffloadGroup {
@@ -431,6 +441,7 @@ void ReleaseDeviceCache(DeviceCache &cache) {
         cudaSetDevice(cache.device);
     }
     cache.hybrid.reset();
+    cache.decode.reset();
     cudaFree(cache.records);
     cudaFree(cache.keyToSlot);
     cudaFree(cache.slotKeys);
@@ -473,6 +484,11 @@ void PrintDeviceCacheStats(const DeviceCache &cache, fastllm::DataType weightTyp
         "[Fastllm] %s GPU expert cache stats cuda:%d: "
         "%llu hits, %llu misses, %.3f%% hit rate, %d slots.\n",
         FormatName(weightType), cache.device, hits, misses, hitRate, cache.slots);
+    if (cache.decode) {
+        const auto &policy = cache.decode->policy;
+        std::fprintf(stderr, "[Fastllm] MoE decode policy: %llu hybrid steps, %llu GPU steps.\n",
+            (unsigned long long)policy.hybridSteps, (unsigned long long)policy.gpuSteps);
+    }
 }
 
 bool AllocateOne(void **pointer, size_t bytes) {
@@ -649,6 +665,18 @@ OffloadGroup *FindGroup(fastllm::Data **weights, int weightsBatch,
         *tableId = it->second.layer;
     }
     return group;
+}
+
+OffloadGroup *FindHybridGroup(fastllm::Data **weights, int weightsBatch) {
+#ifdef USE_NUMAS
+    if (!FastllmCudaMoeCacheRequested()) return nullptr;
+    auto *group = FindGroup(weights, weightsBatch);
+    if (!group || !group->cpuDecodeReady) return nullptr;
+    const auto *backend = FindExpertCacheBackend(group->layout.weightType);
+    return backend && backend->supportsHybrid(group->layout) ? group : nullptr;
+#else
+    return nullptr;
+#endif
 }
 
 template <typename T>
@@ -1284,15 +1312,14 @@ bool FastllmCudaCanRunMoeCache(
 }
 
 bool FastllmCudaCanRunMoeHybrid(fastllm::Data **weights, int weightsBatch) {
-#ifdef USE_NUMAS
-    if (!FastllmCudaMoeCacheRequested()) return false;
-    const auto *group = FindGroup(weights, weightsBatch);
-    if (group == nullptr || !group->cpuDecodeReady) return false;
-    const auto *backend = FindExpertCacheBackend(group->layout.weightType);
-    return backend && backend->supportsHybrid(group->layout);
-#else
-    return false;
-#endif
+    return FindHybridGroup(weights, weightsBatch) != nullptr;
+}
+
+bool FastllmCudaUseMoeHybrid(fastllm::Data **weights, int weightsBatch) {
+    auto *group = FindHybridGroup(weights, weightsBatch);
+    if (!group) return false;
+    auto *cache = GetDeviceCache(*group);
+    return cache && (!cache->decode || !cache->decode->policy.UseGpu());
 }
 
 bool FastllmCudaCanRunMoeCacheSmallBatch(
@@ -1480,6 +1507,40 @@ double HybridNowUs() {
 
 } // namespace
 
+void *FastllmCudaBeginMoeDecode(fastllm::Data **weights, int weightsBatch, int topk) {
+    if (topk < 1 || topk > kMaxTopK) return nullptr;
+    auto *group = FindHybridGroup(weights, weightsBatch);
+    if (!group) return nullptr;
+    auto *cache = GetDeviceCache(*group);
+    if (!cache) return nullptr;
+    if (!cache->decode) {
+        cache->decode = std::make_unique<DecodePolicyState>(
+            group->totalRecords, cache->slots, group->tableKeys.size(), topk);
+    }
+    cache->decode->startUs = HybridNowUs();
+    return cache;
+}
+
+void FastllmCudaEndMoeDecode(void *state) {
+    if (!state) return;
+    auto &cache = *static_cast<DeviceCache *>(state);
+    auto &decode = *cache.decode;
+    auto &policy = decode.policy;
+    const auto before = policy.GetMode();
+    const auto *scheduler = cache.hybrid ? &cache.hybrid->scheduler : nullptr;
+    policy.ObserveStep(HybridNowUs() - decode.startUs,
+        scheduler ? scheduler->refill.us : 0,
+        scheduler ? scheduler->compute[decode.topk].us : 0, decode.layers, decode.topk);
+    const auto after = policy.GetMode();
+    // Report completed decisions; warmup estimates are intentionally discarded.
+    if (before != after && (after == fastllm::MoeDecodePolicy::Mode::Hybrid ||
+                            after == fastllm::MoeDecodePolicy::Mode::Gpu)) {
+        std::fprintf(stderr, "[Fastllm] MoE decode policy -> %s: hybrid %.3f ms, GPU %.3f ms, "
+            "estimated full-route miss rate %.3f%%.\n", policy.UseGpu() ? "GPU cache" : "hybrid",
+            policy.HybridUs() / 1000, policy.GpuUs() / 1000, policy.MissRate() * 100);
+    }
+}
+
 bool FastllmCudaMergeMOEHybrid(const fastllm::Data &input,
         const fastllm::Data &index, const fastllm::Data &score,
         fastllm::Data &output, fastllm::Data **weights, int weightsBatch, int layer) {
@@ -1494,6 +1555,7 @@ bool FastllmCudaMergeMOEHybrid(const fastllm::Data &input,
     int tableId;
     auto *group = FindGroup(weights, weightsBatch, &tableId);
     auto *cache = GetDeviceCache(*group);
+    if (cache->decode && cache->decode->policy.UseGpu()) return false;
     const auto &layout = group->layout;
     const int hidden = layout.hidden, topk = index.dims[1];
     if (!cache->hybrid) {
@@ -1546,6 +1608,7 @@ bool FastllmCudaMergeMOEHybrid(const fastllm::Data &input,
         hits += resident[r] >= 0;
         gpuIndices[r] = -1;
     }
+    if (cache->decode) cache->decode->policy.ObserveRoutes(tableId * layout.experts, hostIndices, topk);
     int next = 0;
     for (int r = 0; r < topk; ++r) if (resident[r] >= 0) order[next++] = r;
     for (int r = 0; r < topk; ++r) if (resident[r] < 0) order[next++] = r;
