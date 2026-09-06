@@ -24,6 +24,7 @@
 #define GGML_COMMON_DECL_CUDA
 #define GGML_COMMON_IMPL_CUDA
 #include "gguf.h"
+#include "fastllm-gguf-dequant.cuh"
 
 static __device__ __forceinline__ float warp_reduce_max(float x) {
 #pragma unroll
@@ -2412,13 +2413,6 @@ static void dequantize_row_q6_K_r4_cuda(const void * vx, dst_t * y, const int64_
     dequantize_block_q6_K_r4<<<nblocks, 128, 0, stream>>>(vx, y, n_per_row);
 }
 
-template<typename T>
-using to_t_cuda_t = void (*)(const void * __restrict__ x, T * __restrict__ y, int64_t nrows, int64_t n_per_row, cudaStream_t stream);
-
-typedef to_t_cuda_t<float> to_fp32_cuda_t;
-typedef to_t_cuda_t<half> to_fp16_cuda_t;
-typedef to_t_cuda_t<__nv_bfloat16> to_bf16_cuda_t;
-
 static bool FastllmGGUFIsKQuantType(ggml_type type) {
     return type == GGML_TYPE_Q2_K || type == GGML_TYPE_Q4_K ||
            type == GGML_TYPE_Q5_K || type == GGML_TYPE_Q6_K ||
@@ -2565,20 +2559,6 @@ static cublasStatus_t FastllmGGUFSgemmFloat(
             alpha, A, lda, B, ldb, beta, C, ldc);
 }
 
-static bool FastllmGGUFIsR4Type(ggml_type type) {
-    return type == GGML_TYPE_Q2_K_R4 || type == GGML_TYPE_Q4_K_R4 ||
-           type == GGML_TYPE_Q5_K_R4 || type == GGML_TYPE_Q6_K_R4;
-}
-
-static size_t FastllmGGUFAlignBytes(size_t bytes) {
-    const size_t align = 256;
-    return ((bytes + align - 1) / align) * align;
-}
-
-static const char *FastllmGGUFWeightDisplayName(const fastllm::Data &weight) {
-    return weight.name.empty() ? "(unnamed)" : weight.name.c_str();
-}
-
 static void *FastllmGGUFGetDequantWorkspace(size_t *workspaceBytes,
                                             const fastllm::Data &weight,
                                             const char *context) {
@@ -2590,55 +2570,6 @@ static void *FastllmGGUFGetDequantWorkspace(size_t *workspaceBytes,
                 FastllmGGUFWeightDisplayName(weight) + ".\n");
     }
     return workspace;
-}
-
-static int FastllmGGUFDequantRowGroup(ggml_type type) {
-    return FastllmGGUFIsR4Type(type) ? 4 : 1;
-}
-
-static int FastllmGGUFCalcChunkRows(size_t workspaceBytes, int m, int k,
-                                    size_t bytesPerElement, size_t extraBytesPerElement,
-                                    int rowGroup,
-                                    const fastllm::Data &weight,
-                                    const char *context) {
-    if (m <= 0 || k <= 0) {
-        return 0;
-    }
-    if (rowGroup > 1 && k % rowGroup != 0) {
-        fastllm::ErrorInFastLLM(
-                "Fastllm GGUF CUDA " + std::string(context) +
-                " requires output rows aligned to " + std::to_string(rowGroup) +
-                " for R4 dequant, got rows = " + std::to_string(k) +
-                ", weight = " + FastllmGGUFWeightDisplayName(weight) + ".\n");
-    }
-
-    size_t bytesPerRow = (size_t)m * (bytesPerElement + extraBytesPerElement);
-    int rows = bytesPerRow == 0 ? 0 : (int)std::min<size_t>((size_t)k, workspaceBytes / bytesPerRow);
-    if (rowGroup > 1) {
-        rows = (rows / rowGroup) * rowGroup;
-    }
-
-    while (rows > 0) {
-        size_t mainBytes = (size_t)rows * m * bytesPerElement;
-        size_t totalBytes = FastllmGGUFAlignBytes(mainBytes) +
-                            (size_t)rows * m * extraBytesPerElement;
-        if (totalBytes <= workspaceBytes) {
-            return rows;
-        }
-        rows -= rowGroup;
-    }
-
-    size_t minRows = rowGroup;
-    size_t minMainBytes = minRows * (size_t)m * bytesPerElement;
-    size_t minBytes = FastllmGGUFAlignBytes(minMainBytes) +
-                      minRows * (size_t)m * extraBytesPerElement;
-    fastllm::ErrorInFastLLM(
-            "Fastllm GGUF CUDA " + std::string(context) +
-            " dequant workspace is too small, need at least " +
-            std::to_string(minBytes) + " bytes, got " +
-            std::to_string(workspaceBytes) + " bytes, weight = " +
-            FastllmGGUFWeightDisplayName(weight) + ".\n");
-    return 0;
 }
 
 to_fp32_cuda_t ggml_get_to_fp32_cuda(ggml_type type) {
@@ -3088,40 +3019,13 @@ bool FastllmCudaHalfMatMulGGUF(const fastllm::Data &input, fastllm::Data &weight
     if (!usedMmq && !usedExtendedMmvq &&
         (forceDequant || n > MMVQ_MAX_BATCH_SIZE || !has_vec_dot) &&
         dequant != nullptr) {
-        auto fastllmCublasHandle = getFastllmCublasHandle();
-
-        size_t needBytes = (size_t)k * m * sizeof(half);
-        size_t wsBytes = 0;
-        bool ownScratch = false;
-        half *cudaFp16Weight = (half *) FastllmBorrowDequantScratch(needBytes, &wsBytes, &ownScratch);
-        if (!ownScratch && wsBytes < needBytes) {
-            cudaFp16Weight = (half *) FastllmCudaMalloc(needBytes);
-            ownScratch = true;
-        }
-
-        __half h_alpha = __float2half_rn(1.0), h_beta = __float2half_rn(0.0);
-        cudaDataType_t AType = CUDA_R_16F, BType = CUDA_R_16F, CType = CUDA_R_16F, ComputeType = CUDA_R_16F;
-        cublasStatus_t status;
-
-        int len = k * m;
-        int threadPerBlock = std::min(256, len);
-        dequant((const char *)weight.cudaData, cudaFp16Weight, k, m, stream);
-
-        status = cublasGemmEx(fastllmCublasHandle,
-                                CUBLAS_OP_T, CUBLAS_OP_N,
-                                k, n, m,
-                                &h_alpha, cudaFp16Weight, AType,
-                                m, cudaInput, BType,
-                                m, &h_beta,
-                                cudaOutput, CType,
-                                k, ComputeType, static_cast<cublasGemmAlgo_t>(CUBLAS_GEMM_DEFAULT));
-        if (status != CUBLAS_STATUS_SUCCESS) {
-            printf("Error: cublas error.\n");
-            throw("cublas error");
-            exit(0);
-        }
-
-        FastllmReleaseDequantScratch(cudaFp16Weight, ownScratch);
+        auto handle = getFastllmCublasHandle();
+        size_t workspaceBytes = 0;
+        void *workspace = FastllmGGUFGetDequantWorkspace(
+                &workspaceBytes, weight, "FP16 GEMM");
+        FastllmGGUFDequantGemm(
+                cudaInput, weight, cudaOutput, n, m, k,
+                workspace, workspaceBytes, dequant, handle, stream);
     } else if (!usedMmq && !usedExtendedMmvq) {
         q8Input = (block_q8_1*)FastllmCudaMalloc(n * m * sizeof(half));
         quantize_row_q8_1_cuda (
@@ -3567,37 +3471,13 @@ bool FastllmCudaBFloat16MatMulGGUF(const fastllm::Data &input, fastllm::Data &we
     if (!usedMmq && !usedExtendedMmvq &&
         (forceDequant || n > MMVQ_MAX_BATCH_SIZE || !has_vec_dot) &&
         dequant != nullptr) {
-        auto fastllmCublasHandle = getFastllmCublasHandle();
-
-        size_t needBytes = (size_t)k * m * sizeof(__nv_bfloat16);
-        size_t wsBytes = 0;
-        bool ownScratch = false;
-        __nv_bfloat16 *cudaBf16Weight = (__nv_bfloat16 *) FastllmBorrowDequantScratch(needBytes, &wsBytes, &ownScratch);
-        if (!ownScratch && wsBytes < needBytes) {
-            cudaBf16Weight = (__nv_bfloat16 *) FastllmCudaMalloc(needBytes);
-            ownScratch = true;
-        }
-        dequant((const char *)weight.cudaData, cudaBf16Weight, k, m, stream);
-
-        float h_alpha = 1.0f, h_beta = 0.0f;
-        cudaDataType_t AType = CUDA_R_16BF, BType = CUDA_R_16BF, CType = CUDA_R_16BF, ComputeType = CUDA_R_32F;
-        cublasStatus_t status;
-
-        status = cublasGemmEx(fastllmCublasHandle,
-                              CUBLAS_OP_T, CUBLAS_OP_N,
-                              k, n, m,
-                              &h_alpha, cudaBf16Weight, AType,
-                              m, cudaInput, BType,
-                              m, &h_beta,
-                              cudaOutput, CType,
-                              k, ComputeType, static_cast<cublasGemmAlgo_t>(CUBLAS_GEMM_DEFAULT));
-        if (status != CUBLAS_STATUS_SUCCESS) {
-            printf("Error: cublas error (BFloat16MatMulGGUF).\n");
-            throw("cublas error");
-            exit(0);
-        }
-
-        FastllmReleaseDequantScratch(cudaBf16Weight, ownScratch);
+        auto handle = getFastllmCublasHandle();
+        size_t workspaceBytes = 0;
+        void *workspace = FastllmGGUFGetDequantWorkspace(
+                &workspaceBytes, weight, "BF16 GEMM");
+        FastllmGGUFDequantGemm(
+                cudaInput, weight, cudaOutput, n, m, k,
+                workspace, workspaceBytes, dequant, handle, stream);
     } else if (!usedMmq && !usedExtendedMmvq) {
         q8Input = (block_q8_1 *)FastllmCudaMalloc(n * m * sizeof(__nv_bfloat16));
         quantize_row_q8_1_cuda(

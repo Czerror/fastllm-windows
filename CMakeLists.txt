@@ -666,6 +666,14 @@ if (UNIT_TEST)
     endif()
 
     if (USE_CUDA AND NOT USE_ROCM)
+        add_executable(cudaGgufChunkedDequantRegression test/ops/cudaGgufChunkedDequantRegression.cu)
+        target_link_libraries(cudaGgufChunkedDequantRegression PRIVATE fastllm)
+        target_include_directories(cudaGgufChunkedDequantRegression PRIVATE src/devices/cuda)
+        set_target_properties(cudaGgufChunkedDequantRegression PROPERTIES
+            CUDA_STANDARD 17 CUDA_STANDARD_REQUIRED ON)
+        add_test(NAME cuda_gguf_chunked_dequant COMMAND cudaGgufChunkedDequantRegression)
+        set_tests_properties(cuda_gguf_chunked_dequant PROPERTIES LABELS cuda SKIP_RETURN_CODE 77)
+
         foreach(cache_test IN ITEMS expert_cache ordered_reduce record_copy)
             add_executable(cuda_${cache_test}_test test/basic/test_cuda_${cache_test}.cu)
             target_include_directories(cuda_${cache_test}_test PRIVATE include/devices/cuda)
