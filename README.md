@@ -171,16 +171,30 @@ ftllm server /data/models/my-moe-model \
 
 ### 长上下文与前缀缓存
 
+`--max_context_length`（别名 `--max-context-length`）设置单会话输入与输出合计上限。扩大模型声明窗口时，还需要有效的 `--rope_scaling`（别名 `--rope-scaling`），接受 `yarn` 或 JSON；只缩小窗口时可省略 RoPE 参数。配置在加载时生效，不修改模型的 `config.json`。
+
+例如，将 Qwen3-0.6B 扩展到 65536 token，并开启前缀缓存。其 YaRN 原始长度为 32768，应显式指定，不能用配置声明的 40960 代替：
+
 ~~~bash
-ftllm server /data/models/my-model \
-  --max_context_length 131072 \
-  --max_batch 16 \
-  --gpu_mem_ratio 0.9 \
+ftllm server /data/models/Qwen3-0.6B \
+  --device cuda --max_batch 1 --tokens 65536 \
+  --max_context_length 65536 \
+  --rope_scaling '{"rope_type":"yarn","factor":2,"original_max_position_embeddings":32768}' \
   --chunked_prefill_size 8192 \
   --prefix_cache true
 ~~~
 
-实际可用上下文取模型原生上限、`--max_context_length` 和共享 KV Cache 容量的较小值；`/v1/models` 会返回最终生效值。
+Qwen3.8-27B-FP8 可以使用已知原始长度的 `yarn` 简写。下面配置双卡、FP4 KV 和 1,000,000 token 的目标窗口，解析得到 original=262144、factor=4：
+
+~~~bash
+ftllm server /data/models/Qwen3.8-27B-FP8 \
+  --tp 2 --kv_cache_dtype fp4 \
+  --max_context_length 1000000 --rope_scaling yarn
+~~~
+
+`--tokens` 是所有会话共享的 KV 池容量，未设置时自动预算。显式目标超过 RoPE 覆盖范围或 warmup 校准容量会启动失败；`/v1/models` 返回实际窗口、模型原声明和用户目标。上述 1M 命令需要足够显存，本机双 24GB 的测试配置无法容纳，完整 1M 输入尚未实测。
+
+当前扩展接入 HF Qwen2、Qwen3、Qwen3.5 布局，以及基于 Qwen3.5 架构的 Qwen3.8；Launcher 高级参数中的「RoPE 扩展」使用相同配置。GGUF、FLM 和自定义 GraphLLM 仅设置长度时保留旧的只缩小行为，暂不支持新的 RoPE 扩展。更多参数、适配范围和验证结果见[上下文扩展说明](docs/context-length-extension-design.md)。
 
 ### 投机解码
 
@@ -241,7 +255,7 @@ CLI 会持续演进，`ftllm <command> --help` 是当前安装版本的最终依
 | `--dtype` | 加载 HF 权重时的权重类型；默认 `auto`，已量化模型通常不应覆盖 |
 | `--moe_dtype` | 单独设置 MoE 权重类型 |
 | `--atype` / `--moe_atype` | 设置普通层和 MoE 层的激活类型 |
-| `--kv_cache_dtype` | KV Cache 类型：`auto`、`float16`、`bfloat16` 或 `fp8_e4m3` |
+| `--kv_cache_dtype` | KV Cache 类型：`auto`、`float16`、`bfloat16`、`fp8_e4m3` 或 `fp4`，需模型与后端支持 |
 | `--dtype_config` | 动态量化配置文件，参见[动态量化说明](docs/dtype_config.md) |
 | `--triton` | 启用可用的 Triton CUDA 算子 |
 
@@ -254,7 +268,8 @@ CLI 会持续演进，`ftllm <command> --help` 是当前安装版本的最终依
 | `--tokens` | 自动 | 用于计算 Paged KV Cache 容量的总 token 数 |
 | `--page_size` | 后端决定 | Paged KV Cache 每页 token 数；多卡默认通常为 16 |
 | `--max_batch` | 自动 | 每轮最多同时推理的请求数 |
-| `--max_context_length` | 自动 | Server 单会话输入与输出合计上限 |
+| `--max_context_length` / `--max-context-length` | 自动 | 单会话输入与输出合计上限；HF 显式目标需通过 RoPE 与 KV 容量检查 |
+| `--rope_scaling` / `--rope-scaling` | 沿用模型配置 | RoPE 扩展，接受 `yarn` 或 JSON；仅对已适配的 HF 模型布局生效 |
 | `--chunked_prefill_size` | 关闭/模型决定 | 分块 Prefill 的切片大小，例如 `8192` |
 | `--prefix_cache` | 模型/环境决定 | 是否开启前缀缓存，使用 `true` 或 `false` |
 | `--cuda_slab` | `0` | CUDA 权重 slab 大小（MB）；`0` 为关闭 |
