@@ -97,6 +97,325 @@ class LauncherWebUIBrowserTest(unittest.TestCase):
         expect(self.page.locator('#webui-content')).to_be_visible()
         expect(self.page.locator('#webui-retry')).to_be_hidden()
 
+    def test_launch_item_can_be_added_saved_and_edited(self):
+        editor = self.page.locator('#profile-editor-modal')
+        for selector in ('#new-profile', '[data-new-profile]'):
+            with self.subTest(entrypoint=selector):
+                self.page.locator(selector).click()
+                expect(editor).to_be_visible()
+                expect(self.page.locator('#profile-editor-title')).to_have_text('Add launch item')
+                expect(editor.locator('[data-field="model"]')).to_be_focused()
+                self.page.locator('#close-profile-editor').click()
+                self.page.locator('#confirmation-confirm').click()
+                expect(editor).to_be_hidden()
+
+        self.page.locator('#new-profile').click()
+        editor.locator('[data-config-mode][value="custom"]').check()
+        editor.locator('[data-field="device"]').select_option('cpu')
+        editor.locator('[data-field="name"]').fill('Saved launch item')
+        model_path = os.path.join(self.temp.name, 'model')
+        os.mkdir(model_path)
+        editor.locator('[data-field="model"]').fill(model_path)
+        editor.locator('[data-field="chunked_prefill_size"]').fill('8192')
+        with patch('fastllm_pytools.launcher.detect_hardware', return_value={'gpus': []}):
+            self.page.locator('#auto-configure-profile').click()
+            expect(self.page.locator('#automatic-config-status')).to_have_class('automatic-config-status success')
+        expect(editor.locator('[data-field="chunked_prefill_size"]')).to_have_value('auto')
+        expect(editor.locator('[data-field="dtype"]')).to_have_count(0)
+        cache = editor.locator('#editor-basic [data-field="kv_cache_dtype"]')
+        expect(cache).to_be_visible()
+        cache.select_option('fp8_e4m3')
+        context_length = editor.locator('[data-field="max_context_length"]')
+        expect(context_length).to_be_visible()
+        context_length.fill('4096')
+        self.page.locator('#save-profile').click()
+        expect(editor).to_be_hidden()
+        expect(self.page.locator('#profile-count')).to_have_text('1')
+        self.assertEqual(self.runtime.profiles()[0]['max_context_length'], '4096')
+        self.assertEqual(self.runtime.profiles()[0]['kv_cache_dtype'], 'fp8_e4m3')
+        self.assertEqual(self.runtime.profiles()[0]['chunked_prefill_size'], 'auto')
+
+        self.page.reload()
+        self.page.locator('[data-profile-action="edit"]').click()
+        expect(editor).to_be_visible()
+        expect(editor.locator('[data-field="name"]')).to_have_value('Saved launch item')
+        expect(editor.locator('[data-field="model"]')).to_have_value(model_path)
+        expect(context_length).to_have_value('4096')
+        expect(cache).to_have_value('fp8_e4m3')
+        self.page.locator('#auto-configure-profile').click()
+        chooser = self.page.locator('#automatic-config-dialog')
+        expect(chooser.locator('input[name="automatic-configuration-mode"]')).to_have_count(2)
+        expect(chooser.locator('input[value="custom"]')).to_have_count(0)
+        expect(chooser.locator('input[value="long_context"]')).to_be_checked()
+        self.page.locator('#automatic-config-dialog-cancel').click()
+        expect(editor.locator('[data-config-mode][value="custom"]')).to_be_checked()
+        expect(context_length).to_have_value('4096')
+        self.page.locator('#close-profile-editor').click()
+        expect(editor).to_be_hidden()
+        self.assertEqual(self.runtime.profiles()[0]['config_mode'], 'custom')
+
+    def test_presets_stay_simple_and_editing_reuses_the_saved_mode(self):
+        model_path = os.path.join(self.temp.name, 'model')
+        os.mkdir(model_path)
+        with open(os.path.join(model_path, 'config.json'), 'w') as output:
+            json.dump({'max_position_embeddings': 32768}, output)
+        hardware = {'cpu': {'available': 4}, 'memory': {'available': 16 * 1024 ** 3},
+                    'gpus': [], 'numa': [], 'build': {}}
+        editor = self.page.locator('#profile-editor-modal')
+        with patch('fastllm_pytools.launcher.detect_hardware', return_value=hardware):
+            for index, (mode, batch, context) in enumerate((('long_context', '1', 'auto'),
+                                                           ('high_concurrency', 'auto', 'auto'))):
+                with self.subTest(mode=mode):
+                    self.page.locator('#new-profile').click()
+                    expect(editor.locator('[data-config-mode][value="long_context"]')).to_be_checked()
+                    editor.locator(f'[data-config-mode][value="{mode}"]').check()
+                    expect(self.page.locator('#profile-parameters')).to_be_hidden()
+                    expect(self.page.locator('#auto-configure-profile')).to_be_hidden()
+                    expect(self.page.locator('#save-profile')).to_be_disabled()
+                    editor.locator('[data-field="model"]').fill(model_path)
+                    self.page.clock.fast_forward(700)
+                    expect(self.page.locator('#automatic-config-status')).to_have_class('automatic-config-status success')
+                    self.page.locator('#save-profile').click()
+                    expect(editor).to_be_hidden()
+                    saved = self.runtime.profiles()[index]
+                    self.assertEqual((saved['config_mode'], saved['max_batch'], saved['max_context_length']),
+                                     (mode, batch, context))
+                    self.assertEqual(saved['low_gpu_mem'], mode == 'long_context')
+                    self.assertEqual(saved['chunked_prefill_size'], 'auto')
+                    self.assertNotIn('--chunked_prefill_size', self.runtime.preview(saved)['command'])
+                    self.runtime.save_profile(index, {**saved, 'dtype': 'float16'})
+                    self.page.reload()
+                    self.page.locator(f'[data-profile-action="edit"][data-profile-index="{index}"]').click()
+                    expect(self.page.locator('#configuration-mode-settings')).to_be_hidden()
+                    expect(editor.locator(f'[data-config-mode][value="{mode}"]')).to_be_checked()
+                    expect(editor.locator('[data-field="max_context_length"]')).to_be_visible()
+                    self.assertEqual(editor.locator('[data-field="low_gpu_mem"]').is_checked(),
+                                     mode == 'long_context')
+                    editor.locator('[data-field="max_batch"]').fill('3')
+                    expect(editor.locator('[data-field="dtype"]')).to_have_count(0)
+                    editor.locator('[data-field="moe_dtype"]').select_option('int8')
+                    editor.locator('[data-field="chunked_prefill_size"]').fill('1024')
+                    self.page.locator('#auto-configure-profile').click()
+                    chooser = self.page.locator('#automatic-config-dialog')
+                    expect(chooser).to_be_visible()
+                    expect(chooser.locator('input[name="automatic-configuration-mode"]')).to_have_count(2)
+                    expect(chooser.locator('input[value="custom"]')).to_have_count(0)
+                    expect(chooser.locator(f'input[name="automatic-configuration-mode"][value="{mode}"]')).to_be_checked()
+                    with self.page.expect_request('**/api/recommend') as request:
+                        self.page.locator('#automatic-config-dialog-apply').click()
+                    self.assertEqual(request.value.post_data_json['config_mode'], mode)
+                    expect(chooser).to_be_hidden()
+                    expect(editor.locator('[data-field="max_batch"]')).to_have_value(batch)
+                    expect(editor.locator('[data-field="max_context_length"]')).to_have_value(context)
+                    expect(editor.locator('[data-field="moe_dtype"]')).to_have_value('int8')
+                    expect(editor.locator('[data-field="chunked_prefill_size"]')).to_have_value('auto')
+                    editor.locator('[data-field="low_gpu_mem"]').check()
+                    editor.locator('[data-field="kv_cache_dtype"]').select_option('fp4')
+                    self.page.clock.fast_forward(700)
+                    expect(self.page.locator('#command-preview')).to_contain_text('--low_gpu_mem')
+                    expect(self.page.locator('#command-preview')).to_contain_text('--kv_cache_dtype fp4')
+                    expect(self.page.locator('#command-preview')).to_contain_text('--dtype float16')
+                    expect(self.page.locator('#command-preview')).not_to_contain_text('--chunked_prefill_size')
+                    self.page.locator('#close-profile-editor').click()
+                    self.page.locator('#confirmation-confirm').click()
+                    expect(editor).to_be_hidden()
+
+    def test_model_picker_selects_both_directories_and_files(self):
+        folder = os.path.join(self.temp.name, 'model folder')
+        os.mkdir(folder)
+        model_file = os.path.join(folder, 'model test.gguf')
+        with open(model_file, 'w') as output:
+            output.write('GGUF')
+        self.page.locator('#new-profile').click()
+        self.page.locator('[data-config-mode][value="custom"]').check()
+        model = self.page.locator('#model-path')
+        model.fill(self.temp.name)
+        self.page.locator('#choose-model-folder').click()
+        self.page.locator('#folder-picker-list button').filter(has_text='model folder').click()
+        expect(self.page.locator('#folder-picker-current')).to_have_text(folder)
+        self.page.locator('#folder-picker-select').click()
+        expect(model).to_have_value(folder)
+        self.page.locator('#choose-model-folder').click()
+        self.page.locator('#folder-picker-list button').filter(has_text='model test.gguf').click()
+        expect(self.page.locator('#folder-picker-select')).to_have_text('Select this file')
+        self.page.locator('#folder-picker-select').click()
+        expect(model).to_have_value(model_file)
+        expect(self.page.locator('#folder-picker-modal')).to_be_hidden()
+
+    def test_speculative_switch_detects_mtp_and_restores_the_saved_preference(self):
+        from test_launcher_mtp import cuda_hardware, write_mtp_checkpoint, write_safetensors
+        from pathlib import Path
+
+        model_path = Path(self.temp.name) / 'mtp-model'
+        write_mtp_checkpoint(model_path)
+        toggle = self.page.locator('#enable-speculative-decoding')
+        status = self.page.locator('#automatic-config-status')
+        with patch('fastllm_pytools.launcher.detect_hardware', return_value=cuda_hardware()):
+            self.page.locator('#new-profile').click()
+            expect(toggle).not_to_be_checked()
+            self.page.locator('#model-path').fill(str(model_path))
+            self.page.clock.fast_forward(700)
+            expect(status).to_have_class('automatic-config-status success')
+            expect(self.page.locator('[data-field="mtp"]')).to_have_value('auto')
+            toggle.check()
+            self.page.clock.fast_forward(1)
+            expect(status).to_contain_text('Speculative decoding is enabled (3 draft tokens)')
+            expect(self.page.locator('[data-field="mtp"]')).to_have_value('3')
+            toggle.uncheck()
+            self.page.clock.fast_forward(1)
+            expect(status).to_have_class('automatic-config-status success')
+            expect(self.page.locator('[data-field="mtp"]')).to_have_value('auto')
+            toggle.check()
+            self.page.clock.fast_forward(1)
+            expect(status).to_contain_text('Speculative decoding is enabled')
+            self.screenshot('launcher-mtp-enabled')
+            self.page.locator('#save-profile').click()
+            expect(self.page.locator('#profile-editor-modal')).to_be_hidden()
+            saved = self.runtime.profiles()[0]
+            self.assertTrue(saved['enable_speculative_decoding'])
+            self.assertEqual(saved['mtp'], '3')
+            self.page.reload()
+            self.page.locator('[data-profile-action="edit"][data-profile-index="0"]').click()
+            expect(toggle).to_be_checked()
+            expect(toggle).to_be_hidden()
+            write_safetensors(model_path / 'model.safetensors', {'model.embed_tokens.weight'})
+            self.page.locator('#auto-configure-profile').click()
+            expect(self.page.locator('#automatic-enable-speculative-decoding')).to_be_checked()
+            with self.page.expect_request('**/api/recommend') as request:
+                self.page.locator('#automatic-config-dialog-apply').click()
+            self.assertTrue(request.value.post_data_json['enable_speculative_decoding'])
+            expect(status).to_contain_text('MTP weights are missing or incomplete')
+            expect(self.page.locator('[data-field="mtp"]')).to_have_value('auto')
+            expect(toggle).to_be_checked()
+
+    def test_edit_automatic_configuration_defers_changes_until_apply(self):
+        self.runtime.save_profile(None, {'name': 'Mode picker', 'model': self.temp.name,
+                                        'config_mode': 'long_context', 'max_batch': '7', 'device': 'cpu'})
+        self.page.reload()
+        self.page.locator('[data-profile-action="edit"][data-profile-index="0"]').click()
+        requests = []
+        self.page.on('request', lambda request: requests.append(request)
+                     if request.url.endswith('/api/recommend') else None)
+        batch = self.page.locator('[data-field="max_batch"]')
+        chooser = self.page.locator('#automatic-config-dialog')
+        self.page.locator('#auto-configure-profile').click()
+        expect(chooser).to_be_visible()
+        high = chooser.locator('input[value="high_concurrency"]')
+        high.check()
+        self.page.locator('#automatic-enable-speculative-decoding').check()
+        expect(batch).to_have_value('7')
+        self.assertEqual(requests, [])
+        self.page.keyboard.press('Escape')
+        expect(chooser).to_be_hidden()
+        expect(self.page.locator('#profile-editor-modal')).to_be_visible()
+        expect(batch).to_have_value('7')
+        expect(self.page.locator('#auto-configure-profile')).to_be_focused()
+        self.page.locator('#auto-configure-profile').click()
+        expect(chooser.locator('input[value="long_context"]')).to_be_checked()
+        expect(self.page.locator('#automatic-enable-speculative-decoding')).not_to_be_checked()
+        high.check()
+        self.page.locator('#automatic-enable-speculative-decoding').check()
+        self.screenshot('edit-automatic-configuration-picker')
+        with patch('fastllm_pytools.launcher.detect_hardware', return_value={'gpus': []}):
+            self.page.locator('#automatic-config-dialog-apply').click()
+            expect(chooser).to_be_hidden()
+        expect(batch).to_have_value('auto')
+        self.assertEqual(len(requests), 1)
+        self.assertEqual(requests[0].post_data_json['config_mode'], 'high_concurrency')
+        self.assertTrue(requests[0].post_data_json['enable_speculative_decoding'])
+        self.page.locator('#save-profile').click()
+        expect(self.page.locator('#profile-editor-modal')).to_be_hidden()
+        saved = self.runtime.profiles()[0]
+        self.assertEqual(saved['config_mode'], 'high_concurrency')
+        self.assertTrue(saved['enable_speculative_decoding'])
+        self.page.reload()
+        self.page.locator('[data-profile-action="edit"][data-profile-index="0"]').click()
+        self.page.locator('#auto-configure-profile').click()
+        expect(chooser.locator('input[value="high_concurrency"]')).to_be_checked()
+        expect(self.page.locator('#automatic-enable-speculative-decoding')).to_be_checked()
+
+    def test_edit_mode_picker_handles_failure_and_cancels_pending_changes(self):
+        self.runtime.save_profile(None, {'name': 'Cancel recommendation', 'model': self.temp.name,
+                                        'config_mode': 'long_context', 'max_batch': '7', 'device': 'cpu'})
+        self.page.reload()
+        self.page.locator('[data-profile-action="edit"][data-profile-index="0"]').click()
+        self.page.locator('#auto-configure-profile').click()
+        chooser = self.page.locator('#automatic-config-dialog')
+        chooser.locator('input[value="high_concurrency"]').check()
+        self.page.route('**/api/recommend', lambda route: route.fulfill(
+            status=500, content_type='application/json', body='{"error":"Test recommendation error"}'), times=1)
+        self.page.locator('#automatic-config-dialog-apply').click()
+        expect(self.page.locator('#automatic-config-dialog-error')).to_have_text('Test recommendation error')
+        expect(chooser).to_be_visible()
+        expect(self.page.locator('[data-field="max_batch"]')).to_have_value('7')
+        pending = []
+        self.page.route('**/api/recommend', lambda route: pending.append(route), times=1)
+        with self.page.expect_request('**/api/recommend'):
+            self.page.locator('#automatic-config-dialog-apply').click()
+        expect(chooser.locator('input[value="high_concurrency"]')).to_be_disabled()
+        self.page.locator('#automatic-config-dialog-cancel').click()
+        expect(chooser).to_be_hidden()
+        with self.page.expect_response('**/api/recommend') as response:
+            pending[0].fulfill(status=200, content_type='application/json',
+                               body=json.dumps({'config': {'max_batch': '99'}}))
+        response.value.body()
+        expect(self.page.locator('[data-field="max_batch"]')).to_have_value('7')
+        self.page.locator('#close-profile-editor').click()
+        expect(self.page.locator('#confirmation-modal')).to_be_hidden()
+        expect(self.page.locator('#profile-editor-modal')).to_be_hidden()
+        self.assertEqual(self.runtime.profiles()[0]['config_mode'], 'long_context')
+
+    def test_disabling_speculative_switch_ignores_the_inflight_enabled_result(self):
+        from test_launcher_mtp import cuda_hardware, write_mtp_checkpoint
+        from pathlib import Path
+
+        model_path = Path(self.temp.name) / 'mtp-model'
+        write_mtp_checkpoint(model_path)
+        pending = []
+        status = self.page.locator('#automatic-config-status')
+        toggle = self.page.locator('#enable-speculative-decoding')
+        with patch('fastllm_pytools.launcher.detect_hardware', return_value=cuda_hardware()):
+            self.page.locator('#new-profile').click()
+            toggle.check()
+            self.page.route('**/api/recommend', lambda route: pending.append(route), times=1)
+            self.page.locator('#model-path').fill(str(model_path))
+            with self.page.expect_request('**/api/recommend'):
+                self.page.clock.fast_forward(700)
+            toggle.uncheck()
+            self.page.clock.fast_forward(1)
+            expect(status).to_have_class('automatic-config-status success')
+            with self.page.expect_response('**/api/recommend') as response:
+                pending[0].fulfill(status=200, content_type='application/json', body=json.dumps({
+                    'config': {'mtp': '3', 'speculative_algorithm': 'mtp'},
+                    'speculative': {'requested': True, 'enabled': True, 'reason': 'enabled'}}))
+            response.value.body()
+            self.page.locator('#save-profile').click()
+            expect(self.page.locator('#profile-editor-modal')).to_be_hidden()
+            saved = self.runtime.profiles()[0]
+            self.assertFalse(saved['enable_speculative_decoding'])
+            self.assertEqual(saved['mtp'], 'auto')
+
+    def test_switching_to_custom_ignores_a_pending_recommendation(self):
+        pending = []
+        self.page.route('**/api/recommend', lambda route: pending.append(route), times=1)
+        self.page.locator('#new-profile').click()
+        self.page.locator('#model-path').fill(self.temp.name)
+        with self.page.expect_request('**/api/recommend'):
+            self.page.clock.fast_forward(700)
+        expect(self.page.locator('#save-profile')).to_be_disabled()
+        self.page.locator('[data-config-mode][value="custom"]').check()
+        batch = self.page.locator('[data-field="max_batch"]')
+        batch.fill('7')
+        with self.page.expect_response('**/api/recommend') as response:
+            pending[0].fulfill(status=200, content_type='application/json',
+                               body=json.dumps({'config': {'max_batch': '99'}}))
+        response.value.body()
+        self.page.locator('#save-profile').click()
+        expect(self.page.locator('#profile-editor-modal')).to_be_hidden()
+        saved = self.runtime.profiles()[0]
+        self.assertEqual(saved['config_mode'], 'custom')
+        self.assertEqual(saved['max_batch'], '7')
+
     def test_network_error_can_retry_without_reloading_launcher(self):
         self.assert_resource_failure_recovers('**/assets/webui/template.html')
 

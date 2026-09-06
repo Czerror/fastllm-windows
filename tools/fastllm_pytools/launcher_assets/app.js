@@ -16,11 +16,11 @@ const AUTOMATIC_CONFIGURATION_DEFAULTS = Object.freeze({
   cuda_device_id: "0",
   tp: "2",
   cudapp: "2",
-  dtype: "auto",
   threads: "auto",
   gpu_mem_ratio: "0.9",
+  low_gpu_mem: false,
   max_batch: "auto",
-  chunked_prefill_size: "auto",
+  max_context_length: "auto",
   kv_cache_dtype: "auto",
   kv_cache_limit: "auto",
   tokens: "auto",
@@ -28,7 +28,6 @@ const AUTOMATIC_CONFIGURATION_DEFAULTS = Object.freeze({
   moe_device: "numa",
   moe_device_layers: "-1",
   moe_device_custom: "",
-  moe_dtype: "auto",
   moe_atype: "auto",
   ngram_device: "auto",
   speculative_algorithm: "auto",
@@ -52,6 +51,7 @@ const state = {
   defaultProfile: null,
   currentIndex: null,
   editingConfig: null,
+  automaticConfigDialogPreviousStatus: null,
   runtime: null,
   download: null,
   downloadDefaults: null,
@@ -65,7 +65,6 @@ const state = {
   lastLogId: 0,
   currentView: "launch",
   profileQuery: "",
-  profileFilter: "all",
   webuiSessionId: "",
   webuiLoading: false,
   webuiError: "",
@@ -98,6 +97,7 @@ const state = {
   folderPickerRequestId: 0,
   folderPickerLoading: false,
   folderPickerResult: null,
+  folderPickerSelectedFile: "",
   folderPickerError: "",
   confirmationResolve: null,
   confirmationRestoreFocus: null
@@ -139,10 +139,16 @@ function cacheElements() {
     "config-path", "profile-editor-modal", "profile-editor-title", "launch-form",
     "close-profile-editor", "save-state", "ori-field", "auto-configure-profile",
     "clear-profile-config", "automatic-config-status",
+    "profile-parameters", "profile-editor-description", "configuration-mode-options",
+    "configuration-mode-description", "automatic-config-actions",
+    "configuration-mode-settings", "automatic-config-dialog", "automatic-mode-options",
+    "automatic-mode-description", "automatic-enable-speculative-decoding",
+    "automatic-config-dialog-close", "automatic-config-dialog-cancel",
+    "automatic-config-dialog-apply", "automatic-config-dialog-error",
     "cuda-device-field", "tp-device-field", "cudapp-device-field", "moe-device-field",
     "moe-device-custom-field", "moe-layers-field", "server-model-name-field", "server-host-field",
     "webui-max-token-field", "webui-think-field",
-    "server-sampling-title", "server-sampling-fields", "server-api-key-field",
+    "server-context-field", "server-sampling-title", "server-sampling-fields", "server-api-key-field",
     "server-hide-input-field", "launch-command-kicker", "command-preview",
     "validation-messages", "save-profile",
     "start-runtime", "clear-logs", "log-count", "log-output", "log-activity",
@@ -447,7 +453,28 @@ function bindEvents() {
     await startRuntime();
   });
   elements.newProfile.addEventListener("click", newProfile);
-  elements.autoConfigureProfile.addEventListener("click", () => configureProfileAutomatically());
+  elements.configurationModeOptions.addEventListener("change", handleConfigurationModeChange);
+  elements.autoConfigureProfile.addEventListener("click", openAutomaticConfigurationDialog);
+  elements.automaticConfigDialogClose.addEventListener("click", () => closeAutomaticConfigurationDialog());
+  elements.automaticConfigDialogCancel.addEventListener("click", () => closeAutomaticConfigurationDialog());
+  elements.automaticConfigDialog.addEventListener("cancel", (event) => {
+    event.preventDefault();
+    closeAutomaticConfigurationDialog();
+  });
+  elements.automaticModeOptions.addEventListener("change", () => {
+    elements.automaticModeDescription.textContent = configurationModeDescription(
+      elements.automaticModeOptions.querySelector("input:checked")?.value || "long_context"
+    );
+  });
+  elements.automaticConfigDialogApply.addEventListener("click", async () => {
+    const selection = {
+      config_mode: elements.automaticModeOptions.querySelector("input:checked")?.value || "long_context",
+      enable_speculative_decoding: elements.automaticEnableSpeculativeDecoding.checked
+    };
+    if (await configureProfileAutomatically({ selection })) {
+      closeAutomaticConfigurationDialog(false);
+    }
+  });
   elements.clearProfileConfig.addEventListener("click", clearProfileInferenceConfiguration);
   elements.closeProfileEditor.addEventListener("click", () => closeProfileEditor());
   elements.profileEditorModal.addEventListener("click", (event) => {
@@ -469,6 +496,8 @@ function bindEvents() {
     if (event.target === elements.confirmationModal) settleConfirmation(false);
   });
   document.addEventListener("keydown", (event) => {
+    // The native modal handles focus trapping and Escape before the editor.
+    if (elements.automaticConfigDialog.open) return;
     if (!elements.confirmationModal.classList.contains("hidden")) {
       if (event.key === "Escape") {
         event.preventDefault();
@@ -512,17 +541,10 @@ function handleDelegatedClick(event) {
     newProfile();
     return;
   }
-  if (event.target.closest("[data-clear-profile-filters]")) {
-    resetProfileFilters();
+  if (event.target.closest("[data-clear-profile-search]")) {
+    resetProfileSearch();
     renderProfiles();
     elements.profileSearch.focus();
-    return;
-  }
-  const filter = event.target.closest("[data-profile-filter]");
-  if (filter) {
-    state.profileFilter = filter.dataset.profileFilter;
-    renderProfileFilters();
-    renderProfiles();
     return;
   }
   const sectionButton = event.target.closest("[data-editor-section]");
@@ -590,19 +612,9 @@ function renderViewTitle() {
   elements.currentViewTitle.textContent = titles[state.currentView] || titles.launch;
 }
 
-function renderProfileFilters() {
-  for (const button of document.querySelectorAll("[data-profile-filter]")) {
-    const selected = button.dataset.profileFilter === state.profileFilter;
-    button.classList.toggle("active", selected);
-    button.setAttribute("aria-pressed", String(selected));
-  }
-}
-
-function resetProfileFilters() {
+function resetProfileSearch() {
   state.profileQuery = "";
-  state.profileFilter = "all";
   elements.profileSearch.value = "";
-  renderProfileFilters();
 }
 
 function createIcon(name) {
@@ -628,9 +640,13 @@ function fillForm(config) {
       input.value = value === null || value === undefined ? "" : String(value);
     }
   }
+  for (const input of elements.configurationModeOptions.querySelectorAll("[data-config-mode]")) {
+    input.checked = input.value === (config?.config_mode || "custom");
+  }
   state.dirty = false;
   renderSaveState();
   updateConditionalFields();
+  renderProfilePresentation();
 }
 
 function collectForm() {
@@ -638,7 +654,88 @@ function collectForm() {
   for (const input of elements.launchForm.querySelectorAll("[data-field]")) {
     config[input.dataset.field] = input.type === "checkbox" ? input.checked : input.value;
   }
+  config.config_mode = elements.configurationModeOptions.querySelector("[data-config-mode]:checked")?.value || "custom";
   return config;
+}
+
+function isSimpleNewProfile() {
+  return state.currentIndex === null && collectForm().config_mode !== "custom";
+}
+
+function renderProfilePresentation() {
+  const simple = isSimpleNewProfile();
+  const mode = collectForm().config_mode;
+  elements.launchForm.classList.toggle("simple-profile", simple);
+  elements.profileParameters.classList.toggle("hidden", simple);
+  elements.automaticConfigActions.classList.toggle("hidden", simple);
+  elements.configurationModeSettings.classList.toggle("hidden", state.currentIndex !== null);
+  elements.profileEditorDescription.textContent = state.currentIndex === null
+    ? t("Choose a model and configuration mode, then save or start your service.")
+    : t("Edit all settings, or click Automatic configuration to choose a mode.");
+  elements.configurationModeDescription.textContent = configurationModeDescription(mode);
+}
+
+function configurationModeDescription(mode) {
+  const descriptions = {
+    long_context: t("One conversation at a time; context capacity follows the model and available memory."),
+    high_concurrency: t("Automatic batching; context capacity follows the model and available memory."),
+    custom: t("Set parameters yourself, or use automatic configuration as a starting point.")
+  };
+  return descriptions[mode] || descriptions.custom;
+}
+
+function openAutomaticConfigurationDialog() {
+  if (state.currentIndex === null) {
+    configureProfileAutomatically();
+    return;
+  }
+  const config = collectForm();
+  const mode = config.config_mode === "high_concurrency" ? "high_concurrency" : "long_context";
+  elements.automaticModeOptions.replaceChildren();
+  for (const card of elements.configurationModeOptions.children) {
+    if (card.querySelector("input").value === "custom") continue;
+    const clone = card.cloneNode(true);
+    const input = clone.querySelector("input");
+    input.name = "automatic-configuration-mode";
+    delete input.dataset.configMode;
+    input.checked = input.value === mode;
+    elements.automaticModeOptions.append(clone);
+  }
+  elements.automaticEnableSpeculativeDecoding.checked = config.enable_speculative_decoding;
+  elements.automaticModeDescription.textContent = configurationModeDescription(mode);
+  state.automaticConfigDialogPreviousStatus = state.automaticConfigStatus;
+  elements.automaticConfigDialog.showModal();
+  renderAutomaticConfigurationStatus();
+  elements.automaticModeOptions.querySelector("input:checked")?.focus();
+}
+
+function closeAutomaticConfigurationDialog(cancelled = true) {
+  if (!elements.automaticConfigDialog.open) return;
+  if (cancelled) {
+    cancelPendingAutomaticConfiguration();
+    state.automaticConfigStatus = state.automaticConfigDialogPreviousStatus || { phase: "idle" };
+  }
+  elements.automaticConfigDialog.close();
+  state.automaticConfigDialogPreviousStatus = null;
+  renderAutomaticConfigurationStatus();
+  elements.autoConfigureProfile.focus({ preventScroll: true });
+}
+
+function handleConfigurationModeChange() {
+  cancelPendingAutomaticConfiguration();
+  state.editingConfig = collectForm();
+  state.dirty = true;
+  state.automaticConfigStatus = { phase: "idle" };
+  renderProfilePresentation();
+  if (isSimpleNewProfile()) {
+    prepareAutomaticConfigurationForNewProfile();
+    scheduleAutomaticConfiguration(0);
+  } else {
+    elements.launchForm.querySelector("#editor-advanced").open = true;
+  }
+  renderSaveState();
+  renderAutomaticConfigurationStatus();
+  schedulePreview(0);
 }
 
 function handleFormChange(event) {
@@ -660,7 +757,10 @@ function handleFormChange(event) {
   if (event.target.matches("[data-path-input]")) {
     schedulePathSuggestions(event.target);
   }
-  if (changedField === "model" && state.automaticConfigPending) {
+  if (changedField === "enable_speculative_decoding") {
+    prepareAutomaticConfigurationForNewProfile();
+    if (state.automaticConfigPending) scheduleAutomaticConfiguration(0);
+  } else if (changedField === "model" && state.automaticConfigPending) {
     scheduleAutomaticConfiguration();
   } else if (
     state.automaticConfigPending
@@ -704,7 +804,11 @@ function updateConditionalFields() {
 }
 
 function automaticConfigurationFingerprint(config = collectForm()) {
-  const values = { model: String(config.model || "").trim() };
+  const values = {
+    model: String(config.model || "").trim(),
+    config_mode: config.config_mode,
+    enable_speculative_decoding: config.enable_speculative_decoding
+  };
   for (const field of AUTOMATIC_CONFIGURATION_FIELDS) values[field] = config[field];
   return JSON.stringify(values);
 }
@@ -719,8 +823,8 @@ function cancelPendingAutomaticConfiguration() {
 
 function prepareAutomaticConfigurationForNewProfile() {
   cancelPendingAutomaticConfiguration();
-  state.automaticConfigPending = true;
-  state.automaticConfigStatus = { phase: "waiting" };
+  state.automaticConfigPending = isSimpleNewProfile();
+  state.automaticConfigStatus = { phase: state.automaticConfigPending ? "waiting" : "idle" };
   renderAutomaticConfigurationStatus();
 }
 
@@ -745,8 +849,9 @@ function scheduleAutomaticConfiguration(delay = 650) {
   }, delay);
 }
 
-async function configureProfileAutomatically({ automatic = false } = {}) {
+async function configureProfileAutomatically({ automatic = false, selection = null } = {}) {
   const current = collectForm();
+  const requested = { ...current, ...selection };
   const model = String(current.model || "").trim();
   if (!model) {
     state.automaticConfigStatus = { phase: "missing-model" };
@@ -764,7 +869,10 @@ async function configureProfileAutomatically({ automatic = false } = {}) {
   try {
     const recommendation = await request("/api/recommend", {
       method: "POST",
-      body: JSON.stringify({ model, name: current.name || current.model_name || "" })
+      body: JSON.stringify({
+        model, name: current.name || current.model_name || "", config_mode: requested.config_mode,
+        enable_speculative_decoding: requested.enable_speculative_decoding
+      })
     });
     if (
       requestId !== state.automaticConfigRequestId
@@ -783,7 +891,11 @@ async function configureProfileAutomatically({ automatic = false } = {}) {
     for (const [field, value] of Object.entries(recommendation.config)) {
       if (AUTOMATIC_CONFIGURATION_FIELDS.has(field)) recommendedFields[field] = value;
     }
-    state.editingConfig = { ...collectForm(), ...recommendedFields };
+    state.editingConfig = {
+      ...collectForm(), ...selection, ...recommendedFields,
+      // Drop inherited overrides so automatic configuration uses the runtime default.
+      chunked_prefill_size: "auto"
+    };
     fillForm(state.editingConfig);
     state.dirty = true;
     state.automaticConfigPending = keepAutomaticForNewProfile;
@@ -800,6 +912,7 @@ async function configureProfileAutomatically({ automatic = false } = {}) {
       "success",
       4600
     );
+    return true;
   } catch (error) {
     if (requestId !== state.automaticConfigRequestId) return;
     state.automaticConfigStatus = {
@@ -807,6 +920,7 @@ async function configureProfileAutomatically({ automatic = false } = {}) {
       error: friendlyError(error)
     };
     renderAutomaticConfigurationStatus();
+    return false;
   }
 }
 
@@ -814,7 +928,8 @@ function clearProfileInferenceConfiguration() {
   cancelPendingAutomaticConfiguration();
   state.editingConfig = {
     ...collectForm(),
-    ...AUTOMATIC_CONFIGURATION_DEFAULTS
+    ...AUTOMATIC_CONFIGURATION_DEFAULTS,
+    chunked_prefill_size: "auto"
   };
   fillForm(state.editingConfig);
   state.dirty = true;
@@ -859,15 +974,14 @@ function automaticRecommendationDescription(recommendation) {
       ? t("CPU + disk MoE")
       : "CPU";
   }
-  const dtype = config.dtype === "auto" ? t("model-native precision") : config.dtype;
   const kind = detected.isMoe ? t("MoE model") : t("dense model");
   const size = Number(detected.parameterBillions || 0);
   const summary = size > 0
-    ? t("Detected a {size}B {kind}; recommended {device} with {dtype}.", {
-        size: String(Math.round(size * 100) / 100), kind, device, dtype
+    ? t("Detected a {size}B {kind}; recommended {device}. Weight type is unchanged.", {
+        size: String(Math.round(size * 100) / 100), kind, device
       })
-    : t("Recommended {device} with {dtype} from the available model and hardware information.", {
-        device, dtype
+    : t("Recommended {device} from the available model and hardware information. Weight type is unchanged.", {
+        device
       });
   const details = [];
   if (detected.architecture) {
@@ -890,9 +1004,6 @@ function automaticRecommendationDescription(recommendation) {
       placement
     }));
   }
-  if (adjustments.precisionAdjusted) {
-    details.push(t("The weight type was adjusted to fit the available memory."));
-  }
   if (adjustments.ngramOnDisk) {
     details.push(t("The large N-gram table was placed on disk to preserve host memory."));
   }
@@ -909,6 +1020,14 @@ function automaticRecommendationDescription(recommendation) {
 function renderAutomaticConfigurationStatus() {
   const status = state.automaticConfigStatus || { phase: "idle" };
   const loading = status.phase === "loading";
+  elements.automaticConfigDialogApply.disabled = loading;
+  elements.automaticConfigDialogApply.textContent = loading ? t("Analyzing...") : t("Apply configuration");
+  elements.automaticEnableSpeculativeDecoding.disabled = loading;
+  for (const input of elements.automaticModeOptions.querySelectorAll("input")) input.disabled = loading;
+  const dialogError = status.phase === "error" ? status.error
+    : status.phase === "missing-model" ? t("Choose a local model before using automatic configuration.") : "";
+  elements.automaticConfigDialogError.textContent = dialogError || "";
+  elements.automaticConfigDialogError.classList.toggle("hidden", !dialogError);
   elements.autoConfigureProfile.disabled = loading;
   elements.clearProfileConfig.disabled = loading;
   elements.autoConfigureProfile.textContent = loading
@@ -916,7 +1035,7 @@ function renderAutomaticConfigurationStatus() {
     : t("Automatic configuration");
   elements.automaticConfigStatus.className = "automatic-config-status";
   elements.automaticConfigStatus.replaceChildren();
-  if (status.phase === "idle") {
+  if (status.phase === "idle" || (isSimpleNewProfile() && status.phase === "waiting" && !collectForm().model.trim())) {
     elements.automaticConfigStatus.classList.add("hidden");
     updateActionAvailability();
     return;
@@ -940,6 +1059,22 @@ function renderAutomaticConfigurationStatus() {
     title = description.title;
     message = description.summary;
     details = description.details;
+    if (isSimpleNewProfile()) {
+      title = t("Configuration is ready");
+      message = t("Your model is configured for the selected mode. Save it or start the service.");
+      details = [];
+    }
+    if (status.recommendation?.speculative?.requested) {
+      const messages = {
+        enabled: t("Built-in MTP detected. Speculative decoding is enabled (3 draft tokens)."),
+        no_mtp: t("This model does not declare built-in MTP. Speculative decoding remains off."),
+        missing_weights: t("Built-in MTP weights are missing or incomplete. Speculative decoding remains off."),
+        unsupported_architecture: t("Automatic MTP is not supported for this model architecture. Speculative decoding remains off."),
+        cuda_required: t("MTP requires a supported CUDA configuration. Speculative decoding remains off."),
+        unverified: t("Could not verify built-in MTP from the local model files. Speculative decoding remains off.")
+      };
+      details.push(messages[status.recommendation.speculative.reason] || messages.unverified);
+    }
     elements.automaticConfigStatus.classList.add("success");
   } else if (status.phase === "cleared") {
     title = t("Inference configuration cleared");
@@ -991,11 +1126,9 @@ function renderProfiles() {
   const signature = JSON.stringify([
     state.locale,
     state.profileQuery,
-    state.profileFilter,
     state.profiles.map((profile) => [
       profile.name,
       profile.model_name,
-      profile.command,
       profile.model,
       profile.device,
       profile.cuda_device_id,
@@ -1016,13 +1149,11 @@ function renderProfiles() {
   elements.profileList.replaceChildren();
   elements.profileCount.textContent = String(state.profiles.length);
   const query = state.profileQuery.trim().toLocaleLowerCase();
-  const profiles = state.profiles.map((profile, index) => ({ profile, index })).filter(({ profile }) => {
-    const mode = profile.command === "webui" ? "webui" : "server";
-    return (state.profileFilter === "all" || mode === state.profileFilter)
-      && [profile.name, profile.model_name, profile.model].some(
-        (value) => String(value || "").toLocaleLowerCase().includes(query)
-      );
-  });
+  const profiles = state.profiles.map((profile, index) => ({ profile, index })).filter(({ profile }) =>
+    [profile.name, profile.model_name, profile.model].some(
+      (value) => String(value || "").toLocaleLowerCase().includes(query)
+    )
+  );
   elements.profileResults.textContent = t("{count} launch items shown", { count: profiles.length });
   if (!profiles.length) {
     const filtered = state.profiles.length > 0;
@@ -1035,14 +1166,14 @@ function renderProfiles() {
     title.textContent = filtered ? t("No matching launch items") : t("Your first model starts here");
     const detail = document.createElement("small");
     detail.textContent = filtered
-      ? t("Try another name or model path, or clear the filters.")
-      : t("Choose a local model and save a profile to launch an API or chat service.");
+      ? t("Try another name or model path, or clear the search.")
+      : t("Choose a local model and save a profile to launch an API Server.");
     const action = document.createElement("button");
     action.type = "button";
     action.className = "primary-button";
-    if (filtered) action.dataset.clearProfileFilters = "";
+    if (filtered) action.dataset.clearProfileSearch = "";
     else action.dataset.newProfile = "";
-    action.textContent = filtered ? t("Clear filters") : t("Add launch item");
+    action.textContent = filtered ? t("Clear search") : t("Add launch item");
     empty.append(icon, title, detail, action);
     elements.profileList.append(empty);
     return;
@@ -1055,7 +1186,6 @@ function renderProfiles() {
 
     const avatar = document.createElement("span");
     avatar.className = "profile-avatar";
-    if (profile.command === "webui") avatar.classList.add("webui");
     avatar.textContent = firstVisibleCharacter(profile.name || profile.model_name || "F");
     const copy = document.createElement("div");
     copy.className = "profile-copy";
@@ -1063,9 +1193,6 @@ function renderProfiles() {
     titleRow.className = "profile-title-row";
     const title = document.createElement("strong");
     title.textContent = profile.name || profile.model_name || t("Unnamed profile");
-    const mode = document.createElement("span");
-    mode.className = "profile-mode";
-    mode.textContent = profile.command === "webui" ? t("Chat WebUI") : t("API Server");
     titleRow.append(title);
     const metadata = document.createElement("div");
     metadata.className = "profile-metadata";
@@ -1078,7 +1205,7 @@ function renderProfiles() {
     path.className = "profile-path";
     path.textContent = profile.model || t("Model not set");
     path.title = profile.model || "";
-    copy.append(mode, titleRow, path, metadata);
+    copy.append(titleRow, path, metadata);
 
     const actions = document.createElement("div");
     actions.className = "project-actions";
@@ -1248,12 +1375,14 @@ function showProfileEditor() {
   elements.profileEditorModal.classList.remove("hidden");
   document.body.classList.add("modal-open");
   elements.launchForm.scrollTop = 0;
+  elements.launchForm.querySelector("#editor-advanced").open = !isSimpleNewProfile();
 }
 
 function renderProfileEditorTitle() {
   elements.profileEditorTitle.textContent = state.currentIndex === null
     ? t("Add launch item")
     : t("Edit launch item");
+  renderProfilePresentation();
 }
 
 async function closeProfileEditor(force = false) {
@@ -1269,6 +1398,7 @@ async function closeProfileEditor(force = false) {
     });
     if (!discard) return false;
   }
+  closeAutomaticConfigurationDialog();
   cancelPendingAutomaticConfiguration();
   state.automaticConfigStatus = { phase: "idle" };
   state.currentIndex = null;
@@ -1308,7 +1438,14 @@ async function deleteProfile(index) {
 }
 
 async function saveCurrentProfile(showSuccess = false) {
+  await ensureProfileConfiguration();
   const config = collectForm();
+  if (isSimpleNewProfile()) {
+    const base = basename(config.model) || config.name;
+    const used = new Set(state.profiles.map((profile) => profile.name));
+    config.name = base;
+    for (let suffix = 2; used.has(config.name); suffix += 1) config.name = `${base} (${suffix})`;
+  }
   const result = await request("/api/profiles", {
     method: "POST",
     body: JSON.stringify({ index: state.currentIndex, config })
@@ -1317,10 +1454,19 @@ async function saveCurrentProfile(showSuccess = false) {
   state.currentIndex = result.index;
   state.editingConfig = cloneConfig(result.profile);
   state.dirty = false;
-  resetProfileFilters();
+  resetProfileSearch();
   renderSaveState();
   if (showSuccess) showToast(t("Launch profile saved."), "success");
   return result.profile;
+}
+
+async function ensureProfileConfiguration() {
+  if (!isSimpleNewProfile()) return;
+  if (state.automaticConfigStatus?.phase === "applied"
+      && state.automaticConfigAppliedModel === String(collectForm().model || "").trim()) return;
+  if (!await configureProfileAutomatically({ automatic: true })) {
+    throw new Error(t("Automatic configuration must finish before saving. Retry or choose custom configuration."));
+  }
 }
 
 async function saveProfileAndClose() {
@@ -1370,6 +1516,8 @@ function renderValidation(container, errors, successMessage) {
 }
 
 function renderLaunchValidation(errors) {
+  const showErrors = errors.length && (!isSimpleNewProfile() || Boolean(collectForm().model.trim()));
+  elements.validationMessages.classList.toggle("hidden", !showErrors);
   renderValidation(elements.validationMessages, errors, t("Configuration is valid and ready to launch."));
 }
 
@@ -1412,6 +1560,7 @@ async function startSavedProfile(index) {
 
 async function startRuntime() {
   try {
+    await ensureProfileConfiguration();
     const preview = await request("/api/preview", {
       method: "POST",
       body: JSON.stringify(collectForm())
@@ -1491,8 +1640,9 @@ function updateActionAvailability() {
     && state.automaticConfigStatus?.phase === "waiting"
     && Boolean(String(collectForm().model || "").trim())
   );
-  elements.startRuntime.disabled = active || invalid || automaticBusy;
-  elements.saveProfile.disabled = automaticBusy;
+  const missingModel = isSimpleNewProfile() && !String(collectForm().model || "").trim();
+  elements.startRuntime.disabled = active || invalid || automaticBusy || missingModel;
+  elements.saveProfile.disabled = automaticBusy || missingModel;
 }
 
 function runtimeIsActive(runtime) {
@@ -1889,6 +2039,7 @@ async function loadFolderPicker(path) {
   const requestId = ++state.folderPickerRequestId;
   state.folderPickerLoading = true;
   state.folderPickerError = "";
+  state.folderPickerSelectedFile = "";
   renderFolderPicker();
   try {
     const query = new URLSearchParams({ path: String(path || "") });
@@ -1901,6 +2052,7 @@ async function loadFolderPicker(path) {
       throw new Error(t("The folder browser response is invalid."));
     }
     state.folderPickerResult = result;
+    state.folderPickerSelectedFile = result.selectedFile || "";
   } catch (error) {
     if (requestId !== state.folderPickerRequestId) return;
     state.folderPickerError = friendlyError(error);
@@ -1915,6 +2067,8 @@ function renderFolderPicker() {
   elements.folderPickerList.replaceChildren();
   elements.folderPickerStatus.className = "folder-picker-status";
   elements.folderPickerStatus.textContent = "";
+  elements.folderPickerSelect.textContent = state.folderPickerSelectedFile
+    ? t("Select this file") : t("Select this folder");
   elements.folderPickerSelect.disabled = (
     state.folderPickerLoading
     || Boolean(state.folderPickerError)
@@ -1952,44 +2106,57 @@ function renderFolderPicker() {
   elements.folderPickerCurrent.textContent = result?.path || "—";
   elements.folderPickerCurrent.title = result?.path || "";
   const folders = result?.folders || [];
-  if (!folders.length) {
+  const files = result?.files || [];
+  if (!folders.length && !files.length) {
     const empty = document.createElement("div");
     empty.className = "folder-picker-placeholder";
-    empty.textContent = t("This folder has no subfolders.");
+    empty.textContent = t("This folder is empty.");
     elements.folderPickerList.append(empty);
   } else {
     const fragment = document.createDocumentFragment();
-    for (const folder of folders) {
+    for (const entry of [...folders.map((folder) => ({ ...folder, isDirectory: true })), ...files]) {
       const button = document.createElement("button");
       button.type = "button";
       button.className = "folder-picker-entry";
-      button.setAttribute("role", "option");
-      button.title = folder.path;
+      button.title = entry.path;
+      button.dataset.entryPath = entry.path;
+      const selected = entry.path === state.folderPickerSelectedFile;
+      button.classList.toggle("selected", selected);
+      if (!entry.isDirectory) button.setAttribute("aria-pressed", String(selected));
       const icon = document.createElement("span");
       icon.className = "folder-picker-entry-icon";
+      if (!entry.isDirectory) icon.classList.add("file-icon");
       icon.setAttribute("aria-hidden", "true");
       const name = document.createElement("span");
       name.className = "folder-picker-entry-name";
-      name.textContent = folder.name;
+      name.textContent = entry.name;
       const arrow = document.createElement("span");
       arrow.className = "folder-picker-entry-arrow";
       arrow.setAttribute("aria-hidden", "true");
-      arrow.textContent = "›";
+      arrow.textContent = entry.isDirectory ? "›" : (selected ? "✓" : "");
       button.append(icon, name, arrow);
-      button.addEventListener("click", () => loadFolderPicker(folder.path));
+      button.addEventListener("click", () => {
+        if (entry.isDirectory) {
+          loadFolderPicker(entry.path);
+        } else {
+          state.folderPickerSelectedFile = selected ? "" : entry.path;
+          renderFolderPicker();
+          elements.folderPickerList.querySelector(`[data-entry-path="${CSS.escape(entry.path)}"]`)?.focus();
+        }
+      });
       fragment.append(button);
     }
     elements.folderPickerList.append(fragment);
   }
   if (result?.truncated) {
-    elements.folderPickerStatus.textContent = t("Only the first {count} folders are shown.", {
-      count: String(folders.length)
+    elements.folderPickerStatus.textContent = t("Only the first {count} entries are shown.", {
+      count: String(folders.length + files.length)
     });
   }
 }
 
 function selectCurrentFolder() {
-  const path = state.folderPickerResult?.path;
+  const path = state.folderPickerSelectedFile || state.folderPickerResult?.path;
   if (!path) return;
   const modelInput = elements.launchForm.querySelector('[data-field="model"]');
   modelInput.value = path;
