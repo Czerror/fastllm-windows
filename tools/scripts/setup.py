@@ -74,6 +74,7 @@ setup (
         'pyreadline3',
         'transformers',
         'jinja2>=3.1.0',
+        'triton>=3.6; sys_platform == "linux"',
         'nvidia-cuda-runtime-cu12',
         'nvidia-cublas-cu12',
         'nvidia-nccl-cu12'
