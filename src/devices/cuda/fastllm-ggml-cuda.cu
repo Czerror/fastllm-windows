@@ -7,7 +7,6 @@
 // https://github.com/ikawrakow/ik_llama.cpp
 
 #include <set>
-#include <cctype>
 #include <cstdlib>
 #include <string>
 #include <thrust/device_vector.h>
@@ -2413,152 +2412,6 @@ static void dequantize_row_q6_K_r4_cuda(const void * vx, dst_t * y, const int64_
     dequantize_block_q6_K_r4<<<nblocks, 128, 0, stream>>>(vx, y, n_per_row);
 }
 
-static bool FastllmGGUFIsKQuantType(ggml_type type) {
-    return type == GGML_TYPE_Q2_K || type == GGML_TYPE_Q4_K ||
-           type == GGML_TYPE_Q5_K || type == GGML_TYPE_Q6_K ||
-           type == GGML_TYPE_Q2_K_R4 || type == GGML_TYPE_Q4_K_R4 ||
-           type == GGML_TYPE_Q5_K_R4 || type == GGML_TYPE_Q6_K_R4;
-}
-
-static bool FastllmGGUFMatchesFp32DequantMode(const std::string &mode,
-                                              const fastllm::Data &weight,
-                                              ggml_type type) {
-    if (mode == "1" || mode == "true" || mode == "on" || mode == "all") {
-        return true;
-    }
-    if (mode == "q8") {
-        return type == GGML_TYPE_Q8_0;
-    }
-    if (mode == "kquant") {
-        return FastllmGGUFIsKQuantType(type);
-    }
-    if (mode == "lm_head" || mode == "output") {
-        return weight.name == "lm_head.weight";
-    }
-    if (mode == "shared" || mode == "shexp") {
-        return weight.name.find(".mlp.shared_experts.") != std::string::npos;
-    }
-    if (mode == "shared_gateup" || mode == "shexp_gateup") {
-        return weight.name.find(".mlp.shared_experts.gateup_proj.") != std::string::npos ||
-               weight.name.find(".mlp.shared_experts.gate_proj.") != std::string::npos ||
-               weight.name.find(".mlp.shared_experts.up_proj.") != std::string::npos;
-    }
-    if (mode == "shared_down" || mode == "shexp_down") {
-        return weight.name.find(".mlp.shared_experts.down_proj.") != std::string::npos;
-    }
-    if (mode == "attn_output" || mode == "o_proj") {
-        return weight.name.find(".self_attn.o_proj.") != std::string::npos;
-    }
-    if (mode == "ffn" || mode == "mlp") {
-        return weight.name.find(".mlp.") != std::string::npos;
-    }
-    if (mode == "ffn_dense" || mode == "dense_ffn") {
-        return weight.name.find(".mlp.gate_proj.") != std::string::npos ||
-               weight.name.find(".mlp.up_proj.") != std::string::npos ||
-               weight.name.find(".mlp.down_proj.") != std::string::npos;
-    }
-    if (mode == "ffn_dense_gateup" || mode == "dense_ffn_gateup" ||
-        mode == "ffn_gateup" || mode == "dense_gateup") {
-        return weight.name.find(".mlp.gate_proj.") != std::string::npos ||
-               weight.name.find(".mlp.up_proj.") != std::string::npos;
-    }
-    if (mode == "ffn_dense_down" || mode == "dense_ffn_down" ||
-        mode == "ffn_down" || mode == "dense_down") {
-        return weight.name.find(".mlp.down_proj.") != std::string::npos;
-    }
-    return false;
-}
-
-static bool FastllmGGUFUseFp32Dequant(const fastllm::Data &weight, ggml_type type) {
-    if (weight.forceGGUFFp32Dequant) {
-        return true;
-    }
-
-    const char *env = std::getenv("FASTLLM_GGUF_FP32_DEQUANT");
-    if (env == nullptr || env[0] == '\0') {
-        return false;
-    }
-
-    std::string modes(env);
-    std::string cur;
-    for (char ch : modes) {
-        if (ch == ',' || ch == ';' || ch == ':') {
-            if (FastllmGGUFMatchesFp32DequantMode(cur, weight, type)) {
-                return true;
-            }
-            cur.clear();
-        } else if (!std::isspace((unsigned char) ch)) {
-            cur.push_back((char) std::tolower((unsigned char) ch));
-        }
-    }
-    return FastllmGGUFMatchesFp32DequantMode(cur, weight, type);
-}
-
-static bool FastllmGGUFUsePedanticSgemm(const fastllm::Data &weight, ggml_type type) {
-    const char *env = std::getenv("FASTLLM_GGUF_PEDANTIC_SGEMM");
-    if (env == nullptr || env[0] == '\0') {
-        return false;
-    }
-
-    std::string modes(env);
-    std::string cur;
-    for (char ch : modes) {
-        if (ch == ',' || ch == ';' || ch == ':') {
-            if (FastllmGGUFMatchesFp32DequantMode(cur, weight, type)) {
-                return true;
-            }
-            cur.clear();
-        } else if (!std::isspace((unsigned char) ch)) {
-            cur.push_back((char) std::tolower((unsigned char) ch));
-        }
-    }
-    return FastllmGGUFMatchesFp32DequantMode(cur, weight, type);
-}
-
-static bool FastllmGGUFUseForceMmvq(const fastllm::Data &weight, ggml_type type) {
-    const char *env = std::getenv("FASTLLM_GGUF_FORCE_MMVQ");
-    if (env == nullptr || env[0] == '\0') {
-        return false;
-    }
-
-    std::string modes(env);
-    std::string cur;
-    for (char ch : modes) {
-        if (ch == ',' || ch == ';' || ch == ':') {
-            if (FastllmGGUFMatchesFp32DequantMode(cur, weight, type)) {
-                return true;
-            }
-            cur.clear();
-        } else if (!std::isspace((unsigned char) ch)) {
-            cur.push_back((char) std::tolower((unsigned char) ch));
-        }
-    }
-    return FastllmGGUFMatchesFp32DequantMode(cur, weight, type);
-}
-
-static cublasStatus_t FastllmGGUFSgemmFloat(
-        cublasHandle_t handle, cublasOperation_t transa, cublasOperation_t transb,
-        int m, int n, int k, const float *alpha,
-        const float *A, int lda, const float *B, int ldb,
-        const float *beta, float *C, int ldc, bool pedantic) {
-#if CUBLAS_VERSION >= 11000
-    if (pedantic) {
-        return cublasGemmEx(
-                handle, transa, transb, m, n, k,
-                alpha,
-                A, CUDA_R_32F, lda,
-                B, CUDA_R_32F, ldb,
-                beta,
-                C, CUDA_R_32F, ldc,
-                CUBLAS_COMPUTE_32F_PEDANTIC,
-                CUBLAS_GEMM_DEFAULT);
-    }
-#endif
-    return cublasSgemm(
-            handle, transa, transb, m, n, k,
-            alpha, A, lda, B, ldb, beta, C, ldc);
-}
-
 static void *FastllmGGUFGetDequantWorkspace(size_t *workspaceBytes,
                                             const fastllm::Data &weight,
                                             const char *context) {
@@ -2818,22 +2671,15 @@ bool FastllmCudaMatMulFloatGGUF(const fastllm::Data &input, fastllm::Data &weigh
     ggml_backend_cuda_context ctx;
 
     ggml_type ggufType = (ggml_type)weight.ggmlType;
-    const bool forceFp32Dequant = FastllmGGUFUseFp32Dequant(weight, ggufType);
+    const bool forceFp32Dequant = weight.forceGGUFFp32Dequant;
     auto dequantFp32 = forceFp32Dequant ? ggml_get_to_fp32_cuda(ggufType) : nullptr;
-    bool pedanticSgemm = FastllmGGUFUsePedanticSgemm(weight, ggufType);
     auto dequantFp16 = ggml_get_to_fp16_cuda(ggufType);
     auto has_vec_dot = get_has_vec_dot_q_cuda((ggml_type)weight.ggmlType);
-    bool forceMmvq = FastllmGGUFUseForceMmvq(weight, ggufType) && has_vec_dot;
-    if (forceMmvq) {
-        dequantFp32 = nullptr;
-        dequantFp16 = nullptr;
-    }
     cudaStream_t stream = cudaStreamPerThread;
     const bool usedExtendedMmvq = !forceFp32Dequant &&
         FastllmCudaFloatMatMulGGUFMMVQ(
             cudaInput, weight.cudaData, cudaOutput, weight.ggmlType,
             n, m, k, stream);
-    // dequant = nullptr; /// TODO: dequant目前似乎有bug，待查
 
     if (!usedExtendedMmvq &&
         (forceFp32Dequant || n > MMVQ_MAX_BATCH_SIZE || !has_vec_dot) &&
@@ -2856,7 +2702,7 @@ bool FastllmCudaMatMulFloatGGUF(const fastllm::Data &input, fastllm::Data &weigh
             dequantFp32((const char *)weight.cudaData + (size_t)kOff * srcRowBytes,
                         cudaFp32Weight, kc, m, stream);
 
-            status = FastllmGGUFSgemmFloat(
+            status = cublasSgemm(
                     fastllmCublasHandle,
                     CUBLAS_OP_T, CUBLAS_OP_N,
                     kc, n, m,
@@ -2864,11 +2710,10 @@ bool FastllmCudaMatMulFloatGGUF(const fastllm::Data &input, fastllm::Data &weigh
                     m, cudaInput,
                     m, &h_beta,
                     cudaOutput + kOff,
-                    k, pedanticSgemm);
+                    k);
             if (status != CUBLAS_STATUS_SUCCESS) {
                 printf("Error: cublas error.\n");
                 throw("cublas error");
-                exit(0);
             }
         }
     } else if (!usedExtendedMmvq &&
@@ -2901,7 +2746,7 @@ bool FastllmCudaMatMulFloatGGUF(const fastllm::Data &input, fastllm::Data &weigh
             FastllmCudaHalf2FloatKernel <<< (len - 1) / threadPerBlock + 1, threadPerBlock, 0, stream >>>(
                     cudaFp16Weight, cudaFp32Weight, len);
 
-            status = FastllmGGUFSgemmFloat(
+            status = cublasSgemm(
                     fastllmCublasHandle,
                     CUBLAS_OP_T, CUBLAS_OP_N,
                     kc, n, m,
@@ -2909,11 +2754,10 @@ bool FastllmCudaMatMulFloatGGUF(const fastllm::Data &input, fastllm::Data &weigh
                     m, cudaInput,
                     m, &h_beta,
                     cudaOutput + kOff,
-                    k, pedanticSgemm);
+                    k);
             if (status != CUBLAS_STATUS_SUCCESS) {
                 printf("Error: cublas error.\n");
                 throw("cublas error");
-                exit(0);
             }
         }
     } else if (!usedExtendedMmvq) {
@@ -3001,11 +2845,10 @@ bool FastllmCudaHalfMatMulGGUF(const fastllm::Data &input, fastllm::Data &weight
     ggml_backend_cuda_context ctx;
 
     const ggml_type ggufType = (ggml_type)weight.ggmlType;
-    const bool forceDequant = FastllmGGUFUseFp32Dequant(weight, ggufType);
+    const bool forceDequant = weight.forceGGUFFp32Dequant;
     auto dequant = ggml_get_to_fp16_cuda(ggufType);
     auto has_vec_dot = get_has_vec_dot_q_cuda(ggufType);
     cudaStream_t stream = cudaStreamPerThread;
-    // dequant = nullptr; /// TODO: dequant目前似乎有bug，待查
 
     const bool usedMmq = !forceDequant &&
         FastllmCudaHalfMatMulGGUFMMQ(
@@ -3454,7 +3297,7 @@ bool FastllmCudaBFloat16MatMulGGUF(const fastllm::Data &input, fastllm::Data &we
     ggml_backend_cuda_context ctx;
 
     const ggml_type ggufType = (ggml_type)weight.ggmlType;
-    const bool forceDequant = FastllmGGUFUseFp32Dequant(weight, ggufType);
+    const bool forceDequant = weight.forceGGUFFp32Dequant;
     auto dequant = ggml_get_to_bf16_cuda(ggufType);
     auto has_vec_dot = get_has_vec_dot_q_cuda(ggufType);
     cudaStream_t stream = cudaStreamPerThread;
