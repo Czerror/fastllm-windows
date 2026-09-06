@@ -1344,6 +1344,21 @@ def detect_hardware(model_path: str = "") -> Dict[str, Any]:
     }
 
 
+def _folder_browser_drives() -> List[Dict[str, str]]:
+    if os.name != "nt":
+        return []
+    try:
+        import ctypes
+        # Enumerate drive letters without probing removable or network volumes.
+        mask = ctypes.windll.kernel32.GetLogicalDrives()
+    except (AttributeError, OSError):
+        return []
+    return [
+        {"name": f"{chr(65 + index)}:", "path": f"{chr(65 + index)}:\\"}
+        for index in range(26) if mask & (1 << index)
+    ]
+
+
 def browse_folders(path: str = "") -> Dict[str, Any]:
     """Return bounded folders and files from the machine running Launcher."""
     raw_path = str(path or "").strip()
@@ -1363,6 +1378,8 @@ def browse_folders(path: str = "") -> Dict[str, Any]:
         while not os.path.isdir(current):
             parent = os.path.dirname(current)
             if parent == current:
+                if raw_path:
+                    raise LauncherError("Folder root is unavailable.")
                 current = ""
                 break
             current = parent
@@ -1400,6 +1417,7 @@ def browse_folders(path: str = "") -> Dict[str, Any]:
     return {
         "path": current,
         "parent": "" if parent == current else parent,
+        "drives": _folder_browser_drives(),
         "folders": folders,
         "files": files,
         "selectedFile": selected_file,

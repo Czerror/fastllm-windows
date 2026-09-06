@@ -628,12 +628,19 @@
           </div>
           <button id="folder-picker-close" class="folder-picker-close" type="button" aria-label="关闭文件选择器">×</button>
         </header>
-        <div class="folder-picker-location">
-          <span>当前文件夹</span>
-          <code id="folder-picker-current">—</code>
-        </div>
+        <form id="folder-picker-location" class="folder-picker-location">
+          <label for="folder-picker-current">文件夹路径</label>
+          <div class="folder-picker-path">
+            <input id="folder-picker-current" type="text" placeholder="输入文件夹或文件路径" spellcheck="false" autocomplete="off">
+            <button class="folder-picker-up" type="submit">前往</button>
+          </div>
+        </form>
         <div class="folder-picker-toolbar">
           <button id="folder-picker-up" class="folder-picker-up" type="button">↑ 上一级</button>
+          <label id="folder-picker-drive-field" class="folder-picker-drive-field hidden" for="folder-picker-drive">
+            <span>磁盘</span>
+            <select id="folder-picker-drive"></select>
+          </label>
         </div>
         <div id="folder-picker-list" class="folder-picker-list" role="group" aria-label="文件和文件夹"></div>
         <div id="folder-picker-status" class="folder-picker-status" role="status" aria-live="polite"></div>

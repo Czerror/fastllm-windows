@@ -332,7 +332,7 @@ class LauncherWebUIBrowserTest(unittest.TestCase):
         model.fill(self.temp.name)
         self.page.locator('#choose-model-folder').click()
         self.page.locator('#folder-picker-list button').filter(has_text='model folder').click()
-        expect(self.page.locator('#folder-picker-current')).to_have_text(folder)
+        expect(self.page.locator('#folder-picker-current')).to_have_value(folder)
         self.page.locator('#folder-picker-select').click()
         expect(model).to_have_value(folder)
         self.page.locator('#choose-model-folder').click()
@@ -341,6 +341,56 @@ class LauncherWebUIBrowserTest(unittest.TestCase):
         self.page.locator('#folder-picker-select').click()
         expect(model).to_have_value(model_file)
         expect(self.page.locator('#folder-picker-modal')).to_be_hidden()
+
+    def test_model_picker_switches_windows_drives_and_recovers_from_unavailable_volume(self):
+        drives = [{'name': letter + ':', 'path': letter + ':\\'} for letter in ('C', 'D', 'E')]
+        folder = 'D:\\模型 目录'
+        model_file = folder + '\\model.gguf'
+        share = '\\\\nas\\models'
+
+        def browse(path=''):
+            path = path or 'C:\\'
+            if path == 'E:\\':
+                from fastllm_pytools.launcher import LauncherError
+                raise LauncherError('Folder root is unavailable.')
+            selected = model_file if path == model_file else ''
+            if selected:
+                path = folder
+            return {'path': path, 'parent': 'D:\\' if path == folder else '', 'drives': drives,
+                    'folders': [{'name': '模型 目录', 'path': folder}] if path == 'D:\\' else [],
+                    'files': [{'name': 'model.gguf', 'path': model_file}] if path == folder else [],
+                    'selectedFile': selected, 'truncated': False}
+
+        self.page.locator('#new-profile').click()
+        self.page.locator('[data-config-mode][value="custom"]').check()
+        with patch('fastllm_pytools.launcher.browse_folders', side_effect=browse):
+            self.page.locator('#choose-model-folder').click()
+            drive = self.page.locator('#folder-picker-drive')
+            location = self.page.locator('#folder-picker-current')
+            expect(drive).to_be_visible()
+            expect(drive).to_have_value('C:\\')
+            expect(self.page.locator('#folder-picker-up')).to_be_disabled()
+            drive.select_option('E:\\')
+            expect(self.page.locator('#folder-picker-status')).to_contain_text('Folder root is unavailable.')
+            expect(self.page.locator('#folder-picker-select')).to_be_disabled()
+            drive.select_option('D:\\')
+            expect(location).to_have_value('D:\\')
+            self.page.locator('#folder-picker-list button').filter(has_text='模型 目录').click()
+            expect(location).to_have_value(folder)
+            self.page.locator('#folder-picker-up').click()
+            expect(location).to_have_value('D:\\')
+            location.fill(share)
+            location.press('Enter')
+            expect(drive).to_have_value('')
+            expect(location).to_have_value(share)
+            location.fill(model_file)
+            location.press('Enter')
+            expect(self.page.locator('#folder-picker-select')).to_have_text('Select this file')
+            expect(location).to_have_value(folder)
+            expect(drive).to_have_value('D:\\')
+            self.page.locator('#folder-picker-select').click()
+            expect(self.page.locator('#model-path')).to_have_value(model_file)
+            expect(self.page.locator('#folder-picker-modal')).to_be_hidden()
 
     def test_speculative_switch_detects_mtp_and_restores_the_saved_preference(self):
         from test_launcher_mtp import cuda_hardware, write_mtp_checkpoint, write_safetensors

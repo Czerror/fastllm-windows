@@ -10,7 +10,7 @@ import tempfile
 import threading
 import time
 import unittest
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import nullcontext, redirect_stderr, redirect_stdout
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -595,18 +595,50 @@ class LauncherConfigTest(unittest.TestCase):
         child = os.path.join(browser_root, "model")
         os.makedirs(child)
         client = TestClient(create_launcher_app(self.runtime, "control-secret"))
-        response = client.get(
-            "/api/folders",
-            params={"path": browser_root},
-            headers={"X-FTLLM-Launcher-Token": "control-secret"},
-        )
+        drives = [{"name": "D:", "path": "D:\\"}]
+        with patch("fastllm_pytools.launcher._folder_browser_drives", return_value=drives):
+            response = client.get(
+                "/api/folders",
+                params={"path": browser_root},
+                headers={"X-FTLLM-Launcher-Token": "control-secret"},
+            )
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["path"], browser_root)
+        self.assertEqual(response.json()["drives"], drives)
         self.assertEqual(response.json()["folders"], [{
             "name": "model",
             "path": child,
         }])
+
+    def test_windows_folder_browser_lists_drives_and_selects_files_on_another_volume(self):
+        import ctypes
+        import ntpath
+
+        folder = "D:\\模型 目录"
+        model_file = folder + "\\model.gguf"
+        entry = SimpleNamespace(name="model.gguf", path=model_file,
+                                is_dir=lambda **kwargs: False, is_file=lambda **kwargs: True)
+        windows_os = SimpleNamespace(name="nt", path=ntpath,
+                                     scandir=lambda path: nullcontext(iter([entry] if path == folder else [])))
+        kernel32 = SimpleNamespace(GetLogicalDrives=lambda: (1 << 2) | (1 << 3) | (1 << 25))
+        with patch("fastllm_pytools.launcher.os", windows_os), \
+                patch("ctypes.windll", SimpleNamespace(kernel32=kernel32), create=True), \
+                patch("ntpath.isdir", side_effect=lambda path: path in ("C:\\", "D:\\", folder)), \
+                patch("ntpath.isfile", side_effect=lambda path: path == model_file):
+            listing = browse_folders(model_file)
+            self.assertEqual(listing["path"], folder)
+            self.assertEqual(listing["parent"], "D:\\")
+            self.assertEqual(listing["selectedFile"], model_file)
+            self.assertEqual(listing["files"], [{"name": "model.gguf", "path": model_file}])
+            self.assertEqual(listing["drives"], [
+                {"name": "C:", "path": "C:\\"},
+                {"name": "D:", "path": "D:\\"},
+                {"name": "Z:", "path": "Z:\\"},
+            ])
+            self.assertEqual(browse_folders("D:\\")["parent"], "")
+            with self.assertRaisesRegex(LauncherError, "Folder root is unavailable"):
+                browse_folders("Z:\\")
 
     def test_control_api_requires_launcher_token(self):
         from fastapi.testclient import TestClient

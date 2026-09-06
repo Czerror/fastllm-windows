@@ -2,6 +2,10 @@
   "locale": "en-US",
   "name": "English",
   "static": {
+    "文件夹路径": "Folder path",
+    "输入文件夹或文件路径": "Enter a folder or file path",
+    "前往": "Go",
+    "磁盘": "Drive",
     "推理状态": "Inference status",
     "上下文": "Context",
     "并发时显示总速度，3 秒无新采样时归零。": "Combined throughput across requests; resets to zero after 3 seconds without a new sample.",
@@ -221,6 +225,8 @@
     "打开工作室": "Open Studio"
   },
   "messages": {
+    "Select a drive": "Select a drive",
+    "Folder root is unavailable.": "Folder root is unavailable.",
     "Available context per session (input + output): {tokens} tokens. 1K = 1024 tokens.": "Available context per session (input + output): {tokens} tokens. 1K = 1024 tokens.",
     "Context capacity has not been reported yet.": "Context capacity has not been reported yet.",
     "Choose a model and configuration mode, then save or start your service.": "Choose a model and configuration mode, then save or start your service.",

@@ -160,6 +160,7 @@ function cacheElements() {
     "refresh-hardware", "hardware-status", "hardware-grid", "path-suggestions",
     "choose-model-folder", "folder-picker-modal", "folder-picker-title",
     "folder-picker-close", "folder-picker-current", "folder-picker-up",
+    "folder-picker-location", "folder-picker-drive-field", "folder-picker-drive",
     "folder-picker-list", "folder-picker-status", "folder-picker-cancel",
     "folder-picker-select",
     "confirmation-modal", "confirmation-icon", "confirmation-kicker",
@@ -491,6 +492,13 @@ function bindEvents() {
   elements.folderPickerClose.addEventListener("click", () => closeFolderPicker());
   elements.folderPickerCancel.addEventListener("click", () => closeFolderPicker());
   elements.folderPickerSelect.addEventListener("click", selectCurrentFolder);
+  elements.folderPickerLocation.addEventListener("submit", (event) => {
+    event.preventDefault();
+    loadFolderPicker(elements.folderPickerCurrent.value.trim());
+  });
+  elements.folderPickerDrive.addEventListener("change", () => {
+    if (elements.folderPickerDrive.value) loadFolderPicker(elements.folderPickerDrive.value);
+  });
   elements.folderPickerUp.addEventListener("click", () => {
     if (state.folderPickerResult?.parent) loadFolderPicker(state.folderPickerResult.parent);
   });
@@ -2091,6 +2099,7 @@ async function loadFolderPicker(path) {
   state.folderPickerLoading = true;
   state.folderPickerError = "";
   state.folderPickerSelectedFile = "";
+  elements.folderPickerCurrent.value = String(path || "");
   renderFolderPicker();
   try {
     const query = new URLSearchParams({ path: String(path || "") });
@@ -2104,6 +2113,7 @@ async function loadFolderPicker(path) {
     }
     state.folderPickerResult = result;
     state.folderPickerSelectedFile = result.selectedFile || "";
+    elements.folderPickerCurrent.value = result.path;
   } catch (error) {
     if (requestId !== state.folderPickerRequestId) return;
     state.folderPickerError = friendlyError(error);
@@ -2115,6 +2125,23 @@ async function loadFolderPicker(path) {
 }
 
 function renderFolderPicker() {
+  const drives = state.folderPickerResult?.drives || [];
+  elements.folderPickerDriveField.classList.toggle("hidden", !drives.length);
+  elements.folderPickerDrive.replaceChildren();
+  const currentDrive = elements.folderPickerCurrent.value.match(/^[a-z]:[\\/]/i)?.[0].replace("/", "\\").toUpperCase();
+  if (!drives.some((drive) => drive.path.toUpperCase() === currentDrive)) {
+    const placeholder = document.createElement("option");
+    placeholder.value = "";
+    placeholder.textContent = t("Select a drive");
+    elements.folderPickerDrive.append(placeholder);
+  }
+  for (const drive of drives) {
+    const option = document.createElement("option");
+    option.value = drive.path;
+    option.textContent = drive.name;
+    option.selected = drive.path.toUpperCase() === currentDrive;
+    elements.folderPickerDrive.append(option);
+  }
   elements.folderPickerList.replaceChildren();
   elements.folderPickerStatus.className = "folder-picker-status";
   elements.folderPickerStatus.textContent = "";
@@ -2132,7 +2159,6 @@ function renderFolderPicker() {
   );
 
   if (state.folderPickerLoading) {
-    elements.folderPickerCurrent.textContent = state.folderPickerResult?.path || t("Loading folders...");
     const loading = document.createElement("div");
     loading.className = "folder-picker-placeholder loading";
     loading.textContent = t("Loading folders...");
@@ -2141,7 +2167,6 @@ function renderFolderPicker() {
   }
 
   if (state.folderPickerError) {
-    elements.folderPickerCurrent.textContent = state.folderPickerResult?.path || "—";
     elements.folderPickerStatus.classList.add("error");
     elements.folderPickerStatus.textContent = t("Unable to browse folders: {error}", {
       error: state.folderPickerError
@@ -2154,8 +2179,6 @@ function renderFolderPicker() {
   }
 
   const result = state.folderPickerResult;
-  elements.folderPickerCurrent.textContent = result?.path || "—";
-  elements.folderPickerCurrent.title = result?.path || "";
   const folders = result?.folders || [];
   const files = result?.files || [];
   if (!folders.length && !files.length) {
