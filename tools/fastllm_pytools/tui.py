@@ -28,45 +28,17 @@ PANEL_MAX_HEIGHT = 28
 PANEL_PADDING_X = 2
 PANEL_PADDING_Y = 1
 DEFAULT_ESCDELAY_MS = 25
-DEFAULT_MODELSCOPE_MODEL_ID = "Qwen/Qwen3-0.6B"
-QWEN_MODELSCOPE_MODEL_CHOICES: Sequence[Choice] = (
-    ("Qwen/Qwen3.6-27B-FP8", "Qwen3.6-27B-FP8"),
-    (DEFAULT_MODELSCOPE_MODEL_ID, "Qwen3-0.6B"),
-    ("Qwen/Qwen3-1.7B", "Qwen3-1.7B"),
-    ("Qwen/Qwen3-4B", "Qwen3-4B"),
-    ("Qwen/Qwen3-8B", "Qwen3-8B"),
-    ("Qwen/Qwen3-14B", "Qwen3-14B"),
-    ("Qwen/Qwen3-32B", "Qwen3-32B"),
-    ("Qwen/Qwen3-30B-A3B", "Qwen3-30B-A3B"),
-    ("Qwen/Qwen3-235B-A22B", "Qwen3-235B-A22B"),
-)
-DEEPSEEK_MODELSCOPE_MODEL_CHOICES: Sequence[Choice] = (
-    ("deepseek-ai/DeepSeek-R1-Distill-Qwen-7B", "DeepSeek-R1-Distill-Qwen-7B"),
-    ("deepseek-ai/DeepSeek-R1-Distill-Qwen-14B", "DeepSeek-R1-Distill-Qwen-14B"),
-    ("deepseek-ai/DeepSeek-R1-Distill-Qwen-32B", "DeepSeek-R1-Distill-Qwen-32B"),
-)
-MINIMAX_MODELSCOPE_MODEL_CHOICES: Sequence[Choice] = (
-    ("MiniMax/MiniMax-Text-01", "MiniMax-Text-01"),
-    ("MiniMax/MiniMax-M1-40k", "MiniMax-M1-40k"),
-    ("MiniMax/MiniMax-M1-80k", "MiniMax-M1-80k"),
-)
+DEFAULT_MODELSCOPE_MODEL_ID = "Qwen/Qwen3.8-27B-FP8"
 HOT_MODELSCOPE_MODEL_CHOICES: Sequence[Choice] = (
-    ("Qwen/Qwen3.6-27B-FP8", "Qwen3.6-27B-FP8"),
-    (DEFAULT_MODELSCOPE_MODEL_ID, "Qwen3-0.6B"),
-    ("Qwen/Qwen3-8B", "Qwen3-8B"),
-    ("Qwen/Qwen3-30B-A3B", "Qwen3-30B-A3B"),
-    ("deepseek-ai/DeepSeek-R1-Distill-Qwen-7B", "DeepSeek-R1-Distill-Qwen-7B"),
-    ("deepseek-ai/DeepSeek-R1-Distill-Qwen-32B", "DeepSeek-R1-Distill-Qwen-32B"),
-    ("MiniMax/MiniMax-M1-40k", "MiniMax-M1-40k"),
+    (DEFAULT_MODELSCOPE_MODEL_ID, "Qwen3.8-27B-FP8"),
+    ("QUASAR-QAT/Qwen3.8-27B-QUASAR-NVFP4", "Qwen3.8-27B-QUASAR-NVFP4"),
+    ("z-lab/Qwen3.8-27B-DFlash2", "Qwen3.8-27B-DFlash2"),
 )
 CUSTOM_MODELSCOPE_MODEL_CHOICES: Sequence[Choice] = (
     ("custom", "自定义模型ID"),
 )
 MODELSCOPE_MODEL_GROUPS: Sequence[ModelGroup] = (
     ("hot", "热门模型", HOT_MODELSCOPE_MODEL_CHOICES),
-    ("qwen", "千问系列", QWEN_MODELSCOPE_MODEL_CHOICES),
-    ("deepseek", "DeepSeek系列", DEEPSEEK_MODELSCOPE_MODEL_CHOICES),
-    ("minimax", "MiniMax系列", MINIMAX_MODELSCOPE_MODEL_CHOICES),
     ("custom", "自定义", CUSTOM_MODELSCOPE_MODEL_CHOICES),
 )
 MODELSCOPE_MODEL_GROUP_CHOICES: Sequence[Choice] = tuple(
