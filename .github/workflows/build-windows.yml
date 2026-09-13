@@ -1,0 +1,499 @@
+name: Build Windows Release
+
+on:
+  # 推送版本标签时触发
+  push:
+    tags:
+      - 'v*'
+  
+  # 手动触发
+  workflow_dispatch:
+    inputs:
+      build_cpu:
+        description: 'Build CPU version'
+        type: boolean
+        default: true
+      build_cuda:
+        description: 'Build CUDA version'
+        type: boolean
+        default: true
+      cuda_arch:
+        description: 'CUDA architectures (semicolon separated)'
+        type: string
+        default: '75;80;86;89;90;120'
+  
+  # 被 sync-upstream 工作流调用
+  workflow_call:
+    inputs:
+      build_cpu:
+        description: 'Build CPU version'
+        type: boolean
+        default: true
+      build_cuda:
+        description: 'Build CUDA version'
+        type: boolean
+        default: true
+      cuda_arch:
+        description: 'CUDA architectures (semicolon separated)'
+        type: string
+        default: '75;80;86;89;90;120'
+
+env:
+  BUILD_TYPE: Release
+
+permissions:
+  contents: write
+
+jobs:
+  build-cpu:
+    name: Build CPU Version
+    runs-on: windows-latest
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_cpu }}
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v7  # 自动使用 v7.x 最新版本
+      with:
+        submodules: true
+    
+    - name: Setup MSVC Developer Environment
+      uses: TheMrMilchmann/setup-msvc-dev@v4
+      with:
+        arch: x64
+    
+    - name: Setup Python
+      uses: actions/setup-python@v7  # 自动使用 v7.x 最新版本
+      with:
+        python-version: '3.11'
+    
+    - name: Get version from setup.py
+      id: version
+      shell: bash
+      run: |
+        VERSION=$(sed -n 's/.*version\s*=\s*"\([^"]*\)".*/\1/p' tools/scripts/setup.py)
+        echo "version=${VERSION}" >> $GITHUB_OUTPUT
+        echo "Detected version: ${VERSION}"
+    
+    - name: Configure CMake (CPU)
+      run: |
+        mkdir build
+        cd build
+        cmake .. -A x64 `
+          -DCMAKE_CXX_STANDARD=20 `
+          -DCMAKE_CXX_STANDARD_REQUIRED=ON `
+          -DCMAKE_CXX_EXTENSIONS=OFF `
+          -DUSE_MMAP=ON `
+          -DUSE_SENTENCEPIECE=ON `
+          -DPY_API=ON
+    
+    - name: Build (CPU Release)
+      run: |
+        cd build
+        cmake --build . --config Release --parallel $env:NUMBER_OF_PROCESSORS
+    
+    - name: Prepare Release Package (CPU)
+      shell: bash
+      run: |
+        VERSION="${{ steps.version.outputs.version }}"
+        
+        mkdir -p release-cpu/bin
+        mkdir -p release-cpu/ftllm
+        mkdir -p release-cpu/web
+        mkdir -p release-cpu/docs
+        
+        # Copy executables - ftllm.exe to root, others to bin/
+        for exe in build/Release/*.exe; do
+          name=$(basename "$exe")
+          if [ "$name" = "ftllm.exe" ]; then
+            cp "$exe" release-cpu/
+          else
+            cp "$exe" release-cpu/bin/
+          fi
+        done
+        
+        # Copy Python module (.pyd)
+        cp build/Release/*.pyd release-cpu/ftllm/ || true
+        
+        # Copy fastllm_tools.dll (ctypes native library)
+        if [ -f "build/tools/ftllm/fastllm_tools.dll" ]; then
+          cp build/tools/ftllm/fastllm_tools.dll release-cpu/ftllm/
+        fi
+        
+        # Copy VC++ runtime
+        if [ -d "runtime_libs/vcrt" ]; then
+          cp runtime_libs/vcrt/*.dll release-cpu/bin/
+        fi
+        
+        # Copy Python tools from source (exclude root __init__.py; it will be generated)
+        while IFS= read -r -d '' srcFile; do
+          relPath="${srcFile#tools/fastllm_pytools/}"
+          if [ "$relPath" = "__init__.py" ]; then
+            continue
+          fi
+          mkdir -p "release-cpu/ftllm/$(dirname "$relPath")"
+          cp "$srcFile" "release-cpu/ftllm/$relPath"
+        done < <(find tools/fastllm_pytools -type f -print0)
+        
+        # Generate __init__.py with correct version
+        printf '%s\n' \
+          '__all__ = ["llm"]' \
+          '' \
+          'try:' \
+          '    from importlib.metadata import version' \
+          '    __version__ = version("ftllm")' \
+          'except:' \
+          '    try:' \
+          '        __version__ = version("ftllm-rocm")' \
+          '    except:' \
+          '        __version__ = "'"${VERSION}"'"' \
+          > release-cpu/ftllm/__init__.py
+        
+        # Copy __main__.py for python -m ftllm (keep identical to source)
+        cp tools/fastllm_pytools/__main__.py release-cpu/ftllm/__main__.py
+        
+        # Copy web resources
+        cp -r example/webui/web/* release-cpu/web/
+        
+        # Copy docs (only top-level docs/*.md; exclude 使用说明.md for root)
+        for md in docs/*.md; do
+          if [ "$(basename "$md")" != "使用说明.md" ]; then
+            cp "$md" release-cpu/docs/
+          fi
+        done
+        cp README*.md release-cpu/docs/
+        
+        # Copy 使用说明.md to root
+        if [ -f "docs/使用说明.md" ]; then
+          cp docs/使用说明.md release-cpu/
+        fi
+    
+    - name: Upload CPU Artifact
+      uses: actions/upload-artifact@v7  # 自动使用 v7.x 最新版本
+      with:
+        name: fastllm-win-x64-cpu-${{ steps.version.outputs.version }}
+        path: release-cpu/
+        retention-days: 30
+
+  build-cuda:
+    name: Build CUDA Version
+    runs-on: windows-latest
+    needs: build-cpu  # 等待 CPU 版本完成后再编译，避免并发资源竞争
+    if: ${{ always() && (github.event_name != 'workflow_dispatch' || inputs.build_cuda) }}
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v7  # 自动使用 v7.x 最新版本
+      with:
+        submodules: true
+    
+    - name: Setup MSVC Developer Environment
+      uses: TheMrMilchmann/setup-msvc-dev@v4
+      with:
+        arch: x64
+    
+    - name: Setup Python
+      uses: actions/setup-python@v7  # 自动使用 v7.x 最新版本
+      with:
+        python-version: '3.11'
+    
+    - name: Get version from setup.py
+      id: version
+      shell: bash
+      run: |
+        VERSION=$(sed -n 's/.*version\s*=\s*"\([^"]*\)".*/\1/p' tools/scripts/setup.py)
+        echo "version=${VERSION}" >> $GITHUB_OUTPUT
+        echo "Detected version: ${VERSION}"
+    
+    - name: Install CUDA Toolkit
+      uses: Jimver/cuda-toolkit@v0.2.36
+      id: cuda-toolkit
+      with:
+        cuda: '13.1.0'
+        method: 'local'  # 完整安装，包含所有头文件
+    
+    - name: Display CUDA version
+      run: |
+        echo "CUDA Version: ${{ steps.cuda-toolkit.outputs.cuda }}"
+        echo "CUDA Path: ${{ steps.cuda-toolkit.outputs.CUDA_PATH }}"
+        nvcc --version
+    
+    - name: Configure CMake (CUDA)
+      run: |
+        $cudaArch = "${{ github.event.inputs.cuda_arch || '75;80;86;89;90;120' }}"
+        mkdir build-cuda
+        cd build-cuda
+        cmake .. -A x64 `
+          -DCMAKE_CXX_STANDARD=20 `
+          -DCMAKE_CXX_STANDARD_REQUIRED=ON `
+          -DCMAKE_CXX_EXTENSIONS=OFF `
+          -DUSE_CUDA=ON `
+          -DCUDA_ARCH="$cudaArch" `
+          -DUSE_MMAP=ON `
+          -DUSE_SENTENCEPIECE=ON `
+          -DPY_API=ON
+      env:
+        CUDA_PATH: ${{ steps.cuda-toolkit.outputs.CUDA_PATH }}
+    
+    - name: Build (CUDA Release)
+      run: |
+        cd build-cuda
+        cmake --build . --config Release --parallel $env:NUMBER_OF_PROCESSORS
+    
+    - name: Prepare Release Package (CUDA)
+      shell: bash
+      run: |
+        VERSION="${{ steps.version.outputs.version }}"
+        
+        mkdir -p release-cuda/bin
+        mkdir -p release-cuda/ftllm
+        mkdir -p release-cuda/web
+        mkdir -p release-cuda/docs
+        
+        # Copy executables - ftllm.exe to root, others to bin/
+        for exe in build-cuda/Release/*.exe; do
+          name=$(basename "$exe")
+          if [ "$name" = "ftllm.exe" ]; then
+            cp "$exe" release-cuda/
+          else
+            cp "$exe" release-cuda/bin/
+          fi
+        done
+        
+        # Copy Python module (.pyd)
+        cp build-cuda/Release/*.pyd release-cuda/ftllm/ || true
+        
+        # Copy fastllm_tools.dll (ctypes native library)
+        if [ -f "build-cuda/tools/ftllm/fastllm_tools.dll" ]; then
+          cp build-cuda/tools/ftllm/fastllm_tools.dll release-cuda/ftllm/
+        fi
+        
+        # Copy VC++ runtime
+        if [ -d "runtime_libs/vcrt" ]; then
+          cp runtime_libs/vcrt/*.dll release-cuda/bin/
+        fi
+        
+        # Copy CUDA runtime DLLs
+        CUDA_BIN="${CUDA_PATH}/bin"
+        if [ -d "${CUDA_BIN}" ]; then
+          cp "${CUDA_BIN}/cublas64_"*.dll release-cuda/bin/ 2>/dev/null || true
+          cp "${CUDA_BIN}/cublasLt64_"*.dll release-cuda/bin/ 2>/dev/null || true
+          cp "${CUDA_BIN}/cudart64_"*.dll release-cuda/bin/ 2>/dev/null || true
+        fi
+        
+        # For CUDA 13.x, DLLs might be in bin/x64
+        CUDA_BIN_X64="${CUDA_PATH}/bin/x64"
+        if [ -d "${CUDA_BIN_X64}" ]; then
+          cp "${CUDA_BIN_X64}/cublas64_"*.dll release-cuda/bin/ 2>/dev/null || true
+          cp "${CUDA_BIN_X64}/cublasLt64_"*.dll release-cuda/bin/ 2>/dev/null || true
+          cp "${CUDA_BIN_X64}/cudart64_"*.dll release-cuda/bin/ 2>/dev/null || true
+        fi
+        
+        # Copy Python tools from source (exclude root __init__.py; it will be generated)
+        while IFS= read -r -d '' srcFile; do
+          relPath="${srcFile#tools/fastllm_pytools/}"
+          if [ "$relPath" = "__init__.py" ]; then
+            continue
+          fi
+          mkdir -p "release-cuda/ftllm/$(dirname "$relPath")"
+          cp "$srcFile" "release-cuda/ftllm/$relPath"
+        done < <(find tools/fastllm_pytools -type f -print0)
+        
+        # Generate __init__.py with correct version
+        printf '%s\n' \
+          '__all__ = ["llm"]' \
+          '' \
+          'try:' \
+          '    from importlib.metadata import version' \
+          '    __version__ = version("ftllm")' \
+          'except:' \
+          '    try:' \
+          '        __version__ = version("ftllm-rocm")' \
+          '    except:' \
+          '        __version__ = "'"${VERSION}"'"' \
+          > release-cuda/ftllm/__init__.py
+        
+        # Copy __main__.py for python -m ftllm (keep identical to source)
+        cp tools/fastllm_pytools/__main__.py release-cuda/ftllm/__main__.py
+        
+        # Copy web resources
+        cp -r example/webui/web/* release-cuda/web/
+        
+        # Copy docs (only top-level docs/*.md; exclude 使用说明.md for root)
+        for md in docs/*.md; do
+          if [ "$(basename "$md")" != "使用说明.md" ]; then
+            cp "$md" release-cuda/docs/
+          fi
+        done
+        cp README*.md release-cuda/docs/
+        
+        # Copy 使用说明.md to root
+        if [ -f "docs/使用说明.md" ]; then
+          cp docs/使用说明.md release-cuda/
+        fi
+      env:
+        CUDA_PATH: ${{ steps.cuda-toolkit.outputs.CUDA_PATH }}
+    
+    - name: Upload CUDA Artifact
+      uses: actions/upload-artifact@v7  # 自动使用 v7.x 最新版本
+      with:
+        name: fastllm-win-x64-cuda-${{ steps.version.outputs.version }}
+        path: release-cuda/
+        retention-days: 30
+
+  release:
+    name: Create Release
+    needs: [build-cpu, build-cuda]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+      pull-requests: write
+    
+    steps:
+    - name: Checkout for version
+      uses: actions/checkout@v7  # 自动使用 v7.x 最新版本
+      with:
+        submodules: true
+        fetch-depth: 0
+    
+    - name: Get version and submodule info
+      id: version
+      run: |
+        VERSION=$(sed -n 's/.*version\s*=\s*"\([^"]*\)".*/\1/p' tools/scripts/setup.py)
+        echo "version=${VERSION}" >> $GITHUB_OUTPUT
+        
+        # 获取上游最新 commit
+        git remote add upstream https://github.com/ztxz16/fastllm.git 2>/dev/null || true
+        git fetch upstream --quiet
+        UPSTREAM_COMMIT=$(git rev-parse upstream/master 2>/dev/null | cut -c1-7)
+        UPSTREAM_DATE=$(git log -1 --format=%cd --date=short upstream/master 2>/dev/null)
+        echo "upstream_commit=${UPSTREAM_COMMIT}" >> $GITHUB_OUTPUT
+        echo "upstream_date=${UPSTREAM_DATE}" >> $GITHUB_OUTPUT
+        
+        # 获取子模块版本
+        cd third_party/pybind11
+        PYBIND11_VERSION=$(git describe --tags 2>/dev/null || git rev-parse --short HEAD)
+        echo "pybind11_version=${PYBIND11_VERSION}" >> $GITHUB_OUTPUT
+        cd ../..
+        
+        cd third_party/sentencepiece
+        SENTENCEPIECE_VERSION=$(git describe --tags 2>/dev/null || git rev-parse --short HEAD)
+        echo "sentencepiece_version=${SENTENCEPIECE_VERSION}" >> $GITHUB_OUTPUT
+        cd ../..
+        
+        # 获取当前 tag 与上一个 tag 之间的提交
+        PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+        if [ -n "$PREV_TAG" ]; then
+          COMMITS=$(git log --oneline ${PREV_TAG}..HEAD --no-merges -- . ':!.github' 2>/dev/null | head -20)
+        else
+          COMMITS=$(git log --oneline -20 --no-merges -- . ':!.github' 2>/dev/null)
+        fi
+        echo "commits<<EOF" >> $GITHUB_OUTPUT
+        echo "$COMMITS" >> $GITHUB_OUTPUT
+        echo "EOF" >> $GITHUB_OUTPUT
+    
+    - name: Generate release notes
+      id: release_notes
+      shell: bash
+      run: |
+        VERSION="${{ steps.version.outputs.version }}"
+        UPSTREAM_COMMIT="${{ steps.version.outputs.upstream_commit }}"
+        UPSTREAM_DATE="${{ steps.version.outputs.upstream_date }}"
+        PYBIND11="${{ steps.version.outputs.pybind11_version }}"
+        SENTENCEPIECE="${{ steps.version.outputs.sentencepiece_version }}"
+        TAG_NAME="${GITHUB_REF#refs/tags/}"
+        COMMITS="${{ steps.version.outputs.commits }}"
+        
+        {
+          echo "## FastLLM Windows ${TAG_NAME}"
+          echo ""
+          echo "Windows 预编译版本，开箱即用，无需编译环境。"
+          echo ""
+          echo "### 📦 下载说明"
+          echo ""
+          echo "| 文件 | 说明 |"
+          echo "|------|------|"
+          echo "| \`fastllm-win-x64-cpu-*.zip\` | CPU 版本 (无需 GPU) |"
+          echo "| \`fastllm-win-x64-cuda-*.zip\` | CUDA 版本 (需要 NVIDIA GPU) |"
+          echo ""
+          echo "### 🔧 版本信息"
+          echo ""
+          echo "| 组件 | 版本 |"
+          echo "|------|------|"
+          echo "| FastLLM | ${VERSION} |"
+          echo "| 上游同步 | [${UPSTREAM_COMMIT}](https://github.com/ztxz16/fastllm/commit/${UPSTREAM_COMMIT}) (${UPSTREAM_DATE}) |"
+          echo "| pybind11 | ${PYBIND11} |"
+          echo "| sentencepiece | ${SENTENCEPIECE} |"
+          echo "| CUDA Toolkit | 13.1.0 |"
+          echo "| 编译器 | MSVC 2022 |"
+          echo ""
+          echo "### 📝 更新内容"
+          echo ""
+          echo "\`\`\`"
+          echo "${COMMITS}"
+          echo "\`\`\`"
+          echo ""
+          echo "### 🚀 快速开始"
+          echo ""
+          echo "1. 下载对应版本的 ZIP 文件并解压到任意目录"
+          echo "2. 将解压后的根目录（ftllm.exe 所在目录）添加到系统 PATH 环境变量"
+          echo "3. 安装 Python 依赖: \`pip install -r ftllm/requirements.txt\`"
+          echo "4. 运行: \`ftllm webui <模型路径>\` 启动 WebUI"
+          echo ""
+          echo "详细使用说明请参考 [README](https://github.com/Czerror/fastllm-windows#readme)"
+        } > release_notes.md
+        
+        echo "notes_file=release_notes.md" >> $GITHUB_OUTPUT
+    
+    - name: Download CPU artifact
+      uses: actions/download-artifact@v8  # 自动使用 v8.x 最新版本
+      with:
+        name: fastllm-win-x64-cpu-${{ steps.version.outputs.version }}
+        path: fastllm-win-x64-cpu-release
+      continue-on-error: true
+    
+    - name: Download CUDA artifact
+      uses: actions/download-artifact@v8  # 自动使用 v8.x 最新版本
+      with:
+        name: fastllm-win-x64-cuda-${{ steps.version.outputs.version }}
+        path: fastllm-win-x64-cuda-release
+      continue-on-error: true
+    
+    - name: Create ZIP archives
+      run: |
+        VERSION="${{ steps.version.outputs.version }}"
+        [ -d "fastllm-win-x64-cpu-release" ] && zip -r "fastllm-win-x64-cpu-v${VERSION}.zip" fastllm-win-x64-cpu-release
+        [ -d "fastllm-win-x64-cuda-release" ] && zip -r "fastllm-win-x64-cuda-v${VERSION}.zip" fastllm-win-x64-cuda-release
+    
+    - name: Create GitHub Release
+      uses: softprops/action-gh-release@v3  # 自动使用 v3.x 最新版本
+      with:
+        files: |
+          fastllm-win-x64-cpu-*.zip
+          fastllm-win-x64-cuda-*.zip
+        draft: false
+        prerelease: false
+        body_path: release_notes.md
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    
+    - name: Cleanup old releases (keep latest 2)
+      uses: actions/github-script@v9
+      with:
+        script: |
+          // 保留最新 2 个 release,删除更早的(不删除 tag)
+          const keep = 2;
+          const releases = await github.paginate(github.rest.repos.listReleases, {
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            per_page: 100
+          });
+          const published = releases.filter((release) => !release.draft);
+          for (const release of published.slice(keep)) {
+            console.log(`Deleting release ${release.tag_name} (${release.id})`);
+            await github.rest.repos.deleteRelease({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              release_id: release.id
+            });
+          }

@@ -1,0 +1,30 @@
+diff --git a/src/models/basellm.cpp b/src/models/basellm.cpp
+index 47b677f7..ee0545eb 100644
+--- a/src/models/basellm.cpp
++++ b/src/models/basellm.cpp
+@@ -19,6 +19,25 @@
+ #endif
+ 
+ namespace fastllm {
++    // ============================================================================
++    // 日志回调系统实现
++    // ============================================================================
++    static LogCallback g_logCallback = nullptr;
++
++    void SetLogCallback(LogCallback callback) {
++        g_logCallback = callback;
++    }
++
++    LogCallback GetLogCallback() {
++        return g_logCallback;
++    }
++
++    void EmitLog(const LogData& logData) {
++        if (g_logCallback) {
++            g_logCallback(logData);
++        }
++    }
++
+     namespace {
+         static bool NeedRepeatPenalty(const GenerationConfig &config) {
+             float diff = config.repeat_penalty - 1.0f;
