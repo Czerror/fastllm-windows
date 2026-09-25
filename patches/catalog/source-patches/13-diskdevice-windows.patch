@@ -1,0 +1,135 @@
+diff --git a/src/devices/disk/diskdevice.cpp b/src/devices/disk/diskdevice.cpp
+index 872a31d4..b51c5b5a 100644
+--- a/src/devices/disk/diskdevice.cpp
++++ b/src/devices/disk/diskdevice.cpp
+@@ -16,8 +16,103 @@
+ #include <memory>
+ #include <mutex>
+ #include <set>
++#ifdef _WIN32
++#include <io.h>
++#include <fcntl.h>
++#include <windows.h>
++
++typedef long long ssize_t;
++
++static int DiskWinOpen(const char *path, int flags) {
++    return _open(path, flags | _O_BINARY);
++}
++
++static int DiskWinClose(int fd) {
++    return _close(fd);
++}
++
++static ssize_t DiskWinPRead(int fd, void *buf, size_t count, long long offset) {
++    long long cur = _lseeki64(fd, 0, SEEK_CUR);
++    if (_lseeki64(fd, offset, SEEK_SET) < 0) {
++        return -1;
++    }
++    ssize_t total = 0;
++    while ((size_t)total < count) {
++        int got = _read(fd, (char*)buf + total, (unsigned int)(count - (size_t)total));
++        if (got <= 0) {
++            break;
++        }
++        total += got;
++    }
++    _lseeki64(fd, cur, SEEK_SET);
++    return total;
++}
++
++static void *DiskWinMmap(void *addr, size_t length, int prot, int flags, int fd, long long offset) {
++    HANDLE h = (HANDLE)_get_osfhandle(fd);
++    if (h == INVALID_HANDLE_VALUE) {
++        return (void*)-1;
++    }
++    HANDLE mapping = CreateFileMappingA(h, nullptr, PAGE_READONLY, 0, 0, nullptr);
++    if (mapping == nullptr) {
++        return (void*)-1;
++    }
++    void *p = MapViewOfFile(mapping, FILE_MAP_READ, (DWORD)((unsigned long long)offset >> 32), (DWORD)offset, length);
++    CloseHandle(mapping);
++    return p == nullptr ? (void*)-1 : p;
++}
++
++static int DiskWinMunmap(void *addr, size_t length) {
++    return UnmapViewOfFile(addr) ? 0 : -1;
++}
++
++static int DiskWinMadvise(void *addr, size_t length, int advice) {
++    return 0;
++}
++
++static int DiskWinPosixMemalign(void **memptr, size_t alignment, size_t size) {
++    // Windows 上直接 IO 路径不会启用；为保证 free() 兼容，按普通 malloc 分配
++    void *p = malloc(size == 0 ? 1 : size);
++    if (p == nullptr) {
++        return ENOMEM;
++    }
++    *memptr = p;
++    return 0;
++}
++
++static int DiskWinPosixFadvise(int fd, long long offset, long long len, int advice) {
++    return 0;
++}
++
++static long DiskWinPageSize() {
++    return 4096;
++}
++
++#define open DiskWinOpen
++#define close DiskWinClose
++#define pread DiskWinPRead
++#define mmap DiskWinMmap
++#define munmap DiskWinMunmap
++#define madvise DiskWinMadvise
++#define posix_memalign DiskWinPosixMemalign
++#define posix_fadvise DiskWinPosixFadvise
++#define sysconf(x) DiskWinPageSize()
++#ifndef PROT_READ
++#define PROT_READ 1
++#endif
++#ifndef MAP_PRIVATE
++#define MAP_PRIVATE 2
++#endif
++#ifndef MAP_FAILED
++#define MAP_FAILED ((void*)-1)
++#endif
++#ifndef POSIX_FADV_WILLNEED
++#define POSIX_FADV_WILLNEED 3
++#endif
++#else
+ #include <sys/mman.h>
+ #include <unistd.h>
++#endif
+ #include <unordered_map>
+ #include <unordered_set>
+ 
+@@ -251,7 +346,7 @@ namespace fastllm {
+             size_t done = 0;
+             while (done < requiredBytes) {
+                 ssize_t ret = pread(fd, buffer + done, bufferBytes - done,
+-                                    (off_t)(alignedOffset + done));
++                                    (long long)(alignedOffset + done));
+                 if (ret < 0) {
+                     if (errno == EINTR) {
+                         continue;
+@@ -561,7 +656,7 @@ namespace fastllm {
+             AssertInFastLLM(bytes <= std::numeric_limits<size_t>::max() - delta,
+                             "Disk Linear mmap range is too large.\n");
+             mappedBytes = (size_t)bytes + delta;
+-            mapped = mmap(nullptr, mappedBytes, PROT_READ, MAP_PRIVATE, fd, (off_t)alignedOffset);
++            mapped = mmap(nullptr, mappedBytes, PROT_READ, MAP_PRIVATE, fd, (long long)alignedOffset);
+             if (mapped == MAP_FAILED) {
+                 mapped = nullptr;
+                 mappedBytes = 0;
+@@ -595,7 +690,7 @@ namespace fastllm {
+             return;
+         }
+         int fd = GetDiskFileCache().Get(part.fileName);
+-        posix_fadvise(fd, (off_t)(part.fileOffset + offset), (off_t)bytes, POSIX_FADV_WILLNEED);
++        posix_fadvise(fd, (long long)(part.fileOffset + offset), (long long)bytes, POSIX_FADV_WILLNEED);
+     }
+ 
+     static size_t DiskPartRows(const DiskWeightPart &part) {
