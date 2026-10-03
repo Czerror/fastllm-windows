@@ -1,0 +1,64 @@
+diff --git a/include/models/basellm.h b/include/models/basellm.h
+index 66de5efe..103c3cf2 100644
+--- a/include/models/basellm.h
++++ b/include/models/basellm.h
+@@ -7,2 +7,3 @@
+ #include "template.h"
++#include "utils/inference_stats.h"
+ 
+@@ -54,2 +55,8 @@ namespace fastllm {
+ 
++        // 推理统计相关
++        std::chrono::high_resolution_clock::time_point startTime;
++        std::chrono::high_resolution_clock::time_point firstTokenTimePoint;
++        bool firstTokenReceived = false;
++        int outputTokenCount = 0;
++
+         int cacheLen = 0;
+@@ -61,2 +68,5 @@ namespace fastllm {
+         void TryRecordPagedCache(basellm *model);
++
++        // 获取推理统计信息
++        InferenceStatsInfo GetStats() const;
+     };
+diff --git a/src/models/basellm.cpp b/src/models/basellm.cpp
+index 47b677f7..0985e565 100644
+--- a/src/models/basellm.cpp
++++ b/src/models/basellm.cpp
+@@ -420,2 +420,20 @@ namespace fastllm {
+ 
++    InferenceStatsInfo ResponseContext::GetStats() const {
++        InferenceStatsInfo stats;
++        stats.promptTokens = generationConfig.input_token_length;
++        stats.outputTokens = outputTokenCount;
++
++        auto now = std::chrono::high_resolution_clock::now();
++        stats.totalTime = std::chrono::duration<double>(now - startTime).count();
++
++        if (firstTokenReceived) {
++            stats.firstTokenTime = std::chrono::duration<double>(firstTokenTimePoint - startTime).count();
++            double genTime = stats.totalTime - stats.firstTokenTime;
++            if (genTime > 0 && stats.outputTokens > 0) {
++                stats.speed = stats.outputTokens / genTime;
++            }
++        }
++        return stats;
++    }
++
+     ResponseContext::~ResponseContext() {
+@@ -2269,2 +2287,7 @@ namespace fastllm {
+                         ctx->resultTokenQueue.push(curRet);
++                                        ctx->outputTokenCount++;
++                                        if (!ctx->firstTokenReceived) {
++                                            ctx->firstTokenReceived = true;
++                                            ctx->firstTokenTimePoint = std::chrono::high_resolution_clock::now();
++                                        }
+                         QueueGeneratedResultLogits(ctx, logits, i);
+@@ -2740,2 +2763,7 @@ namespace fastllm {
+                                     it.second->resultTokenQueue.push(curRet);
++                                    it.second->outputTokenCount++;
++                                    if (!it.second->firstTokenReceived) {
++                                        it.second->firstTokenReceived = true;
++                                        it.second->firstTokenTimePoint = std::chrono::high_resolution_clock::now();
++                                    }
+                                     QueueGeneratedResultLogits(it.second, logits, i);

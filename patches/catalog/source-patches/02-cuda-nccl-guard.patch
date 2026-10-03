@@ -1,0 +1,97 @@
+diff --git a/src/devices/multicuda/fastllm-multicuda.cu b/src/devices/multicuda/fastllm-multicuda.cu
+index a2ad5d94..70426053 100644
+--- a/src/devices/multicuda/fastllm-multicuda.cu
++++ b/src/devices/multicuda/fastllm-multicuda.cu
+@@ -32,7 +32,9 @@
+ #include "devices/cpu/computeutils.h"
+ 
+ #include <cuda_runtime.h>
++#ifndef FASTLLM_NO_NCCL
+ #include <nccl.h>
++#endif
+ 
+ #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 700 // support tensor core
+ #include "mma.h"
+@@ -44,7 +46,7 @@ using namespace nvcuda;
+ #endif
+ 
+ #define checkCudaErrors(message, val) showError(val, message, __FILE__, __LINE__)
+-extern void showError(cudaError_t result, char const* const message, const char* const file, int const line);
++// showError is declared in fastllm-cuda.cuh
+ 
+ __global__ static void FastllmCudaPackMoeEpPacketKernel(
+         uint8_t *packet, const uint8_t *hidden, size_t hiddenBytes,
+@@ -1974,6 +1976,7 @@ cudaStream_t *GetFastllmStream(int id) {
+     return &streams[id];
+ }
+ 
++#ifndef FASTLLM_NO_NCCL
+ // 全局变量存储通信器
+ // Key: deviceId, Value: ncclComm_t
+ static std::map<int, ncclComm_t> g_ncclComms;
+@@ -2941,7 +2944,7 @@ void FastllmNcclAllReduce(void* data, void* dest, int count, int dataType, int d
+     }
+ 
+     // 2. 映射数据类型 (Fastllm DataType -> NCCL type)
+-    ncclDataType_t ncclType = ncclFloat; 
++    ncclDataType_t ncclType = ncclFloat;
+     if (dataType == fastllm::DataType::FLOAT16) {
+         ncclType = ncclHalf;
+     } else if (dataType == fastllm::DataType::BFLOAT16) {
+@@ -3029,3 +3032,56 @@ void FastllmNcclReduce(void* data, void* dest, int count, int dataType, int root
+         checkCudaErrors("Error: CUDA error when synchronizing NCCL reduce!", syncState);
+     }
+ }
++
++#else
++// NCCL 不可用时的桩实现 (Windows 等平台)
++namespace {
++    size_t FastllmNcclStubDataTypeBytes(int dataType) {
++        if (dataType == fastllm::DataType::FLOAT32) {
++            return sizeof(float);
++        } else if (dataType == fastllm::DataType::FLOAT16 || dataType == fastllm::DataType::BFLOAT16) {
++            return sizeof(uint16_t);
++        }
++        return 0;
++    }
++}
++
++bool FastllmInitNccl(const std::vector<int>& devices) {
++    return false;
++}
++
++bool FastllmInitNcclGraphPeer(int srcDevice, int dstDevice) {
++    return false;
++}
++
++bool FastllmNcclGraphPeerCopy(int dstDevice, void *dst, int srcDevice, const void *src, size_t bytes) {
++    return false;
++}
++
++void FastllmNcclBroadcast(void* data, int count, int dataType, int root, int deviceId) {
++}
++
++void FastllmNcclBroadcastFrom(void* send, void* recv, int count, int dataType, int root, int deviceId) {
++    if (send == nullptr || recv == nullptr || count <= 0 || send == recv) {
++        return;
++    }
++    size_t bytes = (size_t)count * FastllmNcclStubDataTypeBytes(dataType);
++    if (bytes > 0) {
++        FastllmCudaCopyFromDeviceToDevice(recv, send, bytes);
++    }
++}
++
++void FastllmNcclAllReduce(void* data, void* dest, int count, int dataType, int deviceId) {
++    if (data == nullptr || dest == nullptr || count <= 0 || data == dest) {
++        return;
++    }
++    size_t bytes = (size_t)count * FastllmNcclStubDataTypeBytes(dataType);
++    if (bytes > 0) {
++        FastllmCudaCopyFromDeviceToDevice(dest, data, bytes);
++    }
++}
++
++void FastllmNcclReduce(void* data, void* dest, int count, int dataType, int root, int deviceId) {
++    FastllmNcclAllReduce(data, dest, count, dataType, deviceId);
++}
++#endif
