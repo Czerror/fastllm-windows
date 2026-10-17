@@ -1,0 +1,46 @@
+diff --git a/include/models/basellm.h b/include/models/basellm.h
+index 66de5efe..29621a32 100644
+--- a/include/models/basellm.h
++++ b/include/models/basellm.h
+@@ -30,6 +30,41 @@ namespace fastllm {
+         ResponseContextErrorNone = 0, ResponseContextErrorPromptTooLong
+     };
+ 
++
++    // ---- 日志回调系统 ----
++    enum class LogLevel { Debug, Info, Warn, Error };
++    enum class LogEvent {
++        KVCacheConfig, KVCacheHit, KVCacheMiss,
++        PrefillProgress, PrefillComplete, BatchStatus,
++        ModelLoadProgress, ModelLoadComplete, WarmUp, General
++    };
++    struct LogData {
++        LogEvent event = LogEvent::General;
++        LogLevel level = LogLevel::Info;
++        std::string tag;
++        std::string message;
++        struct {
++            int current = 0;
++            int total = 0;
++            float speed = 0;
++            float elapsed = 0;
++            int active = 0;
++            int pending = 0;
++            int contextLen = 0;
++            int tokenLimit = 0;
++            int promptLimit = 0;
++            int maxBatch = 0;
++            int cacheEntries = 0;
++            float skipPercent = 0;
++            float kvCacheMB = 0;
++            bool isComplete = false;
++            std::string device;
++        } data;
++    };
++    using LogCallback = std::function<void(const LogData&)>;
++    void SetLogCallback(LogCallback callback);
++    LogCallback GetLogCallback();
++    void EmitLog(const LogData& log);
+     class basellm;
+ 
+     struct ResponseContext {
