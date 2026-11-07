@@ -1,0 +1,12 @@
+diff --git a/include/devices/cpu/alivethreadpool.h b/include/devices/cpu/alivethreadpool.h
+index dd2a51ce..c6b2a31b 100644
+--- a/include/devices/cpu/alivethreadpool.h
++++ b/include/devices/cpu/alivethreadpool.h
+@@ -9,6 +9,7 @@
+ #include <cstdint>
+ #include <thread>
+ #include <vector>
++#include <chrono>
+ #if defined(_WIN32) || defined(_WIN64)
+ #include <Windows.h>
+ #else

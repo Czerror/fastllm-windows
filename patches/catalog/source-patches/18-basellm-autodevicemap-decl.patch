@@ -1,0 +1,9 @@
+diff --git a/include/models/basellm.h b/include/models/basellm.h
+index 66de5efe..df788d46 100644
+--- a/include/models/basellm.h
++++ b/include/models/basellm.h
+@@ -369,2 +369,4 @@ namespace fastllm {
+         virtual void WarmUp() {}; // 预热
++        virtual void ApplyAutoDeviceMap();
++        bool IsMoeModel() const;
+ 

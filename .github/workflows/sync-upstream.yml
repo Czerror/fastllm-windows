@@ -1,0 +1,156 @@
+name: Sync Upstream
+
+on:
+  schedule:
+    # 每小时 UTC 整点检查上游更新
+    - cron: '0 * * * *'
+  workflow_dispatch:  # 支持手动触发
+
+permissions:
+  contents: write
+  actions: write  # 同步完成后触发 build-dev.yml 双版本构建
+
+jobs:
+  sync:
+    name: Sync with upstream
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v7
+      with:
+        fetch-depth: 0
+        submodules: false
+        token: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Configure Git
+      run: |
+        git config user.name "github-actions[bot]"
+        git config user.email "github-actions[bot]@users.noreply.github.com"
+        # 存在 upstream/master 与 origin/master 两个远程跟踪分支时,
+        # 未限定的 "master" 会产生歧义, 默认以 origin 为准
+        git config checkout.defaultRemote origin
+
+    - name: Add upstream remote
+      run: |
+        git remote add upstream https://github.com/ztxz16/fastllm.git || true
+        git fetch upstream
+
+    - name: Sync upstream to dev branch
+      id: sync_dev
+      run: |
+        echo "=== Syncing upstream to dev branch ==="
+
+        # 准备分支：dev 跟踪 upstream/master
+        git fetch upstream
+        git fetch origin dev || true
+
+        BEFORE_COMMIT=""
+        if git show-ref --verify --quiet refs/remotes/origin/dev; then
+          git checkout dev
+          git pull origin dev
+          BEFORE_COMMIT=$(git rev-parse HEAD)
+        else
+          git checkout -b dev upstream/master
+          BEFORE_COMMIT=$(git rev-parse HEAD)
+        fi
+
+        # 将 dev 分支重置到 upstream/master（保持纯净上游代码）
+        git checkout upstream/master -- .
+        git reset --hard upstream/master
+
+        # 从重置前的 dev 提交恢复本仓库的 patches 目录（补丁独立存放,不混入上游源码）
+        git checkout "$BEFORE_COMMIT" -- patches || true
+
+        # 覆盖 workflows 为本仓库默认分支版本（CI 基础设施例外,其余文件均与上游同步）
+        DEFAULT_BRANCH="master"
+        if git symbolic-ref --short refs/remotes/origin/HEAD >/dev/null 2>&1; then
+            DEFAULT_BRANCH=$(git symbolic-ref --short refs/remotes/origin/HEAD | sed 's@^origin/@@')
+        fi
+        git fetch origin "$DEFAULT_BRANCH"
+        git checkout "origin/$DEFAULT_BRANCH" -- .github/workflows || true
+
+        # 暂存全部变更; 以“同步后 dev 树 vs 同步前 dev 树”判断是否真有更新
+        # (不能比较 index vs upstream: patches/ 必然产生差异, 会导致每次同步都触发构建)
+        git add -A
+        if [ "$(git write-tree)" != "$(git rev-parse "$BEFORE_COMMIT"^{tree})" ]; then
+          git commit -m "chore: sync upstream/master (补丁独立存放于 patches/,不混入上游源码)"
+          echo "dev_synced=true" >> $GITHUB_OUTPUT
+          echo "✅ dev branch synced with upstream/master (patches/ isolated)"
+        else
+          git reset --hard "$BEFORE_COMMIT"
+          echo "dev_synced=false" >> $GITHUB_OUTPUT
+          echo "ℹ️ dev branch already up to date"
+        fi
+
+        # dev 被重置为 upstream/master，需强制推送（保留本地旧提交可在 reflog 找回）
+        git push --force-with-lease -u origin dev
+
+    - name: Update submodules on master
+      id: submodules
+      run: |
+        echo "=== Checking submodule updates on master ==="
+
+        # 显式从 origin/master 创建/重置本地 master, 避免与 upstream/master 歧义
+        git checkout -B master origin/master
+        git reset --hard origin/master
+
+        # checkout 未初始化子模块，需先 init; 子模块管理遵循上游:
+        # 仅管理上游定义且当前使用的 pybind11; sentencepiece 上游未定义,
+        # dev 构建已默认关闭 USE_SENTENCEPIECE, 不再添加/管理该子模块
+        git submodule update --init third_party/pybind11
+        UPSTREAM_PYBIND11=$(git ls-tree upstream/master third_party/pybind11 | awk '{print $3}')
+        if [ -n "$UPSTREAM_PYBIND11" ]; then
+          if ! git -C third_party/pybind11 fetch --depth 1 origin "$UPSTREAM_PYBIND11" 2>/dev/null; then
+            git -C third_party/pybind11 fetch --depth 1 https://github.com/pybind/pybind11.git "$UPSTREAM_PYBIND11"
+          fi
+          git -C third_party/pybind11 checkout --detach "$UPSTREAM_PYBIND11"
+          git add third_party/pybind11
+          echo "✓ third_party/pybind11 已对齐上游提交 $UPSTREAM_PYBIND11"
+        else
+          echo "⚠ 未取到上游 pybind11 提交, 保持当前版本"
+        fi
+
+        # 检查是否有变更
+        if git diff --quiet; then
+          echo "Submodules are up to date"
+          echo "updated=false" >> $GITHUB_OUTPUT
+        else
+          echo "Submodules updated"
+          # 仅提交已跟踪的子模块指针变更,避免把 dev 步骤残留的子模块目录误带入 master
+          git add -u
+          git commit -m "chore: Auto-update submodules" || true
+          git push origin master
+          echo "updated=true" >> $GITHUB_OUTPUT
+        fi
+
+    - name: Trigger dev CPU+CUDA rebuild
+      if: steps.sync_dev.outputs.dev_synced == 'true'
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        # 上游有更新并已同步 dev 后, 自动触发 CPU+CUDA 双版本构建
+        # 注意: 仓库同时存在 origin/upstream 两个远程, gh 可能解析到 upstream,
+        # 因此显式使用 ${{ github.repository }} 走 REST API, 并校验 HTTP 204
+        sleep 5
+        status=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
+          -H "Authorization: Bearer $GH_TOKEN" \
+          -H "Accept: application/vnd.github+json" \
+          -H "Content-Type: application/json" \
+          -d '{"ref":"dev","inputs":{"build_cpu":"true","build_cuda":"true","cuda_arch":"75;80;86;89;90;120"}}' \
+          "https://api.github.com/repos/${{ github.repository }}/actions/workflows/build-dev.yml/dispatches")
+        if [ "$status" != "204" ]; then
+          echo "dispatch failed with HTTP $status"
+          exit 1
+        fi
+        echo "✓ build-dev.yml dispatched on dev (CPU+CUDA)"
+
+    - name: Create sync summary
+      run: |
+        echo "=== Sync Summary ==="
+        echo "• dev branch: upstream code + Windows patches (for review/testing)"
+        echo "• master branch: production code (submodules only)"
+
+    outputs:
+      dev_synced: ${{ steps.sync_dev.outputs.dev_synced }}
+      submodules_updated: ${{ steps.submodules.outputs.updated }}

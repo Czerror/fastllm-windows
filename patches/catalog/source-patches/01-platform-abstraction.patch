@@ -1,0 +1,435 @@
+diff --git a/include/devices/cpu/alivethreadpool.h b/include/devices/cpu/alivethreadpool.h
+index dd2a51ce..ce1d2405 100644
+--- a/include/devices/cpu/alivethreadpool.h
++++ b/include/devices/cpu/alivethreadpool.h
+@@ -9,22 +9,14 @@
+ #include <cstdint>
+ #include <thread>
+ #include <vector>
+-#if defined(_WIN32) || defined(_WIN64)
+-#include <Windows.h>
+-#else
+-#include <unistd.h>
+-#endif
++#include <chrono>
+ #include <cstring>
+ 
++#include "utils/fastllm-platform-memory.h"
++
+ namespace fastllm {
+     static void barrier() {
+-#ifdef __aarch64__
+-        asm volatile("dmb ish");
+-#elif defined(_WIN32) || defined(_WIN64)
+-        MemoryBarrier();
+-#else
+-        __asm__ __volatile__("": : :"memory");
+-#endif
++        FASTLLM_MEMORY_BARRIER();
+     }
+     struct MultiThreadBaseOp {
+         virtual void Run() = 0;
+diff --git a/include/fastllm.h b/include/fastllm.h
+index 6dbc0c70..209ffde1 100644
+--- a/include/fastllm.h
++++ b/include/fastllm.h
+@@ -5,6 +5,8 @@
+ #ifndef TEST_FASTLLM_H
+ #define TEST_FASTLLM_H
+ 
++#include "utils/fastllm-platform-compiler.h"
++
+ #define _USE_MATH_DEFINES
+ #include <vector>
+ #include <cstdint>
+diff --git a/include/utils/avxMath.h b/include/utils/avxMath.h
+index 9893b83d..f5fb2a3a 100644
+--- a/include/utils/avxMath.h
++++ b/include/utils/avxMath.h
+@@ -31,14 +31,7 @@
+ 
+ #include <immintrin.h>
+ 
+-/* yes I know, the top of this file is quite ugly */
+-# if defined(_MSC_VER)
+-# define ALIGN32_BEG __declspec(align(32))
+-# define ALIGN32_END
+-# else
+-# define ALIGN32_BEG
+-# define ALIGN32_END __attribute__((aligned(32)))
+-# endif
++#include "fastllm-platform-compiler.h"
+ 
+ /* __m128 is ugly to write */
+ typedef __m256  v8sf; // vector of 8 float (avx)
+@@ -99,31 +92,17 @@ typedef union imm_xmm_union {
+   v4si xmm[2];
+ } imm_xmm_union;
+ 
+-# if defined(_MSC_VER)
+ #define COPY_IMM_TO_XMM(imm_, xmm0_, xmm1_) {    \
+-    __declspec((aligned(32))) imm_xmm_union u;   \
+-    u.imm = imm_;                	             \
+-    xmm0_ = u.xmm[0];                            \
+-    xmm1_ = u.xmm[1];                            \
+-}
+-
+-#define COPY_XMM_TO_IMM(xmm0_, xmm1_, imm_) {                       \
+-    __declspec((aligned(32))) imm_xmm_union u;  \
+-    u.xmm[0]=xmm0_; u.xmm[1]=xmm1_; imm_ = u.imm; \
+-  }
+-# else
+-#define COPY_IMM_TO_XMM(imm_, xmm0_, xmm1_) {    \
+-    imm_xmm_union u __attribute__((aligned(32)));  \
++    ALIGN32_BEG imm_xmm_union u ALIGN32_END;     \
+     u.imm = imm_;                                \
+     xmm0_ = u.xmm[0];                            \
+     xmm1_ = u.xmm[1];                            \
+ }
+ 
+-#define COPY_XMM_TO_IMM(xmm0_, xmm1_, imm_) {                       \
+-    imm_xmm_union u __attribute__((aligned(32))); \
++#define COPY_XMM_TO_IMM(xmm0_, xmm1_, imm_) {    \
++    ALIGN32_BEG imm_xmm_union u ALIGN32_END;     \
+     u.xmm[0]=xmm0_; u.xmm[1]=xmm1_; imm_ = u.imm; \
+   }
+-# endif
+ 
+ 
+ #define AVX2_BITOP_USING_SSE2(fn) \
+diff --git a/include/utils/utils.h b/include/utils/utils.h
+index 669ee81c..5e26307c 100644
+--- a/include/utils/utils.h
++++ b/include/utils/utils.h
+@@ -6,6 +6,8 @@
+ #ifndef FASTLLM_UTILS_H
+ #define FASTLLM_UTILS_H
+ 
++#include "fastllm-platform.h"
++
+ #include <cmath>
+ #include <algorithm>
+ #include <map>
+@@ -17,6 +19,8 @@
+ #include <vector>
+ #include <deque>
+ #include <array>
++#include <sstream>
++#include <iomanip>
+ #ifndef __CUDACC__
+ #if defined(__GNUC__) && __GNUC__ < 8 && !defined(__clang__)
+ #include <experimental/filesystem>
+@@ -25,12 +29,6 @@
+ #endif
+ #endif
+ 
+-#if defined(_WIN32) or defined(_WIN64)
+-#include <Windows.h>
+-#else
+-#include <unistd.h>
+-#endif
+-
+ #ifdef __AVX__
+ #include "immintrin.h"
+ #ifdef __GNUC__
+@@ -52,32 +50,23 @@
+ #endif
+ 
+ #ifndef __aarch64__
+-// Intrinsics for CPUID
+-#if defined(_MSC_VER)
+-    #include <intrin.h> // For __cpuid, __cpuidex, _xgetbv
+-#elif defined(__GNUC__) || defined(__clang__)
+-    #include <cpuid.h> // For __get_cpuid, __get_cpuid_count
+-    #include <x86intrin.h> // For _xgetbv (usually included by cpuid.h or available)
+-    // GCC/Clang might not have _xgetbv as an intrinsic like MSVC,
+-    // or it might be in a different header.
+-    // If _xgetbv is not found, you might need to implement it with inline assembly.
+-    #ifndef _XCR_XFEATURE_ENABLED_MASK // Often defined with _xgetbv
++// CPUID intrinsics provided by fastllm-platform-cpuid.h
++// _xgetbv fallback for old GCC (<8) without <x86intrin.h>
++#if FASTLLM_GCC_OR_CLANG
++    #ifndef _XCR_XFEATURE_ENABLED_MASK
+     #define _XCR_XFEATURE_ENABLED_MASK 0
+     #if __GNUC__ < 8 and !defined(USE_ROCM)
+     static uint64_t _xgetbv(uint32_t xcr_index) {
+         uint32_t eax, edx;
+         __asm__ __volatile__ (
+             "xgetbv"
+-            : "=a" (eax), "=d" (edx)  // Output operands: eax, edx
+-            : "c" (xcr_index)         // Input operand: ecx (xcr_index)
+-            :                         // Clobbered registers (none explicitly clobbered by xgetbv beyond outputs)
++            : "=a" (eax), "=d" (edx)
++            : "c" (xcr_index)
+         );
+         return ((uint64_t)edx << 32) | eax;
+     }
+     #endif
+     #endif
+-#else
+-    #warning "CPUID detection not implemented for this compiler."
+ #endif
+ #endif // ifndef __aarch64__
+ 
+@@ -145,16 +134,11 @@ namespace fastllm {
+ 
+         CPUInstructInfo() {
+ #ifndef __aarch64__
+-#if defined(_MSC_VER) || defined(__GNUC__) || defined(__clang__)
+             std::array<int, 4> regs; // For EAX, EBX, ECX, EDX
+-            
++             
+             // Step 1: Check OSXSAVE bit (CPUID EAX=1, ECX bit 27)
+             bool os_supports_xsave = false;
+-            #if defined(_MSC_VER)
+-            __cpuid(regs.data(), 1);
+-            #else 
+-            __get_cpuid(1, (unsigned int*)&regs[0], (unsigned int*)&regs[1], (unsigned int*)&regs[2], (unsigned int*)&regs[3]);
+-            #endif
++            FASTLLM_CPUID(regs.data(), 1);
+             if (regs[2] & (1 << 27)) {
+                 os_supports_xsave = true;
+             }
+@@ -188,11 +172,7 @@ namespace fastllm {
+             
+             if (os_avx_enabled) {
+                 // CPUID with EAX=7, ECX=0 for extended features
+-                #if defined(_MSC_VER)
+-                __cpuidex(regs.data(), 7, 0);
+-                #else 
+-                __get_cpuid_count(7, 0, (unsigned int*)&regs[0], (unsigned int*)&regs[1], (unsigned int*)&regs[2], (unsigned int*)&regs[3]);
+-                #endif
++                FASTLLM_CPUINDEX(regs.data(), 7, 0);
+                 
+                 // AVX2: EAX=7, ECX=0, EBX bit 5
+                 hasAVX2 = (regs[1] & (1 << 5)) != 0;
+@@ -215,11 +195,7 @@ namespace fastllm {
+                     }
+ 
+                     // AVX512_BF16: EAX=7, ECX=1, EAX bit 5
+-                    #if defined(_MSC_VER)
+-                    __cpuidex(regs.data(), 7, 1);
+-                    #else 
+-                    __get_cpuid_count(7, 1, (unsigned int*)&regs[0], (unsigned int*)&regs[1], (unsigned int*)&regs[2], (unsigned int*)&regs[3]);
+-                    #endif
++                    FASTLLM_CPUINDEX(regs.data(), 7, 1);
+                     hasAVX512BF16 = (regs[0] & (1 << 5)) != 0;
+                     
+                     // Dependencies
+@@ -229,20 +205,32 @@ namespace fastllm {
+                     hasAMX = hasAMX && hasAVX512BF16;
+                 }
+             }
+-#endif             
+-            std::string x[2] = {"OFF", "ON"};
+-            printf("CPU Instruction Info: ");
+-            printf("[AVX2: %s] ", x[hasAVX2].c_str());
+-            printf("[AVX512F: %s] ", x[hasAVX512F].c_str());
+-            printf("[AVX512_VNNI: %s] ", x[hasAVX512VNNI].c_str());
+-            printf("[AVX512_BF16: %s] ", x[hasAVX512BF16].c_str());
+-            printf("[AMX: %s] ", x[hasAMX].c_str()); // Print AMX status
+-            printf("\n");
+-#endif 
++            // 不在构造函数中打印，由调用方决定是否输出
++#endif
++        }
++
++        // 获取 CPU 指令集信息字符串（供外部模块使用）
++        std::string getInfoString() const {
++            std::ostringstream oss;
++            auto flag = [](bool v) { return v ? "ON" : "OFF"; };
++            oss << "[AVX2: " << flag(hasAVX2) << "] "
++                << "[AVX512F: " << flag(hasAVX512F) << "] "
++                << "[AVX512_VNNI: " << flag(hasAVX512VNNI) << "] "
++                << "[AVX512_BF16: " << flag(hasAVX512BF16) << "] "
++                << "[AMX: " << flag(hasAMX) << "]";
++            return oss.str();
++        }
++
++        // 获取各指令集支持状态（供外部模块格式化输出）
++        struct Flags {
++            bool avx2, avx512f, avx512vnni, avx512bf16, amx;
++        };
++        Flags getFlags() const {
++            return {hasAVX2, hasAVX512F, hasAVX512VNNI, hasAVX512BF16, hasAMX};
+         }
+     };
+ 
+-    // static CPUInstructInfo cpuInstructInfo;
++    extern CPUInstructInfo cpuInstructInfo;
+ 
+     struct FP16ToFP32Manager {
+         float dict[65536];
+@@ -386,6 +374,30 @@ namespace fastllm {
+             }
+             printf("Total: %f s.\n", s);
+         }
++
++        // 获取耗时记录（供外部模块格式化输出）
++        const std::map<std::string, float>& getRecords() const {
++            return v;
++        }
++
++        // 获取总耗时
++        float getTotal() const {
++            float s = 0;
++            for (auto &it: v) s += it.second;
++            return s;
++        }
++
++        // 获取格式化字符串（供外部模块使用）
++        std::string getInfoString() const {
++            std::ostringstream oss;
++            float s = 0;
++            for (auto &it: v) {
++                oss << it.first << ": " << std::fixed << std::setprecision(4) << it.second << " s\n";
++                s += it.second;
++            }
++            oss << "Total: " << std::fixed << std::setprecision(4) << s << " s";
++            return oss.str();
++        }
+     };
+ 
+ #ifdef __AVX__
+diff --git a/src/devices/cpu/amx.cpp b/src/devices/cpu/amx.cpp
+index c6f0f787..8e13df5c 100644
+--- a/src/devices/cpu/amx.cpp
++++ b/src/devices/cpu/amx.cpp
+@@ -34,41 +34,32 @@ typedef struct __tile_config {
+ } __tilecfg;
+ 
+ #include "fastllm.h"
+-#include "utils.h"
++
++// AMX is primarily supported on Linux; Windows AMX support requires different approach
++#if !defined(_WIN32) && !defined(_WIN64)
+ // ARCH_REQ_XCOMP_PERM 系统调用
+ #define ARCH_GET_XCOMP_PERM     0x1022
+ #define ARCH_REQ_XCOMP_PERM     0x1023
+ #define XFEATURE_XTILECFG       17
+ #define XFEATURE_XTILEDATA      18
+ #include <sys/syscall.h>
++#endif
+ 
+ namespace fastllm {
+-    extern CPUInstructInfo cpuInstructInfo;
+     extern void AddBiasAVX512(float *outputData, float *biasData, int n, int k, int st, int end);
+ 
+-    static void AddBiasAMX(float *outputData, float *biasData, int n, int k, int st, int end) {
+-        if (biasData == nullptr) {
+-            return;
+-        }
+-        if (cpuInstructInfo.hasAVX512F) {
+-            AddBiasAVX512(outputData, biasData, n, k, st, end);
+-            return;
+-        }
+-        for (int i = 0; i < n; i++) {
+-            for (int j = st; j < end; j++) {
+-                outputData[i * k + j] += biasData[j];
+-            }
+-        }
+-    }
+-
+     void InitAMX() {
+-#if defined(__AMX_TILE__)
++#if defined(__AMX_TILE__) && !defined(_WIN32) && !defined(_WIN64)
+         if (syscall(SYS_arch_prctl, ARCH_REQ_XCOMP_PERM, XFEATURE_XTILEDATA) != 0) {
+             printf("init amx failed.\n");
+             exit(0);
+         } else {
+             printf("enable amx finish.\n");
+         }
++#elif defined(_WIN32) || defined(_WIN64)
++        // AMX initialization on Windows is handled differently
++        // Windows 11 24H2+ supports AMX but requires different API
++        printf("AMX on Windows: not supported yet.\n");
+ #else
+         printf("enable amx failed.\n");
+ #endif
+@@ -112,8 +103,8 @@ namespace fastllm {
+         _tile_loadconfig(&tile_cfg);
+ 
+         // 预分配 A 和 C 的临时块
+-        uint16_t *A_block = (uint16_t *)aligned_alloc(64, TILE_M * TILE_K * sizeof(uint16_t));
+-        float *C_block = (float *)aligned_alloc(64, TILE_M * TILE_N * sizeof(float));
++        uint16_t *A_block = (uint16_t *)FASTLLM_ALIGNED_MALLOC(TILE_M * TILE_K * sizeof(uint16_t), 64);
++        float *C_block = (float *)FASTLLM_ALIGNED_MALLOC(TILE_M * TILE_N * sizeof(float), 64);
+         
+         int width_k = end - st;
+         int num_m_blocks = ceil_div(M, TILE_K); // 用于计算 PackedB 的偏移
+@@ -167,8 +158,8 @@ namespace fastllm {
+         }
+         
+         _tile_release();
+-        free(A_block);
+-        free(C_block);
++        FASTLLM_ALIGNED_FREE(A_block);
++        FASTLLM_ALIGNED_FREE(C_block);
+ #else
+         printf("Unsupport AMX.\n");
+         exit(0);
+@@ -502,7 +493,7 @@ namespace fastllm {
+ 
+         // 2. 分配对齐的内存 (用于Packed B)
+         // 实际场景中，这里应该检查 input Weight 是否已经是 Packing 过的格式
+-        uint16_t *packedB = (uint16_t *)aligned_alloc(64, packed_size_bytes);
++        uint16_t *packedB = (uint16_t *)FASTLLM_ALIGNED_MALLOC(packed_size_bytes, 64);
+         if (!packedB) return false;
+ 
+         // 3. 调用 Repack
+@@ -519,10 +510,10 @@ namespace fastllm {
+ 
+ 
+         // 5. 添加偏置
+-        AddBiasAMX(outputData, biasData, n, k, st, end);
++        AddBiasAVX512(outputData, biasData, n, k, st, end);
+ 
+         // 6. 释放临时 buffer
+-        free(packedB);
++        FASTLLM_ALIGNED_FREE(packedB);
+         
+         return true;
+ #else
+diff --git a/third_party/gguf/gguf.cpp b/third_party/gguf/gguf.cpp
+index e27d0de0..6e7e4c1a 100644
+--- a/third_party/gguf/gguf.cpp
++++ b/third_party/gguf/gguf.cpp
+@@ -736,11 +736,7 @@ namespace fastllm {
+             }
+ 
+             FILE *fi = fopen(fileName.c_str(), "rb");
+-    #if defined(_WIN32) || defined(_WIN64)
+-            _fseeki64(fi, offset, 0);
+-    #else
+-            fseek(fi, offset, 0);
+-    #endif
++            FASTLLM_FSEEK(fi, offset, SEEK_SET);
+             int ret = fread(weight->cpuData, 1, ggml_nbytes(tensor), fi);
+             fclose(fi);
+ /*
+@@ -773,11 +769,7 @@ namespace fastllm {
+             oriData.resize(len);
+ 
+             FILE *fi = fopen(fileName.c_str(), "rb");
+-    #if defined(_WIN32) || defined(_WIN64)
+-            _fseeki64(fi, offset, 0);
+-    #else
+-            fseek(fi, offset, 0);
+-    #endif
++            FASTLLM_FSEEK(fi, offset, SEEK_SET);
+             int ret = fread(oriData.data(), 1, ggml_nbytes(tensor), fi);
+             fclose(fi);
+ 
+@@ -797,11 +789,7 @@ namespace fastllm {
+             floatData.resize(weight->Count(0));
+ 
+             FILE *fi = fopen(fileName.c_str(), "rb");
+-    #if defined(_WIN32) || defined(_WIN64)
+-            _fseeki64(fi, offset, 0);
+-    #else
+-            fseek(fi, offset, 0);
+-    #endif
++            FASTLLM_FSEEK(fi, offset, SEEK_SET);
+             int ret = fread(oriData.data(), 1, ggml_nbytes(tensor), fi);
+             fclose(fi);
+ 
