@@ -1,0 +1,23 @@
+diff --git a/.gitmodules b/.gitmodules
+index bb608042..a46b30ab 100644
+--- a/.gitmodules
++++ b/.gitmodules
+@@ -1,4 +1,17 @@
+ [submodule "third_party/pybind11"]
+ 	path = third_party/pybind11
+ 	url = https://github.com/pybind/pybind11.git
+-	branch = v2.10.5
++        branch = master
++[submodule "third_party/sentencepiece"]
++        path = third_party/sentencepiece
++        url = https://github.com/google/sentencepiece.git
++        branch = master
++[submodule "third_party/nlohmann"]
++	path = third_party/nlohmann
++	url = https://github.com/nlohmann/json.git
++[submodule "third_party/minja"]
++	path = third_party/minja
++	url = https://github.com/google/minja.git
++[submodule "third_party/flashinfer"]
++	path = third_party/flashinfer
++	url = https://github.com/flashinfer-ai/flashinfer

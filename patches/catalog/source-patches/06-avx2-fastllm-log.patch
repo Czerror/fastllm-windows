@@ -1,0 +1,92 @@
+diff --git a/src/devices/cpu/avx2.cpp b/src/devices/cpu/avx2.cpp
+index 32bcf3a4..7227c18c 100644
+--- a/src/devices/cpu/avx2.cpp
++++ b/src/devices/cpu/avx2.cpp
+@@ -632,7 +632,7 @@ namespace fastllm {
+ 
+ #ifdef __AVX2__
+     void print_m256i_epi16_v2(const char* name, __m256i vec) {
+-        int16_t values[16] __attribute__((aligned(32)));
++        alignas(32) int16_t values[16];
+         _mm256_store_si256((__m256i*)values, vec);
+         
+         printf("%s: ", name);
+@@ -664,7 +664,7 @@ namespace fastllm {
+         printf("]\n");
+     }
+ 
+-    __attribute__((always_inline)) inline __m128i fp32_to_bf16_vec(__m256 float_vals) {
++    FASTLLM_FORCE_INLINE __m128i fp32_to_bf16_vec(__m256 float_vals) {
+         __m256i shifted = _mm256_srli_epi32(_mm256_castps_si256(float_vals), 16);
+         __m128i lo = _mm256_castsi256_si128(shifted);
+         __m128i hi = _mm256_extracti128_si256(shifted, 1);
+diff --git a/src/fastllm.cpp b/src/fastllm.cpp
+index 84bc5411..7e3ce515 100644
+--- a/src/fastllm.cpp
++++ b/src/fastllm.cpp
+@@ -8,6 +8,8 @@
+ 
+ #include "executor.h"
+ 
++#include "models/basellm.h"  // 日志回调系统
++
+ #include <cstring>
+ #include <cstdlib>
+ #include <cmath>
+@@ -3228,20 +3230,8 @@ namespace fastllm {
+             if (lowMemMode && this->embeddingNames.find(name) != this->embeddingNames.end()) {
+                 if (dataType == DataType::FLOAT32 || dataType == DataType::BFLOAT16 || dataType == DataType::FLOAT16) {
+                     weight[name].fileName = fileName;
+-#if defined(_WIN32) or defined(_WIN64)
+-                    weight[name].filePos = _ftelli64(buffer.f);
+-#else
+-#ifdef USE_MMAP
+-                    weight[name].filePos =  buffer.tell();
+-#else
+-                    weight[name].filePos = ftell(buffer.f);
+-#endif
+-#endif
+-#ifdef USE_MMAP
+-                    buffer.seek(weight[name].GetBytes(), SEEK_CUR);
+-#else
+-                    fseek(buffer.f, weight[name].GetBytes(), SEEK_CUR);
+-#endif
++                    weight[name].filePos = (int64_t)FASTLLM_FTELL(buffer.f);
++                    FASTLLM_FSEEK(buffer.f, weight[name].GetBytes(), SEEK_CUR);
+                 } else {
+                     ErrorInFastLLM("Error: embedding's type should be float32 or bfloat16.\n");
+                 }
+@@ -3323,7 +3313,15 @@ namespace fastllm {
+                 }
+             }
+ 
+-            printf("Load (%d / %d) \r", (i + 1), len);
++            if (GetLogCallback()) {
++                LogData log;
++                log.event = LogEvent::ModelLoadProgress;
++                log.level = LogLevel::Info;
++                log.tag = "model";
++                log.data.current = i + 1;
++                log.data.total = len;
++                EmitLog(log);
++            }
+             fflush(stdout);
+             if (i + 1 == len ||
+                 (i + 1) * 100 / std::max(1, len) != i * 100 / std::max(1, len)) {
+@@ -3333,8 +3331,14 @@ namespace fastllm {
+         if (len == 0) {
+             ReportModelLoadProgress("weights_load", 1, 1);
+         }
+-        printf("\n");
+-        fflush(stdout);
++        if (GetLogCallback()) {
++            LogData log;
++            log.event = LogEvent::ModelLoadComplete;
++            log.level = LogLevel::Info;
++            log.tag = "model";
++            log.data.total = len;
++            EmitLog(log);
++        }
+         return;
+     }
+ 
